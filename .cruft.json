@@ -1,0 +1,15 @@
+{
+  "template": "https://github.com/schlarpc/rust-flake",
+  "commit": "f80f55088e9a526874b1ce02141f05c68d82c749",
+  "checkout": "template",
+  "context": {
+    "cookiecutter": {
+      "project_name": "kmsrsos",
+      "_template": "https://github.com/schlarpc/rust-flake",
+      "_output_dir": "/home/schlarpc",
+      "_repo_dir": "/home/schlarpc/.cookiecutters/rust-flake",
+      "_checkout": "template"
+    }
+  },
+  "directory": null
+}
