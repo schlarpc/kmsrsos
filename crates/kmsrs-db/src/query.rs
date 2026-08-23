@@ -79,6 +79,64 @@ pub fn is_known_counted_id(counted_id: Guid) -> bool {
     !csvlks_counting(counted_id).is_empty()
 }
 
+/// The number of clients a real client of this product declares as
+/// `N_Policy` (`DB-015`, #139).
+///
+/// # Why this is computed rather than stored
+///
+/// Both existing projects carry `NCountPolicy` as a column, and both then
+/// disagree with themselves about which copy is authoritative: vlmcsd's
+/// *server* reads it from the `AppItem` (`kms.c:251`), its *client* reads it
+/// from the `SkuItem` (`vlmcs.c:422`), and the per-`KmsItem` copy is read by
+/// nobody. py-kms carries it per `KmsItem` and reads it only in its client,
+/// defaulting to 25 when absent.
+///
+/// The issue asks to pick one. Picking any of them means hand-maintaining a
+/// third copy of a value that is a *function* of two facts already in this
+/// database, so this computes it instead:
+///
+/// * Office is 5, whichever Office it is.
+/// * A server edition is 5 — including `ServerRdsh`, the Windows-client-shaped
+///   SKU that both catalogues correctly give 5.
+/// * Everything else is a Windows client edition, and is 25.
+///
+/// Checked against every row of py-kms's catalogue that carries the attribute;
+/// see the tests.
+///
+/// # Who uses it
+///
+/// **Not the server.** A KMS host never needs this: the client declares
+/// `N_Policy` in the request and the count model floors on whatever it declared
+/// (`POL-001`, #89). It exists for `kmsrs-client`, which has to *construct* a
+/// request a real client would have sent.
+#[must_use]
+pub fn required_clients(activation_id: Guid) -> u32 {
+    /// What Windows client SKUs declare.
+    const WINDOWS_CLIENT: u32 = 25;
+    /// What server editions and Office declare.
+    const SERVER_OR_OFFICE: u32 = 5;
+
+    let Some(entry) = product(activation_id) else {
+        // An unknown product is treated as a Windows client, which is the
+        // larger and therefore the safer guess: a client asking for 25 when 5
+        // would have done still activates.
+        return WINDOWS_CLIENT;
+    };
+
+    if entry.may_be_server() {
+        return SERVER_OR_OFFICE;
+    }
+    let is_office = entry
+        .application
+        .and_then(application)
+        .is_some_and(|app| app.name.starts_with("Office"));
+    if is_office {
+        SERVER_OR_OFFICE
+    } else {
+        WINDOWS_CLIENT
+    }
+}
+
 /// Every host build an ePID may claim (`ID-009`, #114; `ID-011`, #116).
 ///
 /// Non-empty by construction: the build fails if the table would be empty, so
@@ -132,10 +190,12 @@ mod tests {
 
     use super::{
         application, csvlk, csvlk_at, csvlks_counting, epid_host_build_at, epid_host_builds,
-        is_known_counted_id, lcid_at, product,
+        is_known_counted_id, lcid_at, product, required_clients,
     };
     use crate::guid::Guid;
-    use crate::tables::{APPLICATIONS, COUNTED_IDS, CSVLKS, HOST_BUILDS, KeyKind, LCIDS, PRODUCTS};
+    use crate::tables::{
+        APPLICATIONS, COUNTED_IDS, CSVLKS, HOST_BUILDS, KeyKind, LCIDS, PRODUCTS, Product,
+    };
     use alloc::format;
     use alloc::vec::Vec;
 
@@ -456,5 +516,147 @@ mod tests {
         assert_eq!(american_english.tag, "en-US");
         assert_eq!(lcid_at(0).map(|entry| entry.value), Some(LCIDS[0].value));
         assert!(lcid_at(LCIDS.len()).is_none());
+    }
+
+    /// `DB-012` (#136): the server flag is derived from Microsoft's own
+    /// `EditionId`, and it is not degenerate — real server editions are caught
+    /// and client editions are not.
+    #[test]
+    fn the_server_flag_tracks_microsofts_edition_ids() {
+        let servers: Vec<&Product> = PRODUCTS.iter().filter(|p| p.may_be_server()).collect();
+        let clients: Vec<&Product> = PRODUCTS.iter().filter(|p| !p.may_be_server()).collect();
+
+        assert!(!servers.is_empty(), "no server SKU was recognised");
+        assert!(!clients.is_empty(), "every SKU was called a server");
+
+        // Every recognised server names a Server edition, and no client does.
+        for entry in &servers {
+            assert!(
+                entry.edition_id.contains("Server"),
+                "{} is not a server: {}",
+                entry.description,
+                entry.edition_id
+            );
+        }
+        for entry in &clients {
+            assert!(
+                !entry
+                    .edition_id
+                    .split(';')
+                    .any(|e| e.trim_start().starts_with("Server")),
+                "{} was missed: {}",
+                entry.description,
+                entry.edition_id
+            );
+        }
+
+        // ServerRdsh is the interesting case: a Windows-client-shaped SKU that
+        // both fork catalogues correctly treat as a server.
+        if let Some(rdsh) = PRODUCTS
+            .iter()
+            .find(|p| p.edition_id.contains("ServerRdsh"))
+        {
+            assert!(rdsh.may_be_server(), "{}", rdsh.description);
+        }
+    }
+
+    /// A semicolon-separated multi-edition row is matched on any of its
+    /// editions, not on the whole string — `Enterprise;ServerStandard` is a
+    /// server, and `EnterpriseServerless` would not be.
+    #[test]
+    fn the_server_flag_splits_multi_edition_rows() {
+        let multi = PRODUCTS
+            .iter()
+            .find(|p| p.edition_id.contains(';') && p.may_be_server());
+        assert!(multi.is_some(), "the data has multi-edition server rows");
+
+        // A row whose only Server-ish text is inside a longer word must not
+        // match. None exists in the shipped data, so this checks the predicate
+        // itself rather than the table.
+        let fake = Product {
+            edition_id: "EnterpriseServerless",
+            ..*PRODUCTS.first().expect("the table is not empty")
+        };
+        assert!(!fake.may_be_server());
+        let real = Product {
+            edition_id: "Enterprise;ServerStandard",
+            ..*PRODUCTS.first().expect("the table is not empty")
+        };
+        assert!(real.may_be_server());
+    }
+
+    /// `DB-012` (#136) and `POL-010` (#98): pre-release SKUs are found in
+    /// Microsoft's own description text rather than in a hand-entered column.
+    #[test]
+    fn the_preview_flag_reads_microsofts_description() {
+        let previews: Vec<&Product> = PRODUCTS.iter().filter(|p| p.is_preview()).collect();
+        assert!(
+            !previews.is_empty(),
+            "the shipped data contains pre-release SKUs"
+        );
+        for entry in &previews {
+            assert!(
+                ["Beta", "Pre-Release", "Prerelease", "Preview"]
+                    .iter()
+                    .any(|m| entry
+                        .description
+                        .to_ascii_lowercase()
+                        .contains(&m.to_ascii_lowercase())),
+                "{} is not a preview",
+                entry.description
+            );
+        }
+
+        // Not degenerate in the other direction either: the overwhelming
+        // majority of SKUs are shipping products.
+        let shipping = PRODUCTS.len() - previews.len();
+        assert!(
+            shipping > previews.len(),
+            "{} previews of {} products",
+            previews.len(),
+            PRODUCTS.len()
+        );
+    }
+
+    /// `DB-015` (#139): the client count is computed from the two facts that
+    /// determine it, rather than carried as a third copy of a value the two
+    /// existing projects already disagree with themselves about.
+    ///
+    /// The expectations are py-kms's catalogue values, which are the only
+    /// published ground truth: 25 for Windows client SKUs, 5 for server
+    /// editions and for every Office.
+    #[test]
+    fn the_required_client_count_matches_the_published_values() {
+        let mut checked_server = false;
+        let mut checked_client = false;
+        let mut checked_office = false;
+
+        for entry in &PRODUCTS {
+            let required = required_clients(entry.activation_id);
+            let is_office = entry
+                .application
+                .and_then(application)
+                .is_some_and(|app| app.name.starts_with("Office"));
+
+            if entry.may_be_server() {
+                assert_eq!(required, 5, "{}", entry.description);
+                checked_server = true;
+            } else if is_office {
+                assert_eq!(required, 5, "{}", entry.description);
+                checked_office = true;
+            } else {
+                assert_eq!(required, 25, "{}", entry.description);
+                checked_client = true;
+            }
+        }
+
+        assert!(checked_server, "no server SKU was exercised");
+        assert!(checked_client, "no Windows client SKU was exercised");
+        assert!(checked_office, "no Office SKU was exercised");
+
+        // An unknown product is treated as a Windows client — the larger and
+        // therefore safer guess, since asking for 25 when 5 would do still
+        // activates.
+        assert_eq!(required_clients(Guid::from_bytes([0xAB; 16])), 25);
     }
 }

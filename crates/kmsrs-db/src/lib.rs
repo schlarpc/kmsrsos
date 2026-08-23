@@ -41,7 +41,7 @@ pub use date::Date;
 pub use guid::Guid;
 pub use query::{
     application, csvlk, csvlk_at, csvlks_counting, epid_host_build_at, epid_host_build_count,
-    epid_host_builds, is_known_counted_id, lcid_at, lcid_count, product,
+    epid_host_builds, is_known_counted_id, lcid_at, lcid_count, product, required_clients,
 };
 pub use tables::{
     APPLICATIONS, Application, COUNTED_IDS, CSVLKS, CountedId, Csvlk, EPID_HOST_BUILDS,
