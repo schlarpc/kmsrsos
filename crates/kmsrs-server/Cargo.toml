@@ -20,6 +20,10 @@ kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# Deterministic entropy for the host-state tests. Enabling `testing` here does
+# not enable it for the binary: under resolver 3 a dev-dependency's features do
+# not propagate to the normal dependency graph (ARCH-003, #3).
+kmsrs-proto = { workspace = true, features = ["testing"] }
 # Used only by `tests/workspace_invariants.rs`, which reads the workspace's own
 # manifests and lockfile to check the structural invariants of ARCH-001,
 # ARCH-008, ARCH-016 and SEC-001.

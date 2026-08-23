@@ -10,6 +10,10 @@
 //! the bounded worker budget with the KMS listener (`OBS-014`, #190), which is
 //! easier to guarantee when there is one budget and one crate that owns it.
 
+pub mod host;
+
+pub use host::{Host, RequestContext};
+
 /// The name the emulator reports for itself. Used by the log sink and the web
 /// UI; never sent on the wire, where the only identity that exists is the ePID
 /// (`ID-001`, #106).
