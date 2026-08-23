@@ -74,10 +74,18 @@ jobs:
       - name: Software bill of materials
         run: |
           set -euo pipefail
-          nix run nixpkgs#cargo-cyclonedx -- --format json --all
-          find . -name '*.cdx.json' -not -path './out/*' \
-            -exec cp {} "out/sbom-${{ matrix.name }}.cdx.json" ';'
-          test -s "out/sbom-${{ matrix.name }}.cdx.json"
+          # Through the dev shell: `cargo-cyclonedx` shells out to `rustc` for
+          # the target triple, so it needs the toolchain on PATH, and running it
+          # from the shell means flake.lock pins the version.
+          nix develop -c cargo cyclonedx --format json --describe crate
+          # One SBOM per crate is emitted; the two that ship are the two that
+          # are attached, named after the binary rather than after the crate so
+          # that a reader can match them to what they downloaded.
+          cp crates/kmsrs-server/kmsrs-server.cdx.json \
+             "out/sbom-kmsrsos-${{ matrix.name }}.cdx.json"
+          cp crates/kmsrs-client/kmsrs-client.cdx.json \
+             "out/sbom-kmsrs-client-${{ matrix.name }}.cdx.json"
+          test -s "out/sbom-kmsrsos-${{ matrix.name }}.cdx.json"
 
       # Two builds of one revision are the same bytes. Checked on every pull
       # request too (SEC-010, #202; CFG-008, #173), and again here because a

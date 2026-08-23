@@ -702,6 +702,11 @@
               pkgs.cargo-deny
               pkgs.cargo-expand
               pkgs.cargo-xwin
+              # `SEC-010` (#202): the release emits a CycloneDX SBOM per
+              # artifact. In the dev shell rather than fetched ad hoc, so it is
+              # pinned by flake.lock like everything else — and so it has the
+              # `rustc` it shells out to, which it does not on its own.
+              pkgs.cargo-cyclonedx
               nix-direnv.packages.${system}.default
             ]
             # `SEC-006` (#198): `ci/no-file-access.sh` runs the real binary
