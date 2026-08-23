@@ -116,8 +116,8 @@ mod tests {
                 .as_ref()
                 .is_none_or(|name| !name.is_empty())
         );
-        let _ = observed.stderr_is_terminal;
-        let _ = observed.no_color;
+        let _: bool = observed.stderr_is_terminal;
+        let _: bool = observed.no_color;
     }
 
     /// The explicit choices ignore the environment entirely; only `auto`

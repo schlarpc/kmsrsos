@@ -252,7 +252,7 @@ mod tests {
             }
 
             let Ok(nonce) = entropy.next_u32() else {
-                let _ = self.events.try_push(Event::EntropyFailed);
+                let _: Result<_, _> = self.events.try_push(Event::EntropyFailed);
                 return Outcome::Close {
                     reason: CloseReason::Refused,
                 };
@@ -260,7 +260,7 @@ mod tests {
 
             let bytes = nonce.to_le_bytes();
             output[..bytes.len()].copy_from_slice(&bytes);
-            let _ = self.events.try_push(Event::Answered { nonce });
+            let _: Result<_, _> = self.events.try_push(Event::Answered { nonce });
             Outcome::Send { len: bytes.len() }
         }
 

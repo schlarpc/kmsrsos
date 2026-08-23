@@ -465,3 +465,119 @@ fn a_counted_id_that_is_not_a_product_row_still_names_something() {
         "it should name the host key that counts it: {line}"
     );
 }
+
+/// `SEC-012` (#204): what the protocol layer refused reaches the log.
+///
+/// The core is sans-io and reports refusals as events with a discriminant. That
+/// is worth nothing on its own: a driver that never drains the ring produces
+/// exactly the silence `handle_error() -> pass` produces. These check the other
+/// half — that the mapping from event to log line exists, is total, and puts
+/// refusals somewhere an operator will see them.
+mod protocol_events {
+    use super::{Logger, json_logger};
+    use kmsrs_proto::kms::hresult::HResult;
+    use kmsrs_proto::kms::version::Version;
+    use kmsrs_proto::wire::connection::{ConnectionEvent, RejectReason};
+    use kmsrs_proto::wire::fault::NcaStatus;
+    use kmsrs_proto::wire::syntax::TransferSyntax;
+    use kmsrs_server::config::operational::{LogFormat, LogLevel};
+    use kmsrs_server::log::Severity;
+
+    /// One of every variant, so adding a variant without deciding its severity
+    /// is a compile error here rather than an event that logs as `{:?}`.
+    fn every_variant() -> Vec<ConnectionEvent> {
+        vec![
+            ConnectionEvent::Bound {
+                syntax: TransferSyntax::Ndr64,
+                context_id: 1,
+            },
+            ConnectionEvent::ContextAdded {
+                syntax: TransferSyntax::Ndr32,
+                context_id: 0,
+            },
+            ConnectionEvent::Activated {
+                version: Version::V6,
+                mac_verified: None,
+            },
+            ConnectionEvent::Refused {
+                result: HResult::from_wire(0xC004_F042),
+            },
+            ConnectionEvent::Faulted {
+                status: NcaStatus::ProtocolError,
+            },
+            ConnectionEvent::Rejected {
+                reason: RejectReason::AuthenticationAttempted,
+            },
+            ConnectionEvent::Lost { count: 7 },
+        ]
+    }
+
+    #[test]
+    fn every_protocol_event_has_a_name_and_a_detail() {
+        for event in every_variant() {
+            let (_, name, detail) = Logger::describe_connection_event(&event);
+            assert!(!name.is_empty(), "{event:?} logs under an empty name");
+            assert!(!detail.is_empty(), "{event:?} logs with no detail at all");
+            assert!(
+                !name.contains(' '),
+                "{name} is a sentence, not an event name; the field is meant to \
+                 be grepped and aggregated"
+            );
+        }
+    }
+
+    /// A refusal that only appears at `debug` is a refusal nobody sees: the
+    /// default level is `info`, and the whole complaint about
+    /// `handle_error() -> pass` is that it is invisible at every level.
+    #[test]
+    fn refusals_are_visible_at_the_default_level() {
+        let logger = json_logger();
+        for event in every_variant() {
+            let (severity, name, detail) = Logger::describe_connection_event(&event);
+            let visible = logger.format_message(severity, name, &detail).is_some();
+            let must_be_visible = matches!(
+                event,
+                ConnectionEvent::Refused { .. }
+                    | ConnectionEvent::Faulted { .. }
+                    | ConnectionEvent::Rejected { .. }
+                    | ConnectionEvent::Lost { .. }
+            );
+            assert_eq!(
+                visible,
+                must_be_visible,
+                "{event:?} is {} at the default level",
+                if visible { "visible" } else { "invisible" }
+            );
+        }
+    }
+
+    /// The one event that says the others are incomplete must outrank them.
+    #[test]
+    fn a_lost_event_report_is_an_error() {
+        let (severity, name, detail) =
+            Logger::describe_connection_event(&ConnectionEvent::Lost { count: 3 });
+        assert_eq!(severity, Severity::Error);
+        assert_eq!(name, "events-lost");
+        assert!(
+            detail.contains('3'),
+            "the count is the only actionable part and it is missing: {detail}"
+        );
+    }
+
+    /// A detail string goes into a JSON field, so it has to survive being one.
+    #[test]
+    fn protocol_event_details_are_valid_json_strings() {
+        let logger = Logger::with(LogLevel::Debug, LogFormat::Json, false);
+        for event in every_variant() {
+            let (severity, name, detail) = Logger::describe_connection_event(&event);
+            let line = logger
+                .format_message(severity, name, &detail)
+                .expect("debug shows everything");
+            assert!(line.starts_with('{') && line.ends_with('}'), "{line}");
+            assert!(
+                line.matches('"').count().is_multiple_of(2),
+                "unbalanced quotes in {line}"
+            );
+        }
+    }
+}

@@ -16,6 +16,14 @@
 // in a length field is precisely the defect class this crate exists to avoid,
 // and `as` is the operator that produces it (`ARCH-007`, #7; `SEC-003`, #195).
 #![deny(clippy::as_conversions)]
+// `SEC-012` (#204): no discarded `Result` anywhere a byte from the wire can
+// reach. vlmcsd's `handle_error() -> pass` turns a dozen distinct crash paths
+// into one indistinguishable connection reset, invisible at every log level,
+// and `let _ =` is the Rust spelling of the same thing. Denied here rather than
+// in the workspace lint table because `kmsrs-dbgen` and `kmsrs-db`'s build
+// script write into `String`s, where the discarded value is an infallible
+// `fmt::Result` and the discipline buys nothing.
+#![deny(clippy::let_underscore_untyped)]
 
 #[cfg(test)]
 extern crate alloc;

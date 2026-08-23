@@ -202,19 +202,39 @@ pub fn parse(body: &[u8]) -> Result<BindRequest, BindError> {
         for _ in 0..syntax_count {
             let wire = reader.bytes16()?;
             let version = reader.u32()?;
-            let _ = offered.try_push(OfferedSyntax {
-                syntax: TransferSyntax::classify(&wire),
-                version,
-            });
+            // `syntax_count` was checked against the capacity above, so this
+            // cannot fail — and refusing rather than discarding is what makes
+            // it possible to forbid the discarded form outright
+            // (`SEC-012`, #204).
+            if offered
+                .try_push(OfferedSyntax {
+                    syntax: TransferSyntax::classify(&wire),
+                    version,
+                })
+                .is_err()
+            {
+                return Err(BindError::TooManySyntaxes {
+                    declared: syntax_count,
+                });
+            }
         }
 
-        let _ = items.try_push(ContextItem {
-            context_id,
-            abstract_syntax,
-            abstract_version_major: u16::from_le_bytes([major_low, major_high]),
-            abstract_version_minor: u16::from_le_bytes([minor_low, minor_high]),
-            offered,
-        });
+        // Guarded by the `is_full` break at the top of the loop, so the error
+        // is unreachable; stopping is the same outcome that guard produces,
+        // and `declared_items` already records that there was more
+        // (`SEC-012`, #204).
+        if items
+            .try_push(ContextItem {
+                context_id,
+                abstract_syntax,
+                abstract_version_major: u16::from_le_bytes([major_low, major_high]),
+                abstract_version_minor: u16::from_le_bytes([minor_low, minor_high]),
+                offered,
+            })
+            .is_err()
+        {
+            break;
+        }
     }
 
     Ok(BindRequest {
@@ -340,27 +360,48 @@ pub fn decide(request: &BindRequest, ndr64_enabled: bool) -> BindDecision {
     for item in &request.items {
         // Feature negotiation is acknowledged regardless of the abstract
         // syntax, per MS-RPCE. It is not a context to service calls on.
+        // `results` and `request.items` have the same capacity and this loop
+        // walks the latter, so none of these three can fail. A result list
+        // shorter than the context list would be a malformed `bind_ack`, so
+        // stopping is the only honest response if one ever does
+        // (`SEC-012`, #204).
         if let Some(bits) = item.feature_bits() {
-            let _ = results.try_push(ContextResult::negotiate(bits));
+            if results.try_push(ContextResult::negotiate(bits)).is_err() {
+                break;
+            }
             continue;
         }
 
         if !item.names_kms_interface() {
-            let _ = results.try_push(ContextResult::reject(ContextResult::REASON_ABSTRACT_SYNTAX));
+            if results
+                .try_push(ContextResult::reject(ContextResult::REASON_ABSTRACT_SYNTAX))
+                .is_err()
+            {
+                break;
+            }
             continue;
         }
 
         match item.offer_for(preferred) {
             Some(offered) if accepted_context.is_none() => {
-                let _ = results.try_push(ContextResult::accept(preferred_guid, offered.version));
+                if results
+                    .try_push(ContextResult::accept(preferred_guid, offered.version))
+                    .is_err()
+                {
+                    break;
+                }
                 accepted_context = Some(AcceptedContext {
                     context_id: item.context_id,
                     syntax: preferred,
                 });
             }
             _ => {
-                let _ =
-                    results.try_push(ContextResult::reject(ContextResult::REASON_TRANSFER_SYNTAX));
+                if results
+                    .try_push(ContextResult::reject(ContextResult::REASON_TRANSFER_SYNTAX))
+                    .is_err()
+                {
+                    break;
+                }
             }
         }
     }

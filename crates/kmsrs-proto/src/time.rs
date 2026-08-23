@@ -275,11 +275,11 @@ mod tests {
         // one of them reaches this code (SEC-003, #195).
         for ticks in [0, 1, u64::MAX, u64::MAX - 1, UNIX_EPOCH_AS_FILETIME] {
             let value = FileTime::from_ticks(ticks);
-            let _ = value.to_unix_seconds();
-            let _ = value.checked_add(Duration::from_secs(1));
-            let _ = value.checked_sub(Duration::from_secs(1));
-            let _ = value.abs_difference(FileTime::ZERO);
-            let _ = value.abs_difference(FileTime::from_ticks(u64::MAX));
+            let _: Option<i64> = value.to_unix_seconds();
+            let _: Option<FileTime> = value.checked_add(Duration::from_secs(1));
+            let _: Option<FileTime> = value.checked_sub(Duration::from_secs(1));
+            let _: Duration = value.abs_difference(FileTime::ZERO);
+            let _: Duration = value.abs_difference(FileTime::from_ticks(u64::MAX));
         }
     }
 

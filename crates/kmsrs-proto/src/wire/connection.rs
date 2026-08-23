@@ -138,6 +138,20 @@ pub enum ConnectionEvent {
         /// Why.
         reason: RejectReason,
     },
+
+    /// Events were produced faster than the driver drained them
+    /// (`SEC-012`, #204).
+    ///
+    /// The ring is bounded, because an unbounded one is a memory-exhaustion
+    /// vector reachable by anything that can open a connection. Bounded means
+    /// something eventually has to give — and what must *not* give is the
+    /// reader's knowledge that it did. This is emitted last, after the ring has
+    /// drained, so a driver that only iterates `next_event` cannot miss it
+    /// without ignoring a variant it had to match on.
+    Lost {
+        /// How many events were dropped since the last time this was emitted.
+        count: u32,
+    },
 }
 
 /// Why a PDU was rejected outright.
@@ -168,6 +182,28 @@ pub enum RejectReason {
     AuthenticationAttempted,
     /// Reassembly would exceed the fixed buffer (`WIRE-022`, #80).
     ReassemblyOverflow,
+}
+
+/// Push into a bounded buffer, evicting the oldest entry to make room, and say
+/// whether anything was lost (`SEC-012`, #204).
+///
+/// Every call site in this module has already made a full buffer unreachable —
+/// by a guard, by a `retain`, or by the buffer having just been created. The
+/// point is that the compiler cannot tell, and neither can a reader skimming
+/// `let _ = buffer.try_push(x)`. A discarded `Result` is how a dozen distinct
+/// failures become one indistinguishable silence, which is the defect this
+/// issue is named for; writing the outcome down costs nothing and means a lint
+/// can forbid the discarded form outright.
+///
+/// Evicting the *oldest* is the right answer if it is ever reached. The newest
+/// context is the one the client is about to send on, and the newest event is
+/// the one describing what just happened; dropping either in favour of history
+/// would lose the more useful of the two.
+fn push_evicting<T, const N: usize>(buffer: &mut ArrayVec<T, N>, value: T) -> bool {
+    let evicted = buffer.is_full() && buffer.pop_at(0).is_some();
+    // Room exists unless `N == 0`, which no buffer here is. Either way the
+    // caller is told.
+    buffer.try_push(value).is_err() || evicted
 }
 
 /// The state of an association that has not been bound.
@@ -217,7 +253,7 @@ impl Association<Unbound> {
             return (decision, Err(self));
         };
         let mut contexts = ArrayVec::new();
-        let _ = contexts.try_push(accepted);
+        push_evicting(&mut contexts, accepted);
         (
             decision,
             Ok(Association {
@@ -243,7 +279,7 @@ impl Association<Bound> {
             self.state
                 .contexts
                 .retain(|existing| existing.syntax != accepted.syntax);
-            let _ = self.state.contexts.try_push(accepted);
+            push_evicting(&mut self.state.contexts, accepted);
         }
         decision
     }
@@ -330,6 +366,9 @@ pub struct Connection {
     reassembling_context: Option<u16>,
     deadline: Option<Instant>,
     events: ArrayVec<ConnectionEvent, 8>,
+    /// Events the ring could not hold, reported as [`ConnectionEvent::Lost`]
+    /// once it drains (`SEC-012`, #204).
+    lost_events: u32,
     secondary_address: SecondaryAddress,
 }
 
@@ -428,6 +467,7 @@ impl Connection {
             reassembling_context: None,
             deadline: None,
             events: ArrayVec::new(),
+            lost_events: 0,
             secondary_address: SecondaryAddress::default(),
         }
     }
@@ -463,7 +503,23 @@ impl Connection {
             .map_err(|_| Overflow)
     }
 
+    /// Record an event, counting it if the ring is full (`SEC-012`, #204).
+    ///
+    /// The single place events enter the ring, so there is exactly one place
+    /// where "the ring was full" is handled — and it handles it by remembering,
+    /// not by discarding. `let _ = events.try_push(..)` at a dozen call sites
+    /// is how a dozen distinct failures become one indistinguishable silence.
+    fn record(&mut self, event: ConnectionEvent) {
+        if push_evicting(&mut self.events, event) {
+            self.lost_events = self.lost_events.saturating_add(1);
+        }
+    }
+
     /// Take the next event this connection produced.
+    ///
+    /// Yields [`ConnectionEvent::Lost`] once the ring has drained and anything
+    /// was dropped, so a driver that only iterates this cannot miss the loss
+    /// (`SEC-012`, #204).
     ///
     /// `pop_at` rather than a guarded `remove`: `remove` panics when the index
     /// is out of range, and although the `is_empty` check in front of it made
@@ -471,7 +527,11 @@ impl Connection {
     /// the panic survived into the binary (`ARCH-009`, #9). `pop_at` answers
     /// with an `Option`, which is the same check said once.
     pub fn next_event(&mut self) -> Option<ConnectionEvent> {
-        self.events.pop_at(0)
+        if let Some(event) = self.events.pop_at(0) {
+            return Some(event);
+        }
+        let lost = core::mem::replace(&mut self.lost_events, 0);
+        (lost > 0).then_some(ConnectionEvent::Lost { count: lost })
     }
 
     /// When the driver should stop waiting for more input.
@@ -577,7 +637,7 @@ impl Connection {
         // trailer is faulted rather than being treated as stub data, which is
         // what vlmcsd does.
         if header.auth_length.get() != 0 {
-            let _ = self.events.try_push(ConnectionEvent::Rejected {
+            self.record(ConnectionEvent::Rejected {
                 reason: RejectReason::AuthenticationAttempted,
             });
             return self.fault(out, header.call_id.get(), 0, NcaStatus::ProtocolError);
@@ -593,7 +653,7 @@ impl Connection {
 
     /// Refuse a bind outright, saying why, then close.
     fn nak(&mut self, out: &mut [u8], call_id: u32, reason: bind::NakReason) -> Step {
-        let _ = self.events.try_push(ConnectionEvent::Rejected {
+        self.record(ConnectionEvent::Rejected {
             reason: RejectReason::UnsupportedRpcVersion,
         });
         self.inbound.clear();
@@ -613,7 +673,7 @@ impl Connection {
 
     /// Record a rejection and close.
     fn reject(&mut self, reason: RejectReason) -> Step {
-        let _ = self.events.try_push(ConnectionEvent::Rejected { reason });
+        self.record(ConnectionEvent::Rejected { reason });
         self.inbound.clear();
         Step::Close {
             reason: CloseReason::Malformed,
@@ -622,7 +682,7 @@ impl Connection {
 
     /// Emit a fault, and keep the association open.
     fn fault(&mut self, out: &mut [u8], call_id: u32, context_id: u16, status: NcaStatus) -> Step {
-        let _ = self.events.try_push(ConnectionEvent::Faulted { status });
+        self.record(ConnectionEvent::Faulted { status });
         match fault::write(out, call_id, context_id, status) {
             // A fault is a call-level failure, not a connection-level one, so
             // the association survives it (`WIRE-021`, #79).
@@ -653,7 +713,7 @@ impl Connection {
                     self.phase = match outcome {
                         Ok(bound) => {
                             if let Some(accepted) = decision.accepted_context {
-                                let _ = self.events.try_push(ConnectionEvent::Bound {
+                                self.record(ConnectionEvent::Bound {
                                     syntax: accepted.syntax,
                                     context_id: accepted.context_id,
                                 });
@@ -668,7 +728,7 @@ impl Connection {
                     let group = association.assoc_group;
                     let decision = association.alter_context(&request, self.ndr64_enabled);
                     if let Some(accepted) = decision.accepted_context {
-                        let _ = self.events.try_push(ConnectionEvent::ContextAdded {
+                        self.record(ConnectionEvent::ContextAdded {
                             syntax: accepted.syntax,
                             context_id: accepted.context_id,
                         });
@@ -760,7 +820,7 @@ impl Connection {
         if self.reassembly.try_extend_from_slice(body).is_err() {
             self.reassembly.clear();
             self.reassembling_context = None;
-            let _ = self.events.try_push(ConnectionEvent::Rejected {
+            self.record(ConnectionEvent::Rejected {
                 reason: RejectReason::ReassemblyOverflow,
             });
             return self.fault(out, call_id, context_id, NcaStatus::ProtocolError);
@@ -783,7 +843,7 @@ impl Connection {
             // truncated stub would be a wrong one.
             self.reassembly.clear();
             self.reassembling_context = None;
-            let _ = self.events.try_push(ConnectionEvent::Rejected {
+            self.record(ConnectionEvent::Rejected {
                 reason: RejectReason::ReassemblyOverflow,
             });
             return self.fault(out, call_id, context_id, NcaStatus::ProtocolError);
@@ -880,7 +940,7 @@ impl Connection {
                     };
                 };
 
-                let _ = self.events.try_push(ConnectionEvent::Activated {
+                self.record(ConnectionEvent::Activated {
                     version: decoded.version,
                     mac_verified: decoded.mac_verified,
                 });
@@ -899,7 +959,7 @@ impl Connection {
         result: HResult,
         out: &mut [u8],
     ) -> Step {
-        let _ = self.events.try_push(ConnectionEvent::Refused { result });
+        self.record(ConnectionEvent::Refused { result });
         match write_response_pdu(out, call_id, context_id, syntax, result, &[]) {
             Some(len) => Step::Send { len },
             None => Step::Close {

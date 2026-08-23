@@ -34,6 +34,7 @@ use core::fmt::Write as _;
 use kmsrs_policy::events::{Event, Outcome};
 use kmsrs_policy::gate::CLOCK_SKEW_TOLERANCE;
 use kmsrs_proto::types::ClientKind;
+use kmsrs_proto::wire::connection::ConnectionEvent;
 use std::io::Write as _;
 
 /// How severe a line is.
@@ -167,6 +168,75 @@ impl Logger {
     ///
     /// The field list is vlmcsd's verbose dump plus the two things it does not
     /// record: where the request came from, and which host key answered.
+    /// Describe a protocol-layer event from the connection state machine
+    /// (`SEC-012`, #204).
+    ///
+    /// Pure, and separate from emitting, for the same reason
+    /// [`Self::format_message`] is: the mapping from event to severity is the
+    /// interesting part and it is testable in-process, without a socket and
+    /// without capturing stderr.
+    ///
+    /// The severities are the point. A fault is a call-level failure the client
+    /// will retry — `warn`. A rejection means a peer sent something this host
+    /// will not parse, which is either a broken client or a probe — `warn`. A
+    /// successful bind or activation is `debug`, because the `info` line for a
+    /// serviced request is already written by [`Self::request`] and duplicating
+    /// it would bury the refusals. `Lost` is `error`: it is the one event that
+    /// says the others are incomplete.
+    #[must_use]
+    pub fn describe_connection_event(event: &ConnectionEvent) -> (Severity, &'static str, String) {
+        match event {
+            ConnectionEvent::Bound { syntax, context_id } => (
+                Severity::Debug,
+                "bound",
+                format!("{syntax:?} on context {context_id}"),
+            ),
+            ConnectionEvent::ContextAdded { syntax, context_id } => (
+                Severity::Debug,
+                "context-added",
+                format!("{syntax:?} on context {context_id}"),
+            ),
+            ConnectionEvent::Activated {
+                version,
+                mac_verified,
+            } => (
+                Severity::Debug,
+                "activated",
+                match mac_verified {
+                    Some(true) => format!("{version:?}, MAC verified"),
+                    Some(false) => format!("{version:?}, MAC MISMATCH"),
+                    None => format!("{version:?}"),
+                },
+            ),
+            ConnectionEvent::Refused { result } => (
+                Severity::Warn,
+                "refused",
+                format!("0x{:08X} ({})", result.to_wire(), result.description()),
+            ),
+            ConnectionEvent::Faulted { status } => {
+                (Severity::Warn, "faulted", format!("{status:?}"))
+            }
+            ConnectionEvent::Rejected { reason } => {
+                (Severity::Warn, "rejected", format!("{reason:?}"))
+            }
+            ConnectionEvent::Lost { count } => (
+                Severity::Error,
+                "events-lost",
+                format!(
+                    "{count} protocol event(s) were produced faster than they could be logged; \
+                     the lines above this one are not the whole story"
+                ),
+            ),
+        }
+    }
+
+    /// Write a protocol-layer event (`SEC-012`, #204).
+    pub fn connection_event(self, event: &ConnectionEvent) {
+        let (severity, name, detail) = Self::describe_connection_event(event);
+        self.message(severity, name, &detail);
+    }
+
+    /// Write one line per handled request (`OBS-003`, #179).
     pub fn request(self, event: &Event) {
         if let Some(line) = self.format_request(event) {
             Self::emit(&line);
@@ -343,7 +413,13 @@ impl Logger {
         let mut bytes = Vec::with_capacity(line.len().saturating_add(1));
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        let _ = std::io::stderr().write_all(&bytes);
+        // The one deliberate discard in the tree, and it is typed so that it
+        // reads as a decision rather than an oversight (`SEC-012`, #204).
+        // There is nowhere to report a failure to report: the only channel this
+        // process has for saying anything is the one that just failed, and a
+        // logger that panicked when stderr closed would turn a redirected pipe
+        // into an outage.
+        let _: std::io::Result<()> = std::io::stderr().write_all(&bytes);
     }
 }
 
