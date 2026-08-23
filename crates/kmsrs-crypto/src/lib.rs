@@ -34,5 +34,9 @@
 #[cfg(test)]
 extern crate alloc;
 
+pub mod cbc;
+pub mod hash;
 pub mod keys;
+pub mod mac;
 pub mod rijndael;
+pub mod v6;

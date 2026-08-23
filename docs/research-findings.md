@@ -6,6 +6,7 @@ some of it is load-bearing data rather than prose. Work items live in
 
 - [R1 — product data from Microsoft primary sources](#r1--product-data-from-microsoft-primary-sources)
 - [R2 — Hermit and Proxmox feasibility](#r2--hermit-and-proxmox-feasibility)
+- [R3 — protocol findings from the reference sources](#r3--protocol-findings-from-the-reference-sources)
 - [Coverage map](#coverage-map) — how the audits' findings map onto issues
 
 ---
@@ -248,6 +249,39 @@ What a Proxmox admin can set from the GUI, and whether it reaches the guest:
 | SMBIOS type 1 fields | yes | **no** — no DMI code in the kernel; the loader discards the pointer |
 | Cloud-init drive | yes | **no** — arrives as ISO9660; there is no block driver |
 | `args` / kernel cmdline | **no** (CLI only) | would work, but is not exposed in the web UI |
+
+---
+
+# R3 — protocol findings from the reference sources
+
+Things established by reading vlmcsd and py-kms rather than their documentation, which
+contradicted the code. Recorded because each cost more to establish than to write down.
+
+## The v6 HMAC tolerance retries are vestigial
+
+vlmcsd's `CreateV6Hmac` carries the comment *"Request and response time must match +/- 1 slot"*,
+and `VerifyResponseV6` retries with tolerances −1, 0 and +1 on that basis. Neither claim survives
+the arithmetic:
+
+```
+timeSlot = ClientTime / TIME_C1 * TIME_C2 + TIME_C3 + tolerance * TIME_C1
+```
+
+The tolerance term is scaled by **`TIME_C1`**, but one slot apart differs by **`TIME_C2`** — the
+division has already rescaled the value. The two constants are different numbers
+(`0x22816889BD` and `0x208CBAB5ED`), so `tolerance = +1` does not yield the next slot's key. It
+yields an unrelated one.
+
+It would not matter if it did. `CreateV6Hmac` reads the FILETIME out of the **response** buffer in
+both roles, and the response echoes the request's timestamp verbatim (#28). Client and server
+therefore always derive from the same 64-bit value, tolerance 0 always matches, and the retries
+never fire — which is why the discrepancy has gone unnoticed in both implementations.
+
+Consequence for us: reproduce the arithmetic exactly, including the odd scaling, because
+compatibility depends on it. Do **not** reproduce the belief that the window is ±1 slot, and do not
+"fix" the scaling — a corrected implementation would disagree with every real client. The
+diagnostic client still tries all three offsets, to behave as the reference does rather than as it
+documents (#48, #49).
 
 ---
 
