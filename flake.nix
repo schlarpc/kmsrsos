@@ -205,6 +205,19 @@
           coverage = craneLib.cargoLlvmCov (commonArgs // {
             inherit cargoArtifacts;
           });
+
+          # The build-time policy flags (POL-010, #98; POL-011, #99). They
+          # change what the server does on the wire, so a build that nobody ever
+          # compiles is a build that does not work; each configuration has tests
+          # that only exist under it.
+          policy-features = craneLib.cargoNextest (commonArgs // {
+            inherit cargoArtifacts;
+            pname = "kmsrs-policy-features";
+            partitions = 1;
+            partitionType = "count";
+            cargoNextestExtraArgs =
+              "-p kmsrs-policy --features permissive-retail,strict-clock-skew";
+          });
         });
 
       devShells = eachSystem (system:

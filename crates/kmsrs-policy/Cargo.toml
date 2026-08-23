@@ -8,6 +8,21 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Build-time policy flags (ARCH-003, #3). There is no runtime equivalent: a
+# knob that can change a byte on the wire must be decided when the binary is
+# built, not when it is started.
+
+# Activate retail, OEM and evaluation SKUs instead of refusing them
+# (POL-010, #98). Off by default — no legitimate client can present a
+# non-volume activation ID, so accepting one is a one-packet emulator probe.
+permissive-retail = []
+
+# Refuse a request whose clock is more than four hours out (POL-011, #99).
+# Off by default: the tolerance is itself a detection oracle, and the v6 key
+# derives from the client's own timestamp so a skewed client is answerable.
+strict-clock-skew = []
+
 [dependencies]
 kmsrs-db.workspace = true
 kmsrs-proto.workspace = true
