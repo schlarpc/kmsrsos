@@ -58,6 +58,16 @@ toml = { version = "=1.1.4" }
 # `serde` derive, for the one runtime-configuration document (CFG-002, #167).
 # `deny_unknown_fields` is the whole reason a real parser is used rather than a
 # hand-written one: it is what makes CFG-005 (#170) and CFG-006 (#171) free.
+# Graceful shutdown on SIGINT/SIGTERM and Windows' SetConsoleCtrlHandler
+# (NET-007, #157). A safe wrapper, so the forbid(unsafe_code) invariant holds
+# in this crate too — the Windows service control handler is separate and
+# belongs to M8.
+ctrlc = { version = "=3.5.2", features = ["termination"] }
+# Explicit IPV6_V6ONLY and an explicit listen backlog (NET-001, #150;
+# NET-003, #152) — `std::net` exposes neither, and both are load-bearing:
+# without the first, whether IPv4 works depends on a sysctl; without the
+# second, the backlog is SOMAXCONN, far deeper than the pool can drain.
+socket2 = { version = "=0.6.5" }
 serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
 
 # `kmsrs-dbgen` only. Nothing that ships may name these; the test in

@@ -11,10 +11,13 @@
 //! easier to guarantee when there is one budget and one crate that owns it.
 
 pub mod config;
+pub mod entropy;
 pub mod host;
+pub mod net;
 pub mod server;
 
 pub use config::{Compiled, Discovered, Operational};
+pub use entropy::OsEntropy;
 pub use host::{Host, RequestContext};
 pub use server::{Handled, Server};
 
