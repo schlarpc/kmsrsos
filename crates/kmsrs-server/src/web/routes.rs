@@ -238,29 +238,53 @@ fn status_page(snapshot: &Snapshot<'_>) -> String {
 
     // The ePIDs this host answers with, which is what an operator compares
     // against `slmgr /dlv` on a client.
-    body.push_str("<h2>Host identities</h2><table><tr><th>Host key</th><th>ePID</th></tr>");
-    for index in 0..kmsrs_db::CSVLKS.len() {
-        let Ok(index) = u16::try_from(index) else {
+    //
+    // Grouped by the host key that *answers*, not by the host key that lists a
+    // product. Several keys can count one product and
+    // `HostIdentity::select` chooses among them (`ID-004`, #109), so a table
+    // keyed the other way shows one key's description beside another key's
+    // ePID — which is the confusion MM02 is about.
+    //
+    // A counted ID has no name of its own: it is not an activation ID, so
+    // `kmsrs_db::product` does not know it (`DB-008`, #132). The host key's
+    // description is the name that exists, and it is the one an operator sees
+    // in the ePID anyway.
+    body.push_str(
+        "<h2>What this host answers with</h2>\
+         <table><tr><th>Host key</th><th>Products</th><th>ePID</th></tr>",
+    );
+
+    let mut answered: Vec<(u16, String, usize)> = Vec::new();
+    for counted in kmsrs_db::COUNTED_IDS {
+        let Some(application) = counted
+            .csvlks
+            .first()
+            .and_then(|index| kmsrs_db::csvlk_at(*index))
+            .and_then(|csvlk| csvlk.application)
+        else {
             continue;
         };
-        let Some(csvlk) = kmsrs_db::csvlk_at(index) else {
-            continue;
-        };
-        let Some(application) = csvlk.application else {
-            continue;
-        };
-        let Some(counted) = csvlk.counted_ids.first() else {
-            continue;
-        };
-        let group = identity.select(
+        let (selection, group) = identity.select(
             kmsrs_proto::types::ApplicationId(application),
-            kmsrs_proto::types::KmsCountedId(*counted),
+            kmsrs_proto::types::KmsCountedId(counted.guid),
         );
+        let index = match selection {
+            kmsrs_proto::types::CsvlkSelection::Resolved { index }
+            | kmsrs_proto::types::CsvlkSelection::Fallback { index } => index,
+        };
+        match answered.iter_mut().find(|(seen, _, _)| *seen == index) {
+            Some((_, _, count)) => *count = count.saturating_add(1),
+            None => answered.push((index, group.epid.to_string(), 1)),
+        }
+    }
+
+    for (index, epid, count) in answered {
+        let description = kmsrs_db::csvlk_at(index).map_or("unknown", |csvlk| csvlk.description);
         let _: core::fmt::Result = write!(
             body,
-            "<tr><td>{}</td><td><code>{}</code></td></tr>",
-            escape(csvlk.description),
-            escape(&group.1.epid.to_string())
+            "<tr><td>{}</td><td>{count}</td><td><code>{}</code></td></tr>",
+            escape(description),
+            escape(&epid)
         );
     }
     body.push_str("</table>");
