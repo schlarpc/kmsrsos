@@ -488,6 +488,46 @@ pub fn encode_request(
     entropy: &mut dyn Entropy,
     out: &mut [u8],
 ) -> Result<usize, EncodeError> {
+    encode_request_declaring(
+        version,
+        version.to_protocol_version(),
+        body,
+        ciphers,
+        entropy,
+        out,
+    )
+}
+
+/// Encode a request that *declares* a version other than the one it is framed
+/// as (`CLI-005`, #211).
+///
+/// The unencrypted version word in front of an encrypted request is the only
+/// thing a host reads before deciding how to interpret the rest, so a probe
+/// that wants to ask "what do you do with v7.0" has to be able to write one
+/// value there while framing the body as something it can build. Splitting the
+/// two is what makes the question askable at all.
+///
+/// Nothing but the diagnostic client uses this. A real client's declared
+/// version and actual version are the same thing, which is why
+/// [`encode_request`] does not take the parameter.
+///
+/// The declared version reaches the wire twice: once in the unencrypted prefix
+/// and once inside the encrypted body, which the caller sets. They agree for a
+/// real client and a probe may make them disagree — a host reading only one of
+/// them will say so.
+///
+/// # Errors
+///
+/// Returns [`EncodeError::BufferTooSmall`] if `out` is shorter than the framed
+/// length, or [`EncodeError::EntropyUnavailable`] if an IV could not be drawn.
+pub fn encode_request_declaring(
+    version: Version,
+    declared: crate::kms::version::ProtocolVersion,
+    body: &RequestBody,
+    ciphers: &Ciphers,
+    entropy: &mut dyn Entropy,
+    out: &mut [u8],
+) -> Result<usize, EncodeError> {
     let available = out.len();
     let needed = crate::kms::request::framed_request_len(version);
     let too_small = EncodeError::BufferTooSmall { needed, available };
@@ -501,7 +541,7 @@ pub fn encode_request(
         return put(out, end, &tag).ok_or(too_small);
     };
 
-    let version_word = version.to_protocol_version().to_wire();
+    let version_word = declared.to_wire();
     let mut cursor = put(out, 0, &version_word.to_le_bytes()).ok_or(too_small)?;
 
     let iv: [u8; IV_LEN] = entropy

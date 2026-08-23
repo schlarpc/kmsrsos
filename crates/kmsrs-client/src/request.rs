@@ -23,7 +23,7 @@
 use core::time::Duration;
 use kmsrs_db::Guid;
 use kmsrs_proto::kms::layout::{REQUEST_BODY_LEN, RequestBody, WireGuid};
-use kmsrs_proto::kms::version::Version;
+use kmsrs_proto::kms::version::{ProtocolVersion, Version};
 use kmsrs_proto::types::WORKSTATION_NAME_UNITS;
 use zerocopy::FromBytes;
 
@@ -106,8 +106,22 @@ pub mod alloc_text {
 /// Defaults are what a real Windows client sends; every field is replaceable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestFields {
-    /// Which protocol version to speak.
+    /// Which protocol version to speak: how the request is framed, padded and
+    /// encrypted.
     pub version: Version,
+    /// What to *declare* on the wire, if that should differ (`CLI-005`, #211).
+    ///
+    /// `None` — the ordinary case, and the only one a real client produces —
+    /// means declare [`Self::version`]. `Some` writes an arbitrary
+    /// major/minor pair into the version word instead, which is how a probe
+    /// asks what a host does with v7.0, v6.1 or v0.0.
+    ///
+    /// That question separates a host that dispatches on **both halves** from
+    /// one that dispatches on the major alone: py-kms services a request
+    /// claiming 6.1 as v6, and a genuine host refuses it (`KMS-008`, #24). The
+    /// two are distinguishable by asking, which is what makes this a probe
+    /// rather than a curiosity.
+    pub declared_version: Option<ProtocolVersion>,
     /// The application GUID.
     pub application: Guid,
     /// The SKU ID, which a host reads and ignores (`KMS-018`, #34).
@@ -136,6 +150,7 @@ impl Default for RequestFields {
     fn default() -> Self {
         Self {
             version: Version::V6,
+            declared_version: None,
             application: parse_guid(WINDOWS_APPLICATION).unwrap_or(Guid::ZERO),
             sku: parse_guid(DEFAULT_KMS_ID).unwrap_or(Guid::ZERO),
             kms_id: parse_guid(DEFAULT_KMS_ID).unwrap_or(Guid::ZERO),
@@ -152,6 +167,18 @@ impl Default for RequestFields {
 }
 
 impl RequestFields {
+    /// What this request declares on the wire (`CLI-005`, #211).
+    ///
+    /// [`Self::version`] unless overridden. Both the unencrypted version word
+    /// and the copy inside the encrypted body carry this, because a real client
+    /// puts the same value in both and a host that reads only one of them
+    /// should have to say so.
+    #[must_use]
+    pub fn declared_version(&self) -> ProtocolVersion {
+        self.declared_version
+            .unwrap_or_else(|| self.version.to_protocol_version())
+    }
+
     /// Encode these fields into a wire request body.
     ///
     /// # Errors
@@ -179,8 +206,7 @@ impl RequestFields {
             }
         })?;
 
-        body.version
-            .set(self.version.to_protocol_version().to_wire());
+        body.version.set(self.declared_version().to_wire());
         body.is_client_vm.set(u32::from(self.virtual_machine));
         body.license_status.set(self.license_status);
         body.grace_time.set(self.grace_minutes);
@@ -245,13 +271,14 @@ mod tests {
     )]
 
     use super::{DEFAULT_KMS_ID, RequestError, RequestFields, WINDOWS_APPLICATION, parse_guid};
-    use kmsrs_proto::kms::version::Version;
+    use kmsrs_proto::kms::version::{ProtocolVersion, Version};
 
     /// `CLI-009` (#215): every field the issue lists can be replaced.
     #[test]
     fn every_field_is_overridable() {
         let fields = RequestFields {
             version: Version::V4,
+            declared_version: None,
             application: parse_guid("0ff1ce15-a989-479d-af46-f275c6370663").unwrap(),
             sku: parse_guid("11111111-2222-3333-4444-555555555555").unwrap(),
             kms_id: parse_guid("66666666-7777-8888-9999-aaaaaaaaaaaa").unwrap(),
@@ -284,6 +311,58 @@ mod tests {
             fields.previous_client_machine_id
         );
         assert_eq!(body.workstation_name[0].get(), u16::from(b'p'));
+    }
+
+    /// `CLI-005` (#211): the declared version and the framed version are
+    /// separable, so a probe can ask what a host does with v7.0, v6.1 or v0.0.
+    ///
+    /// That question distinguishes a host dispatching on **both halves** of the
+    /// version word from one dispatching on the major alone — py-kms services a
+    /// request claiming 6.1 as v6, a genuine host refuses it — and there is no
+    /// way to ask it without writing a version the request is not.
+    #[test]
+    fn a_declared_version_overrides_what_the_request_is_framed_as() {
+        for declared in [
+            ProtocolVersion { major: 7, minor: 0 },
+            ProtocolVersion { major: 6, minor: 1 },
+            ProtocolVersion { major: 0, minor: 0 },
+            ProtocolVersion {
+                major: u16::MAX,
+                minor: u16::MAX,
+            },
+        ] {
+            let fields = RequestFields {
+                version: Version::V6,
+                declared_version: Some(declared),
+                ..RequestFields::default()
+            };
+            assert_eq!(fields.declared_version(), declared);
+            assert_eq!(
+                fields.to_body().unwrap().version.get(),
+                declared.to_wire(),
+                "the body must carry what was declared, not what it is framed as"
+            );
+            // The framing is untouched: this is still a v6 request, encrypted
+            // with the v6 schedule, and only the word differs.
+            assert_eq!(fields.version, Version::V6);
+        }
+    }
+
+    /// With no override, the two agree — which is what a real client sends, and
+    /// is the only shape `encode_request` can produce.
+    #[test]
+    fn without_an_override_the_declared_version_is_the_framed_one() {
+        for version in Version::ALL {
+            let fields = RequestFields {
+                version,
+                ..RequestFields::default()
+            };
+            assert_eq!(fields.declared_version(), version.to_protocol_version());
+            assert_eq!(
+                fields.to_body().unwrap().version.get(),
+                version.to_protocol_version().to_wire()
+            );
+        }
     }
 
     /// The defaults are what a real Windows client sends, because the client's

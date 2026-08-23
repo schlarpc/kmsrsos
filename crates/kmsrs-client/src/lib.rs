@@ -19,9 +19,11 @@
 
 pub mod probe;
 pub mod request;
+pub mod session;
 
-pub use probe::{Finding, Probe, ProbeError, Report};
+pub use probe::{Finding, Probe, Report};
 pub use request::{RequestError, RequestFields};
+pub use session::{Exchange, ProbeError, Session};
 
 /// Every response property the client checks, as a bitfield (`CLI-001`, #207).
 ///
