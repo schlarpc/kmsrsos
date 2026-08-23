@@ -375,6 +375,7 @@ admin can set from the GUI, and whether it arrives:
 | CPU type (`host`) | yes | yes, and **required** — see entropy below |
 | SMBIOS type 1 fields | yes | **no** — the kernel has no DMI code and the loader discards the pointer |
 | Cloud-init drive | yes | **no** — it arrives as an ISO9660 block device, and there is no block driver |
+| virtio-fs share | yes | **no** — the driver is not compiled in (`OS-006`, #257) |
 | `args` / kernel command line | **no** (CLI only) | would work, but Proxmox does not expose it in the web UI |
 
 So the whole GUI-settable channel is **DHCP plus the MAC address**. Everything else comes from the
@@ -392,6 +393,23 @@ env=KMSRSOS_CONFIG=web_ui_port = 8081
 Editing that file is the entire in-place reconfiguration story, and it is deliberately small: the
 doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch
 settings that cannot change a byte on the wire (`CFG-001`, #166).
+
+### No disk, structurally (`OS-006`, #257)
+
+Axiom A5 — no disk I/O — is a promise this program keeps on Linux and Windows. On Hermit it is a
+property of the machine. The kernel has no block device driver of any kind, so the two remaining ways
+a guest could reach storage are both Cargo features, and the shipped kernel is built with neither:
+
+- **`virtio-fs`**, the one an operator would attach in the GUI.
+- **`uhyve`**, which is not a device at all: it is a hypercall interface with `open`, `read`, `write`,
+  `close` and a `UHYVE_MOUNT` path map. Dropping it costs nothing here, because QEMU/libvirt is the
+  supported configuration (decision 25) — and an audit that goes looking for *drivers* never finds it.
+
+`write-pcap-file` is off for the same reason from the other end: it writes capture files to a guest
+path. `crates/kmsrs-server/tests/hermit_features.rs` fails if any of them comes back.
+
+Attaching a virtio-fs share, a cloud-init drive or a disk to the VM is therefore harmless and
+pointless: the guest cannot see any of them.
 
 ### Set the CPU type to `host`
 

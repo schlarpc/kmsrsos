@@ -282,6 +282,48 @@
           targets = [ "x86_64-unknown-none" ];
         };
 
+      # --- The kernel's feature set (OS-006, #257) ---
+      #
+      # Axiom A5 says no disk I/O. On Linux and Windows that is a promise this
+      # program keeps; on Hermit it is a property of the machine, because a
+      # kernel built without a filesystem transport has no code that could open
+      # anything. The `--no-default-features` this list implies is what makes
+      # the difference structural rather than a rule somebody could relax.
+      #
+      # It is the kernel's own default set minus two entries:
+      #
+      #   * **`virtio-fs`**, the obvious one, and the only file-shaped device
+      #     QEMU could otherwise hand a Hermit guest.
+      #   * **`uhyve`**, the less obvious one. Uhyve is a Hermit-specific VMM
+      #     whose guest interface includes `open`/`read`/`write`/`close`
+      #     hypercalls and a `UHYVE_MOUNT` path map — a filesystem reached
+      #     through a hypercall rather than through a device, which an audit
+      #     looking only for drivers would miss. QEMU/libvirt is the supported
+      #     configuration (decision 25), so nothing is given up.
+      #
+      # `write-pcap-file` is not in the kernel's defaults and stays out: it
+      # writes capture files to a guest path, which is the same property from
+      # the other end. Neither is `semihosting`, `initramfs` or `newlib`.
+      #
+      # `virtio-vsock` stays. It is a host-guest socket, not storage, and
+      # removing a transport this program does not use would be a different
+      # decision from the one `OS-006` asks for.
+      #
+      # `tests/hermit_features.rs` is what keeps this list honest.
+      hermitKernelFeatures = [
+        "acpi"
+        "dhcpv4"
+        "fsgsbase"
+        "kernel-stack"
+        "loader"
+        "pci"
+        "pci-ids"
+        "smp"
+        "tcp"
+        "virtio-net"
+        "virtio-vsock"
+      ];
+
       # `libhermit.a`: the unikernel the application is linked against.
       #
       # Built by the kernel's own `xtask` rather than by reimplementing it here.
@@ -303,7 +345,7 @@
       #     x86_64-unknown-none` before building; the toolchain above already
       #     has that target, so the shim below makes the call a no-op rather
       #     than patching the source.
-      hermitKernelFor = { system, features ? null }:
+      hermitKernelFor = { system, features ? hermitKernelFeatures }:
         let
           pkgs = pkgsFor system;
           src = hermit-kernel;
