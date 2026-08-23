@@ -532,7 +532,15 @@ impl Connection {
         let body = pdu.get(HEADER_LEN..declared).unwrap_or(&[]);
 
         if !header.version_is_supported() {
-            return self.reject(RejectReason::UnsupportedRpcVersion);
+            // `WIRE-006` (#64): refuse with a `bind_nak` carrying the reason
+            // and the versions this host does implement, rather than closing
+            // silently. A bare RST is indistinguishable from a network fault,
+            // which is the class of failure `SEC-012` (#204) exists to prevent.
+            return self.nak(
+                out,
+                header.call_id.get(),
+                bind::NakReason::ProtocolVersionNotSupported,
+            );
         }
         // Declined item D4: real KMS clients never authenticate. An inbound
         // trailer is faulted rather than being treated as stub data, which is
@@ -549,6 +557,26 @@ impl Connection {
             Some(PacketType::AlterContext) => self.handle_bind(&header, body, entropy, out, true),
             Some(PacketType::Request) => self.handle_request(&header, body, entropy, activate, out),
             _ => self.reject(RejectReason::UnexpectedPacketType),
+        }
+    }
+
+    /// Refuse a bind outright, saying why, then close.
+    fn nak(&mut self, out: &mut [u8], call_id: u32, reason: bind::NakReason) -> Step {
+        let _ = self.events.try_push(ConnectionEvent::Rejected {
+            reason: RejectReason::UnsupportedRpcVersion,
+        });
+        self.inbound.clear();
+        match bind::write_nak(call_id, reason, out) {
+            Ok(len) => Step::SendThenClose {
+                len,
+                reason: CloseReason::Malformed,
+            },
+            // The buffer is caller-sized at `MIN_OUTPUT_LEN` or more, so this
+            // cannot happen — but a refusal that cannot be written is still a
+            // refusal.
+            Err(_) => Step::Close {
+                reason: CloseReason::Malformed,
+            },
         }
     }
 

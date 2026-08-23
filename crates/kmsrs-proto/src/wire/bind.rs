@@ -24,7 +24,9 @@
 
 use crate::entropy::Entropy;
 use crate::kms::layout::WireGuid;
-use crate::wire::header::{HEADER_LEN, PacketFlags, PacketType, RpcHeader};
+use crate::wire::header::{
+    HEADER_LEN, PacketFlags, PacketType, RPC_VERSION_MAJOR, RPC_VERSION_MINOR, RpcHeader,
+};
 use crate::wire::syntax::{
     FeatureBits, KMS_INTERFACE, KMS_INTERFACE_VERSION_MAJOR, KMS_INTERFACE_VERSION_MINOR, NDR32,
     NDR64, TransferSyntax,
@@ -380,6 +382,101 @@ pub fn decide(request: &BindRequest, ndr64_enabled: bool) -> BindDecision {
         results,
         accepted_context,
     }
+}
+
+/// Why a bind was refused outright (`WIRE-006`, #64).
+///
+/// Distinct from a per-context rejection, which travels *inside* a `bind_ack`:
+/// these are reasons the whole association cannot exist, so there is no
+/// acknowledgement to put a result in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NakReason {
+    /// `REASON_NOT_SPECIFIED`.
+    NotSpecified,
+    /// The RPC version the client spoke is not one this host implements.
+    ProtocolVersionNotSupported,
+}
+
+impl NakReason {
+    /// The wire value.
+    ///
+    /// A method rather than a `#[repr(u16)]` discriminant cast: `ARCH-007` (#7)
+    /// forbids `as` in wire handling, and an exhaustive `match` is what makes
+    /// adding a variant a compile error rather than a silent zero.
+    #[must_use]
+    pub const fn to_wire(self) -> u16 {
+        match self {
+            Self::NotSpecified => 0,
+            Self::ProtocolVersionNotSupported => 2,
+        }
+    }
+}
+
+/// The RPC versions this host implements, for a `bind_nak`'s version list.
+const SUPPORTED_VERSIONS: [(u8, u8); 1] = [(RPC_VERSION_MAJOR, RPC_VERSION_MINOR)];
+
+/// Write a `bind_nak`.
+///
+/// A `bind_nak` carries the reason and the list of RPC versions the host does
+/// support, so a client that spoke the wrong one learns which to use rather
+/// than being left to guess from a closed socket.
+///
+/// This is the case DCE/RPC defines `bind_nak` for, and emitting it is the
+/// difference between "this host refused, here is why" and a bare RST. py-kms
+/// emits only `bind_ack` and `response`, so it has no way to refuse anything
+/// except by hanging up (`SEC-012`, #204).
+///
+/// Returns the number of bytes written.
+///
+/// # Errors
+///
+/// Returns [`AckError::BufferTooSmall`] if `out` cannot hold the PDU.
+pub fn write_nak(call_id: u32, reason: NakReason, out: &mut [u8]) -> Result<usize, AckError> {
+    // reason u16, then a counted list of (major, minor) pairs.
+    let body_len = 2_usize
+        .saturating_add(1)
+        .saturating_add(SUPPORTED_VERSIONS.len().saturating_mul(2));
+    let needed = HEADER_LEN.saturating_add(body_len);
+    let available = out.len();
+    if available < needed {
+        return Err(AckError::BufferTooSmall { needed, available });
+    }
+
+    let frag_length =
+        u16::try_from(needed).map_err(|_| AckError::BufferTooSmall { needed, available })?;
+    let header = RpcHeader::for_reply(
+        PacketType::BindNak,
+        PacketFlags::COMPLETE,
+        call_id,
+        frag_length,
+    );
+    out.get_mut(..HEADER_LEN)
+        .ok_or(AckError::BufferTooSmall { needed, available })?
+        .copy_from_slice(header.as_bytes());
+
+    let mut cursor = HEADER_LEN;
+    let reason_bytes = reason.to_wire().to_le_bytes();
+    out.get_mut(cursor..cursor.saturating_add(2))
+        .ok_or(AckError::BufferTooSmall { needed, available })?
+        .copy_from_slice(&reason_bytes);
+    cursor = cursor.saturating_add(2);
+
+    let count = u8::try_from(SUPPORTED_VERSIONS.len())
+        .map_err(|_| AckError::BufferTooSmall { needed, available })?;
+    *out.get_mut(cursor)
+        .ok_or(AckError::BufferTooSmall { needed, available })? = count;
+    cursor = cursor.saturating_add(1);
+
+    for (major, minor) in SUPPORTED_VERSIONS {
+        *out.get_mut(cursor)
+            .ok_or(AckError::BufferTooSmall { needed, available })? = major;
+        cursor = cursor.saturating_add(1);
+        *out.get_mut(cursor)
+            .ok_or(AckError::BufferTooSmall { needed, available })? = minor;
+        cursor = cursor.saturating_add(1);
+    }
+
+    Ok(needed)
 }
 
 /// Why a `bind_ack` could not be written.

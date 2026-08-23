@@ -419,6 +419,7 @@ dependencies = [
  "kmsrs-crypto",
  "kmsrs-db",
  "kmsrs-proto",
+ "kmsrs-vectors",
  "proptest",
  "zerocopy",
 ]
