@@ -228,7 +228,10 @@ impl WorkstationName {
     /// Total by construction: it stops at the first NUL, replaces unpaired
     /// surrogates with U+FFFD, and cannot run past the field. py-kms's
     /// equivalent computes a negative length for a name longer than 126 bytes
-    /// and hands it to `struct.unpack`.
+    /// and hands it to `struct.unpack`, and vlmcsd's `ServiceInstaller` shows
+    /// the other half of the same mistake — `strcat` into a fixed buffer with
+    /// no bound (`SEC-002`, #194). A field that arrives full and unterminated
+    /// is the wire equivalent, and it stops at the field.
     #[must_use]
     pub fn decode(units: &[u16; WORKSTATION_NAME_UNITS]) -> Self {
         let terminated = units.split(|unit| *unit == 0).next().unwrap_or(&[]);
