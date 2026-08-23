@@ -157,6 +157,208 @@
         let craneLib = cranelibFor system;
         in craneLib.buildDepsOnly (windowsArgsFor system);
 
+      # --- The build-time settings a deployment might genuinely need changed ---
+      #
+      # `CFG-001` (#166): anything that can change a byte on the wire is decided
+      # when the binary is built. These are the two intervals and the two policy
+      # features, which is the whole list — see declined item D37 for why it is
+      # not thirty macros and seven presets.
+      #
+      # An invalid value here is a *compile error*, not a start-up failure:
+      # `Compiled::BUILD` parses the overrides in const context (`CFG-004`,
+      # #169), so `KMSRSOS_ACTIVATION_INTERVAL=banana` stops the build.
+      defaultSettings = {
+        # Minutes. Microsoft's documented defaults, and the one genuine
+        # three-way agreement between the documentation, vlmcsd and py-kms.
+        activationInterval = null;
+        renewalInterval = null;
+        # Activate retail, OEM and evaluation SKUs instead of refusing them
+        # (`POL-010`, #98).
+        permissiveRetail = false;
+        # Refuse a request whose clock is more than four hours out
+        # (`POL-011`, #99). Off by default: the tolerance is itself a detection
+        # oracle.
+        strictClockSkew = false;
+      };
+
+      settingsEnvFor = settings:
+        (if settings.activationInterval == null then { } else {
+          KMSRSOS_ACTIVATION_INTERVAL = toString settings.activationInterval;
+        })
+        // (if settings.renewalInterval == null then { } else {
+          KMSRSOS_RENEWAL_INTERVAL = toString settings.renewalInterval;
+        });
+
+      featureArgsFor = settings:
+        let
+          enabled = nixpkgs.lib.optional settings.permissiveRetail "permissive-retail"
+            ++ nixpkgs.lib.optional settings.strictClockSkew "strict-clock-skew";
+        in
+        if enabled == [ ] then "" else
+        " --features kmsrs-policy/" + builtins.concatStringsSep ",kmsrs-policy/" enabled;
+
+      # --- Static Linux binaries (PKG-004, #241) ---
+      #
+      # musl, statically linked, so the container image genuinely contains two
+      # files. A glibc binary would drag in a libc closure that carries
+      # `getent` and `ldd` among other things — and "no shell" stops being a
+      # property of the image the moment something in it is a shell script.
+      #
+      # kankerdev proved a static binary works for a KMS emulator; this is the
+      # same conclusion reached from the other end, by asking what an image has
+      # to contain before its contents can be enumerated in a sentence.
+      staticTargetFor = system:
+        {
+          "x86_64-linux" = "x86_64-unknown-linux-musl";
+          "aarch64-linux" = "aarch64-unknown-linux-musl";
+        }.${system} or null;
+
+      staticEnvFor = system:
+        let
+          pkgs = pkgsFor system;
+          target = staticTargetFor system;
+          upper = nixpkgs.lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] target);
+          muslPkgs =
+            if system == "x86_64-linux" then pkgs.pkgsCross.musl64
+            else pkgs.pkgsCross.aarch64-multiplatform-musl;
+        in
+        if target == null then { } else {
+          CARGO_BUILD_TARGET = target;
+          "CARGO_TARGET_${upper}_LINKER" = "${muslPkgs.stdenv.cc}/bin/${muslPkgs.stdenv.cc.targetPrefix}cc";
+          # `+crt-static` is the default for musl targets, but stating it means
+          # a future toolchain that changes the default cannot silently produce
+          # a dynamically linked image.
+          "CARGO_TARGET_${upper}_RUSTFLAGS" = "-C target-feature=+crt-static";
+          # The binaries cannot necessarily run on the build host, and the test
+          # suite has already run in `nix flake check`.
+          doCheck = false;
+        };
+
+      # --- mkKmsrsos: the rebuild path, made first-class (CFG-003, #168) ---
+      #
+      # The doctrine for this project is "rebuild from the flake" rather than
+      # "set an environment variable" (decision 13), and a doctrine nobody can
+      # follow in two lines is a doctrine nobody follows. So:
+      #
+      #     kmsrsos.lib.mkKmsrsos {
+      #       system = "x86_64-linux";
+      #       settings.activationInterval = 240;
+      #       settings.permissiveRetail = true;
+      #     }
+      #
+      # produces `{ server, client, container }` configured that way. Every
+      # setting it accepts is one that cannot be changed at runtime, which is
+      # the point: this is the *only* way to change them.
+      mkKmsrsos = { system, settings ? { } }:
+        let
+          pkgs = pkgsFor system;
+          craneLib = cranelibFor system;
+          commonArgs = commonArgsFor system;
+          resolved = defaultSettings // settings;
+          settingsEnv = settingsEnvFor resolved;
+          features = featureArgsFor resolved;
+
+          # Dependencies are built without the feature flags so that the cache
+          # is shared across configurations; only the workspace crates rebuild.
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+          static = staticEnvFor system;
+
+          # Dependencies for the static target are their own closure, so they
+          # get their own `buildDepsOnly` rather than sharing the host one.
+          staticArtifacts = craneLib.buildDepsOnly (commonArgs // static // {
+            pname = "kmsrsos-static";
+          });
+
+          buildOne = { pname, package }: craneLib.buildPackage (commonArgs // settingsEnv // static // {
+            inherit pname;
+            cargoArtifacts = if static == { } then cargoArtifacts else staticArtifacts;
+            doCheck = false;
+            cargoExtraArgs = "--package ${package}" + features;
+          });
+
+          server = buildOne { pname = "kmsrsos"; package = "kmsrs-server"; };
+          client = buildOne { pname = "kmsrs-client"; package = "kmsrs-client"; };
+        in
+        rec {
+          inherit server client;
+          container = containerFor { inherit pkgs system server client; };
+          # `osImage` and `hermit` join this set once PKG-013 (#250) has a
+          # hermetic Hermit build. Named here rather than stubbed, because an
+          # output that exists and does not work is worse than one that does
+          # not exist.
+        };
+
+      # --- The container image (PKG-004, #241; PKG-005, #242; SEC-008, #200) ---
+      #
+      # `dockerTools` rather than a Dockerfile, and that settles three issues at
+      # once rather than by policy:
+      #
+      #   * There is no build context to `COPY` and no `RUN` to execute, so the
+      #     image cannot `git clone` at build time the way upstream py-kms's
+      #     Dockerfiles do — which is why `docker build` there produces whatever
+      #     upstream happened to be that morning and silently ignores local
+      #     changes (`PKG-005`, #242).
+      #   * The root filesystem is a `buildEnv` over exactly two store paths.
+      #     There is no package manager, no shell, no `sh`, no libc utilities —
+      #     not removed, never added (`PKG-004`, #241).
+      #   * Every version in it comes from `flake.lock` and `Cargo.lock`, both
+      #     exact. edgd1er's move from pinned pip to apk floors is what
+      #     `PKG-006` (#243) exists about, and there is no apk here to float.
+      containerFor = { pkgs, system, server, client }:
+        pkgs.dockerTools.buildLayeredImage {
+          name = "kmsrsos";
+          tag = "latest";
+
+          # Reproducible: `dockerTools` defaults the image creation date to the
+          # Unix epoch rather than to now, so two builds of one revision produce
+          # identical bytes (`CFG-008`, #173; `SEC-010`, #202).
+          created = "@0";
+
+          contents = [ server client ];
+
+          config = {
+            Entrypoint = [ "/bin/kmsrsos" ];
+
+            # `SEC-008` (#200): non-root, and numeric so it needs no
+            # `/etc/passwd` — which is one more file that would have to exist in
+            # an image whose whole claim is that nothing does. 65534 is
+            # `nobody`, and the KMS port is 1688, so nothing here needs a
+            # privileged bind (`NET-016`, #165 is the same argument on systemd).
+            User = "65534:65534";
+
+            ExposedPorts = {
+              "1688/tcp" = { };
+              "8080/tcp" = { };
+            };
+
+            # `SEC-008` (#200): the health check probes the **KMS port**, by
+            # doing what a client does — connect, bind, activate, decode.
+            # Probing the HTTP handler would prove the one fact the caller
+            # already had by getting a reply, which is the Organization fork's
+            # `readyz` mistake.
+            #
+            # This is why `kmsrs-client` is in the image: a scratch container
+            # has no shell, no curl and no nc, so the check has to be a binary.
+            Healthcheck = {
+              Test = [ "CMD" "/bin/kmsrs-client" "--quiet" "--healthcheck" "127.0.0.1:1688" ];
+              Interval = 30000000000;
+              Timeout = 10000000000;
+              StartPeriod = 2000000000;
+              Retries = 3;
+            };
+
+            Labels = {
+              "org.opencontainers.image.title" = "kmsrsos";
+              "org.opencontainers.image.description" =
+                "A KMS host emulator in pure safe Rust";
+              "org.opencontainers.image.source" =
+                "https://github.com/schlarpc/kmsrsos";
+              "org.opencontainers.image.licenses" = "MIT";
+            };
+          };
+        };
+
     in
     {
       packages = eachSystem (system:
@@ -164,14 +366,25 @@
           craneLib = cranelibFor system;
           commonArgs = commonArgsFor system;
           cargoArtifacts = cargoArtifactsFor system;
+          configured = mkKmsrsos { inherit system; };
         in
         {
+          # The whole workspace, which is what a developer means by `nix build`.
           default = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
             doCheck = false;
           });
 
           kmsrsos = self.packages.${system}.default;
+
+          # Just the server, and just the client — what the container and the
+          # release artifacts are made of (`PKG-001`, #238).
+          server = configured.server;
+          client = configured.client;
+
+          # `nix build .#container` — no Dockerfile, no network, no build
+          # context (`PKG-004`, #241; `PKG-005`, #242).
+          container = configured.container;
 
           # Cross-compiled Windows binaries: `nix build .#windows`
           windows = craneLib.buildPackage ((windowsArgsFor system) // {
@@ -229,6 +442,31 @@
           # The full powerset, not a subset: with two features in one crate that
           # is four builds, which is cheap enough that narrowing it would only
           # be guessing at which corner breaks.
+          # `PKG-001` (#238) and `PKG-004` (#241): the artifacts people actually
+          # deploy are built by the gate, not only by a release.
+          #
+          # An output nobody builds is an output that does not work, and the
+          # container is the one whose breakage is least visible from a `cargo
+          # build` — it is where the static link, the non-root user and the
+          # health-check binary all live.
+          container = self.packages.${system}.container;
+
+          # `CFG-003` (#168): the rebuild path is a supported interface, so a
+          # configured build is checked the same way. This one sets both
+          # intervals and both policy features, which is the whole build-time
+          # surface — and because `Compiled::BUILD` parses the overrides in
+          # const context (`CFG-004`, #169), a mistake here is a build failure
+          # rather than a server that starts and behaves oddly.
+          configured = (mkKmsrsos {
+            inherit system;
+            settings = {
+              activationInterval = 240;
+              renewalInterval = 20160;
+              permissiveRetail = true;
+              strictClockSkew = true;
+            };
+          }).server;
+
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
             pname = "kmsrsos-feature-powerset";
@@ -299,7 +537,7 @@
         });
 
       lib = {
-        inherit nix-direnv;
+        inherit nix-direnv mkKmsrsos defaultSettings;
       };
     };
 }

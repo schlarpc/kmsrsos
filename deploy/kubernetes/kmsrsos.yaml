@@ -1,0 +1,143 @@
+# Kubernetes manifests for kmsrsos (PKG-011, #248).
+#
+# Plain YAML, not a Helm chart, and that is a finding rather than a preference
+# (declined item D17).
+#
+# Helm's value is parameterization. The parameter an operator would reach for
+# first is `replicaCount`, and it is the one that must never change: this host's
+# entire state is in memory and per-pod, so two replicas means two CMID tables,
+# two event logs and — the part that matters — **two ePIDs**. A client that hits
+# pod A and then pod B receives two different host identities from what it
+# believes is one KMS host. That is MM01, the single loudest emulator tell in
+# the ecosystem and the canonical detection test, reintroduced at the
+# infrastructure layer by a config value.
+#
+# The Organization fork's chart exposes `replicaCount` as a top-level Helm
+# value. So `replicas: 1` is written here, in one place, with this comment next
+# to it, and there is no template to override it from.
+#
+#   kubectl apply -f deploy/kubernetes/kmsrsos.yaml
+#
+# See docs/deployment.md for where the host has to live — a Windows client will
+# not activate against loopback, so the Service has to be reachable from the
+# clients' network.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kmsrsos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kmsrsos
+  namespace: kmsrsos
+  labels:
+    app.kubernetes.io/name: kmsrsos
+spec:
+  # NEVER RAISE THIS. See the header: every replica draws its own ePID, and a
+  # client that sees two ePIDs from one host name has detected an emulator.
+  # There is no shared-state design that would fix it either — axiom A5 forbids
+  # the external store it would need, and that is declined as D3.
+  replicas: 1
+
+  # Recreate, not RollingUpdate. A rolling update runs two pods at once, which
+  # is the same two-ePID problem for the length of the rollout. A few seconds of
+  # downtime is nothing: a KMS client that cannot reach a host retries, and
+  # activation lasts 180 days.
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kmsrsos
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kmsrsos
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kmsrsos
+          image: ghcr.io/schlarpc/kmsrsos:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: kms
+              containerPort: 1688
+              protocol: TCP
+            - name: web
+              containerPort: 8080
+              protocol: TCP
+
+          # SEC-008 (#200). Every one of these is free here rather than
+          # aspirational: the image is two static binaries, the program performs
+          # no filesystem I/O at all (axiom A5), and 1688 is unprivileged.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+
+          # /healthz answers 200 only when the KMS side is working — an identity
+          # was drawn, the listener is bound, and the entropy self-test still
+          # passes (OS-012, #263). It is deliberately not "this HTTP handler
+          # ran", which is the one fact a caller already has by getting a reply
+          # and is what the Organization fork's readyz reports.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: web
+            periodSeconds: 10
+            timeoutSeconds: 2
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          # The whole footprint is the CMID table, the event-log ring buffer,
+          # the connection state budget and the product database — all bounded
+          # at compile time (NET-005, #154; OS-011, #262), so this is a real
+          # ceiling rather than a guess.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kmsrsos
+  namespace: kmsrsos
+  labels:
+    app.kubernetes.io/name: kmsrsos
+spec:
+  # ClusterIP by default. Clients live outside the cluster, so this normally
+  # wants a LoadBalancer or a NodePort — chosen deliberately rather than
+  # defaulted into, because exposing 1688 is a decision about the network.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kmsrsos
+  ports:
+    - name: kms
+      port: 1688
+      targetPort: kms
+      protocol: TCP
+    - name: web
+      port: 8080
+      targetPort: web
+      protocol: TCP

@@ -79,6 +79,29 @@ fn run(arguments: &Arguments) -> i32 {
     };
 
     let mut entropy = OsEntropy;
+
+    // `SEC-008` (#200): a scratch container has no shell, no curl and no nc, so
+    // the HEALTHCHECK has to be a binary — and the smallest honest one is a KMS
+    // client doing what a client does. One activation, one exit code, and no
+    // opinion about whether the host is *distinguishable*: a health check that
+    // failed on a finding would take a working service out of rotation for a
+    // cosmetic reason.
+    if arguments.health_check {
+        return match probe.health_check(&mut entropy) {
+            Ok(exchange) => {
+                logger.message(
+                    Severity::Info,
+                    "healthy",
+                    &format!("epid={} count={}", exchange.epid, exchange.count),
+                );
+                0
+            }
+            Err(error) => {
+                logger.message(Severity::Error, "unhealthy", &error.to_string());
+                EXIT_UNAVAILABLE
+            }
+        };
+    }
     let report = match probe.run(&mut entropy) {
         Ok(report) => report,
         Err(error) => {
@@ -142,6 +165,9 @@ const fn describe(outcome: Outcome) -> &'static str {
 #[derive(Debug, Clone)]
 struct Arguments {
     help: bool,
+    /// One activation and an exit code, for a container HEALTHCHECK
+    /// (`SEC-008`, #200; `PKG-004`, #241).
+    health_check: bool,
     target: Option<SocketAddr>,
     timeout: Duration,
     level: LogLevel,
@@ -154,6 +180,7 @@ impl Default for Arguments {
     fn default() -> Self {
         Self {
             help: false,
+            health_check: false,
             target: None,
             timeout: kmsrs_client::request::DEFAULT_TIMEOUT,
             level: LogLevel::Info,
@@ -184,6 +211,7 @@ impl Arguments {
 
             match argument.as_str() {
                 "-h" | "--help" => parsed.help = true,
+                "--healthcheck" => parsed.health_check = true,
                 "--timeout" => {
                     let value = take("--timeout")?;
                     let seconds: u64 = value
@@ -298,6 +326,9 @@ resolved: partial support is worse than none.
 
 OPTIONS:
     -h, --help                 Print this and exit
+        --healthcheck          One activation, then exit 0 or 69. For a
+                               container HEALTHCHECK: liveness only, so a
+                               distinguishable host still counts as healthy
         --timeout <SECONDS>    How long to wait for each reply (default 10)
         --version <4|5|6>      Probe one protocol version (default: all three)
         --json                 Emit JSON Lines instead of text

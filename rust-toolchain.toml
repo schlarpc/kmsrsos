@@ -13,5 +13,16 @@
 channel = "1.96.1"
 profile = "default"
 components = ["rust-src", "rust-analyzer", "llvm-tools-preview"]
-# Cross-compilation targets (Windows via cargo-xwin / `nix build .#windows`)
-targets = ["x86_64-pc-windows-msvc"]
+# Cross-compilation targets.
+#
+#   * `x86_64-pc-windows-msvc` — Windows, via cargo-xwin or `nix build .#windows`.
+#   * `*-unknown-linux-musl`   — the static binaries the scratch container image
+#     is built over (`PKG-004`, #241). Static rather than glibc because the
+#     claim the image makes is that it contains two files, and a dynamically
+#     linked binary drags in a libc closure that carries `getent` and `ldd`
+#     among other things.
+targets = [
+  "x86_64-pc-windows-msvc",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+]
