@@ -158,6 +158,11 @@ Plus `kmsrs-fuzz` and `kmsrs-vectors` for test infrastructure.
   audits.
 - **No `as` casts in wire handling**; `TryFrom` and `checked_*` only.
 - **Per-request state is owned by the request**, never a shared mutable map.
+- **One driver, not one per platform.** `kmsrs-server` runs a single mio event loop on Linux, Windows
+  and Hermit. Platform differences that remain are socket *semantics*, and each is a named capability
+  whose branches are all compiled and tested everywhere — never a `cfg` on an item, which only ever
+  compiles on the platform you cannot test. See the superseding decision on `ARCH-005` in
+  [`docs/decisions.md`](docs/decisions.md).
 - **No build-time feature stripping for size.** Two build-time flags exist, both because a deployment
   might genuinely need the behaviour changed, and CI builds the entire feature powerset. Shrinking the
   binary by multiplying its behaviours is a bad trade when every behaviour must be differentially

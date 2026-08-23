@@ -6,14 +6,12 @@
 //! that cannot change a byte on the wire (`CFG-002`, #167).
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::time::Instant;
 use kmsrs_server::config::{Compiled, Discovered, Operational};
 use kmsrs_server::log::{Logger, Severity};
-use kmsrs_server::net::driver::{MAX_CONNECTIONS, Runtime, serve};
+use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS};
 use kmsrs_server::net::listener::bind_all;
 use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server};
-use std::sync::Arc;
 
 /// Exit code for a configuration this binary could not understand.
 ///
@@ -114,7 +112,11 @@ fn run(operational: Operational) -> Result<(), i32> {
         logger.message(Severity::Info, "listening", &entry.address.to_string());
     }
 
-    let runtime = Arc::new(Runtime::new(server, MAX_CONNECTIONS));
+    let mut driver = Driver::new(server, bound, MAX_CONNECTIONS).map_err(|error| {
+        logger.message(Severity::Error, "startup", &error.to_string());
+        EXIT_UNAVAILABLE
+    })?;
+    let shutdown = driver.shutdown_handle();
 
     // `NET-007` (#157): SIGINT and SIGTERM on Unix, `SetConsoleCtrlHandler` on
     // Windows, through a safe wrapper so this crate keeps `forbid(unsafe_code)`.
@@ -124,7 +126,7 @@ fn run(operational: Operational) -> Result<(), i32> {
     // The Windows *service* control handler is a separate mechanism and belongs
     // with the rest of the service work (M8).
     {
-        let runtime = Arc::clone(&runtime);
+        let shutdown = shutdown.clone();
         let already_asked = AtomicBool::new(false);
         if let Err(error) = ctrlc::set_handler(move || {
             if already_asked.swap(true, Ordering::AcqRel) {
@@ -142,7 +144,7 @@ fn run(operational: Operational) -> Result<(), i32> {
                 std::process::exit(EXIT_INTERRUPTED);
             }
             logger.message(Severity::Info, "shutdown", "draining");
-            runtime.shutdown.request();
+            shutdown.request();
         }) {
             logger.message(
                 Severity::Warn,
@@ -158,8 +160,8 @@ fn run(operational: Operational) -> Result<(), i32> {
         Instant::from_nanos(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
     };
 
-    let entropy: Box<dyn Entropy + Send> = Box::new(OsEntropy);
-    if let Err(error) = serve(&runtime, bound, entropy, &clock) {
+    let mut entropy = OsEntropy;
+    if let Err(error) = driver.run(&mut entropy, &clock) {
         logger.message(Severity::Error, "serve", &error.to_string());
         return Err(EXIT_UNAVAILABLE);
     }
