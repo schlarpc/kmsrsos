@@ -68,6 +68,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 33 | ePID day-of-year / LCID / channel | 1-based / unpadded / always `03` (#109–#111) |
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
+| 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
 
 ### Notes on the three decisions that took the most argument
 
@@ -75,8 +76,9 @@ These constrain everything. A proposal that violates one is wrong by default, no
 saturates at 50 (client) / 10 (server and Office) — the same number both existing emulators emit by
 arithmetic. Our model computes `world = min(P_app + R_app, 2 * NCountPolicy_app)` from real observed
 CMIDs, then `reported = max(world, client_N_Policy)` **per request, never written back**. The last
-clause is what matters: an anomalous demand is satisfied for that client alone. The detection surface
-is nil, because every honest client with the same `N_Policy` sees the same number.
+clause is what matters: an unusual demand is satisfied for that client alone. The detection surface
+is nil, because every honest client with the same `N_Policy` sees the same number. The floor stops at
+100 — see [decision 36](#absurd-n_policy-pol-019-313), which is where the *absurd* demands go.
 
 **Overcharge poisoning (#93).** A genuine KMS host can be permanently disabled by an overcharge
 request of ≥376 required clients followed by 671 activations, and vlmcsd is deliberately
@@ -90,6 +92,32 @@ never happen — it is why a 2019-era vlmcsd still activates Windows 11, and py-
 unknown GUID is the mechanism behind the "Server 2022 doesn't work" reports. Refusing
 *retail/preview* costs nothing, because retail SKUs have no GVLK and no legitimate client can send
 one, and it closes a cheap probe. Only viable because our data source gives accurate flags.
+
+### Absurd `N_Policy` (`POL-019`, #313)
+
+`POL-006` (#94) answered any declared `N_Policy` with `max(world, N)`, so a client declaring 5000 was
+told 5000. That is safe — under `POL-005` (#93) an anomalous demand cannot reach shared state — and
+it is nonetheless **a one-packet emulator test**, which is a different question and was not asked
+when #94 closed. A genuine host caches `2N` machine IDs and reports how many it is *holding*, so a
+machine it has never seen that asks for 5000 is told a small number and does not activate. py-kms
+answers `2N`. vlmcsd refuses with `0x8007000D`. All three answers are distinct, and only the first is
+what Microsoft's host says.
+
+So the floor now stops at `MAX_TRACKED_REQUIRED_CLIENTS`, which is 100 — four times the largest value
+any Microsoft product declares, `N_Policy` being 25 for Windows client SKUs and 5 for server and
+Office. Below it nothing changes. Above it the answer is the world: how many machines are cached.
+
+**The compatibility objection does not survive contact with the arithmetic.** Axiom A6 says defaults
+say yes, and the fear is a real client failing to activate for a reason nobody can see. But a client
+declaring `N_Policy > 100` could never activate against a genuine host either — the host would report
+its cache size and the client would compare and fail — so answering it is not compatibility, it is a
+lie no real host tells. The clients affected are diagnostic tools and probes, which is exactly the set
+that should see the honest answer.
+
+Two things are deliberately *not* done. The count is not floored at 100 for absurd demands, as #313's
+own sketch suggested: reporting a plausible-looking 100 to a fresh host holding one machine is still
+a sentence no genuine host says, and `world` is simply the true one. And the request is not refused —
+that is #283, declined as [D38](#d38).
 
 ---
 
@@ -276,16 +304,15 @@ concept is subsumed rather than dropped: `POL-001` (#89) produces them from obse
 of from a constant nobody populated. Carrying a dead column would invite someone to populate it later
 with a value that fights the model.
 
-**D35 — A build-time flag reproducing a genuine host's `0xC004D104` client-table refusal
+<a id="d35"></a>**D35 — A build-time flag reproducing a genuine host's `0xC004D104` client-table refusal
 (`POL-007`, #95).** The issue proposed keeping the refuse path behind a strict flag. Its own reasoning
 rules it out: with per-client views (`POL-001`, #89) the 671-entry cap is never reached in a way that
 matters, and evicting the oldest entry is strictly more compatible than refusing. A flag whose only
 effect is to make the server refuse a request it could have answered is a fingerprint, not a
 hardening measure — the same shape of mistake as `POL-011`'s clock-skew tolerance, which is itself a
 detection oracle. `HResult::InvalidActivationData` remains in the vocabulary so `kmsrs-client` can
-name the code when a *real* host sends one. The neighbouring question for `N_Policy` is left open as
-#283 rather than declined, because a differential test against a genuine host could still turn up a
-divergence there.
+name the code when a *real* host sends one. The neighbouring question for `N_Policy` is
+[D38](#d38).
 
 **D36 — Honouring py-kms's `InvalidWinBuild` per CSVLK (`ID-017`, #122).** The *intent* is sound — a
 host key should not be paired with a host build that could not have had it installed — but the field
@@ -311,6 +338,27 @@ would grow faster than confidence in any of them. The two build-time flags that 
 (`permissive-retail`, `strict-clock-skew`) each change behaviour a deployment might genuinely need
 changed, and CI builds the **whole powerset** rather than a sampled subset (`CFG-010`, #175).
 
+
+<a id="d38"></a>**D38 — A build-time strict mode refusing an anomalous `N_Policy` with `0x8007000D`
+(`POL-018`, #283).** `POL-006` (#94) specified it and it was never implemented; this records why it
+will not be.
+
+The argument that kept it open was byte-for-byte parity: a differential test against a genuine host
+with a deliberately absurd `N_Policy` might show a divergence, and this is where the fix would go.
+`POL-019` (#313) has since answered that test, and the answer is not a refusal. **A genuine host
+answers the request** — it reports how many machine IDs it is holding, the client compares that
+against its own `N_Policy`, and the client decides it has not been activated. The refusal is vlmcsd's
+invention, faithful to nothing, and reproducing it would replace one divergence with another.
+
+Under the per-client view model (`POL-001`, #89) there is also nothing for a refusal to protect: an
+anomalous demand cannot reach shared state, so there is no table to poison. A flag whose only effect
+is to refuse a request a genuine host would have answered is a *fingerprint*, not a hardening
+measure — the same shape of mistake as [D35](#d35) and as `POL-011`'s clock-skew tolerance, which is
+itself a detection oracle.
+
+`HResult::InvalidData` (`0x8007000D`) stays in the vocabulary regardless — it is what an unsupported
+protocol version returns (`KMS-014`, #30) — so `kmsrs-client` can still name the code when a vlmcsd
+instance sends one for this reason instead.
 
 ### What the panic-freedom gate actually found (`ARCH-009`, #9)
 

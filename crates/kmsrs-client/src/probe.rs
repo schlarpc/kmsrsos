@@ -38,6 +38,14 @@ use kmsrs_proto::wire::syntax::TransferSyntax;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+/// The `N_Policy` the count probe declares (`POL-019`, #313).
+///
+/// Two orders of magnitude past anything Microsoft ships — the real values are
+/// 25 for Windows client SKUs and 5 for server and Office — so no honest client
+/// can be mistaken for this one, and any host that answers with the number is
+/// answering a question no real client asks.
+pub const ABSURD_REQUIRED_CLIENTS: u32 = 5_000;
+
 /// Hardware IDs that identify a stock emulator deployment.
 ///
 /// `364F463A8863D35F` is py-kms's default, shared by every stock deployment of
@@ -99,6 +107,19 @@ pub enum Finding {
     },
     /// The host closed the association instead of keeping it open.
     ConnectionClosedEarly,
+    /// An absurd `N_Policy` came back as the reported count (`POL-019`, #313).
+    ///
+    /// A genuine host reports how many machine IDs it is *holding*, so a
+    /// machine it has never seen that asks for five thousand is told a small
+    /// number and does not activate. py-kms answers `2N`; an emulator flooring
+    /// the count at the demand answers `N`. Both are statements no real host
+    /// makes, and one packet reads them.
+    AbsurdCountReflected {
+        /// What the probe declared.
+        demanded: u32,
+        /// What came back.
+        reported: u32,
+    },
 }
 
 impl core::fmt::Display for Finding {
@@ -132,6 +153,12 @@ impl core::fmt::Display for Finding {
             Self::ConnectionClosedEarly => {
                 f.write_str("the host closed the association instead of keeping it open")
             }
+            Self::AbsurdCountReflected { demanded, reported } => write!(
+                f,
+                "a machine this host had never seen declared N_Policy = \
+                 {demanded} and was told {reported}; a genuine host reports \
+                 how many machines it is holding, which is a small number"
+            ),
         }
     }
 }
@@ -276,6 +303,15 @@ impl Probe {
         // A host that cannot speak NDR32 at all is not one Microsoft shipped.
         if !self.accepts_ndr32_alone()? {
             report.findings.push(Finding::Ndr32NotSupported);
+        }
+
+        // `POL-019` (#313): and one that answers an absurd demand with the
+        // demand has said something no real host says.
+        if let Some(reported) = self.reflects_an_absurd_required_count(entropy, &mut report)? {
+            report.findings.push(Finding::AbsurdCountReflected {
+                demanded: ABSURD_REQUIRED_CLIENTS,
+                reported,
+            });
         }
 
         Ok(report)
@@ -466,6 +502,57 @@ impl Probe {
             hardware_id: decoded.hardware_id.map(|id| id.0),
             assoc_group: 0,
         })
+    }
+
+    /// Whether the host reflects an absurd `N_Policy` back (`POL-019`, #313).
+    ///
+    /// A genuine KMS host caches `2N` client machine IDs and reports how many
+    /// it is *holding*. Asked for [`ABSURD_REQUIRED_CLIENTS`] by a machine it
+    /// has never seen, it therefore answers with a small number and the client
+    /// does not activate. py-kms answers `2N` — ten thousand for a demand of
+    /// five thousand — and this host used to answer `N`.
+    ///
+    /// All three are distinguishable, and only the first is what a real host
+    /// says. One packet reads the answer, which is why this is a probe rather
+    /// than a note in a document.
+    fn reflects_an_absurd_required_count(
+        &self,
+        entropy: &mut dyn Entropy,
+        report: &mut Report,
+    ) -> Result<Option<u32>, ProbeError> {
+        let mut stream = self.connect()?;
+        let mut association = ClientAssociation::new();
+        let mut out = vec![0_u8; 4096];
+
+        let (len, call_id) = association.bind(&mut out, true)?;
+        stream.write_all(out.get(..len).unwrap_or(&[]))?;
+        let reply = read_pdu(&mut stream)?;
+
+        let accepted =
+            match association.read_reply(&reply, call_id, TransferSyntax::Ndr32, &mut |_| {})? {
+                Reply::BindAck { accepted, .. } => accepted,
+                Reply::Response { .. } => None,
+            };
+        let Some(accepted) = accepted else {
+            return Err(ProbeError::Protocol(ClientError::BindRejected));
+        };
+
+        // A machine identity this host has certainly not seen, so the honest
+        // answer is "one" and anything large is the demand coming back.
+        let mut fields = self.fields.clone();
+        fields.required_clients = ABSURD_REQUIRED_CLIENTS;
+        fields.client_machine_id = kmsrs_db::Guid::from_bytes([0xA5; 16]);
+
+        let exchange = Self::activate(
+            &mut stream,
+            &mut association,
+            accepted,
+            &fields,
+            entropy,
+            report,
+        )?;
+
+        Ok((exchange.count >= ABSURD_REQUIRED_CLIENTS).then_some(exchange.count))
     }
 
     /// Whether the host accepts a bind offering NDR32 and nothing else.

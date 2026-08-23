@@ -11,15 +11,29 @@
 //! request from a *view* over it:
 //!
 //! ```text
-//! world    = min(cached_for_this_application, 2 * N)
-//! reported = max(world, N)
+//! world    = min(cached_for_this_application, 2 * min(N, 100))
+//! reported = if N <= 100 { max(world, N) } else { world }
 //! ```
 //!
 //! The second line is the one that matters, and the fact that it is **never
-//! written back** is the whole design. An anomalous demand is satisfied for the
-//! client that made it and for nobody else. There is no detection surface,
-//! because every honest client sending the same `N_Policy` sees the same
-//! number.
+//! written back** is the whole design. A demand is satisfied for the client
+//! that made it and for nobody else. There is no detection surface, because
+//! every honest client sending the same `N_Policy` sees the same number.
+//!
+//! # Why the floor stops at 100 (`POL-019`, #313)
+//!
+//! Because a floor that does not stop is itself the tell. `N_Policy` is 25 for
+//! Windows client SKUs and 5 for server and Office; 100 is four times the
+//! largest value any Microsoft product has ever declared, so no real client is
+//! within sight of it. Above it, answering the demand back means telling a
+//! machine this host has never seen that it is caching five thousand others —
+//! which no genuine host says, and which nothing else on the wire reveals.
+//!
+//! Beyond the floor the answer is `world`: how many machines are actually
+//! cached. That is not a refusal and not a strict mode — it is the same
+//! sentence a genuine host says, and a client that would have failed to
+//! activate against a real host fails here too. vlmcsd refuses outright with
+//! `0x8007000D`, which is a third answer nobody real gives (declined item D38).
 //!
 //! # The overcharge attack is not mitigated, it is unrepresentable
 //!
@@ -58,14 +72,22 @@ use kmsrs_proto::types::{ApplicationId, ClientMachineId, RequiredClients};
 )]
 pub const CMID_EXPIRY: Duration = Duration::from_mins(43_200);
 
-/// The largest `N_Policy` this model will size its cache from
-/// (`POL-006`, #94).
+/// The largest `N_Policy` this model will honour (`POL-006`, #94;
+/// `POL-019`, #313).
 ///
-/// A client is free to declare any value and every value is *accepted* — the
-/// reported count is floored at whatever it asked for. What is clamped is how
-/// much state the declaration can make this host hold, because otherwise a
-/// single request declaring four billion required clients would decide the
-/// memory footprint.
+/// Two things at once, and they are the same number for the same reason.
+///
+/// It bounds **how much state a declaration can make this host hold**, because
+/// otherwise a single request declaring four billion required clients would
+/// decide the memory footprint. It is also the point past which the reported
+/// count stops being floored at the demand and becomes the world — because a
+/// host that answers "five thousand" to a machine it has never seen has told a
+/// prober something no genuine host would.
+///
+/// 100 is four times the largest value any Microsoft product declares:
+/// `N_Policy` is 25 for Windows client SKUs and 5 for server and Office. Every
+/// real client is comfortably inside it, and every request outside it is a
+/// diagnostic tool or a probe.
 pub const MAX_TRACKED_REQUIRED_CLIENTS: u32 = 100;
 
 /// The most client machine IDs cached per application.
@@ -193,7 +215,18 @@ impl ClientCounts {
         // Floored at `N`, the minimum that activates — not at `2N`. py-kms
         // reflects 10000 back for a demand of 5000, which the audit calls
         // neither realistic nor safe (`POL-006`, #94).
-        let reported = world.max(demand);
+        //
+        // `POL-019` (#313): the floor applies only up to what this model
+        // tracks. Beyond that the answer is the world — how many machines this
+        // host is actually holding — which is exactly what a genuine host says.
+        // Reflecting an absurd demand back is a one-packet emulator test: no
+        // real host has ever told a machine it had never seen that it was
+        // caching five thousand others.
+        let reported = if anomalous_demand {
+            world
+        } else {
+            world.max(demand)
+        };
 
         CountView {
             reported,
@@ -335,6 +368,7 @@ mod tests {
 
     use super::{
         CMID_EXPIRY, ClientCounts, CountOutcome, MAX_APPLICATIONS, MAX_CACHED_PER_APPLICATION,
+        MAX_TRACKED_REQUIRED_CLIENTS,
     };
     use core::time::Duration;
     use kmsrs_db::Guid;
@@ -402,9 +436,11 @@ mod tests {
         for number in 100..=200_u8 {
             let view = counts.observe(windows(), client(number), RequiredClients(400), at(0));
             assert!(view.anomalous_demand);
-            assert_eq!(
-                view.reported, 400,
-                "the attacker is satisfied, and only the attacker"
+            assert!(
+                view.reported <= 200,
+                "an absurd demand must not be reflected back (POL-019, #313); \
+                 got {}",
+                view.reported
             );
         }
 
@@ -416,23 +452,95 @@ mod tests {
         assert_eq!(after.outcome, CountOutcome::Renewed);
     }
 
-    /// `POL-006` (#94): any demand is accepted and answered with the minimum
-    /// that activates. py-kms reflects `2N` back — 10000 for a demand of 5000 —
-    /// which the audit calls neither realistic nor safe.
+    /// `POL-006` (#94): every plausible demand is accepted and answered with
+    /// the minimum that activates. py-kms reflects `2N` back — 10000 for a
+    /// demand of 5000 — which the audit calls neither realistic nor safe.
     #[test]
-    fn an_anomalous_demand_is_answered_with_exactly_what_it_asked_for() {
+    fn a_plausible_demand_is_answered_with_exactly_what_it_asked_for() {
         let mut counts = ClientCounts::new();
         for (demand, expected) in [
             (0_u32, 1_u32),
             (1, 1),
             (5, 5),
             (25, 25),
-            (1_000, 1_000),
-            (5_000, 5_000),
-            (u32::MAX, u32::MAX),
+            (MAX_TRACKED_REQUIRED_CLIENTS, MAX_TRACKED_REQUIRED_CLIENTS),
         ] {
             let view = counts.observe(windows(), client(1), RequiredClients(demand), at(0));
             assert_eq!(view.reported, expected, "demand {demand}");
+            assert!(!view.anomalous_demand, "demand {demand}");
+        }
+    }
+
+    /// `POL-019` (#313): an absurd demand is answered the way a genuine host
+    /// answers it — with how many machines are actually cached.
+    ///
+    /// This is the one probe the previous behaviour failed. A prober sends
+    /// `N_Policy = 5000` from a machine the host has never seen; a real host
+    /// reports its small cache and the client does not activate. Reflecting
+    /// 5000 back was a fact about this program that nothing else on the wire
+    /// revealed, and it took one packet to read.
+    ///
+    /// Note what is *not* done here: the request is still answered, still
+    /// counted, and still gets an ePID. Refusing it — vlmcsd returns
+    /// `0x8007000D` — would be a third behaviour, equally distinctive, and is
+    /// declined as D38 (#283).
+    #[test]
+    fn an_absurd_demand_is_answered_the_way_a_genuine_host_answers_it() {
+        let mut counts = ClientCounts::new();
+
+        // A host that has seen nobody. It is holding exactly this client.
+        for demand in [MAX_TRACKED_REQUIRED_CLIENTS + 1, 1_000, 5_000, u32::MAX] {
+            let mut fresh = ClientCounts::new();
+            let view = fresh.observe(windows(), client(1), RequiredClients(demand), at(0));
+            assert!(view.anomalous_demand, "demand {demand}");
+            assert_eq!(
+                view.reported, 1,
+                "demand {demand} was reflected back rather than answered with \
+                 the cache size"
+            );
+        }
+
+        // A busy host answers with what it holds, still capped at the
+        // saturation value a genuine host would report.
+        for number in 1..=60_u8 {
+            counts.observe(windows(), client(number), RequiredClients(25), at(0));
+        }
+        let view = counts.observe(windows(), client(61), RequiredClients(5_000), at(0));
+        assert_eq!(view.cached, 61);
+        assert_eq!(view.reported, 61, "the answer is the world, not the demand");
+        assert!(view.anomalous_demand);
+    }
+
+    /// The boundary is exactly [`MAX_TRACKED_REQUIRED_CLIENTS`], and crossing
+    /// it changes only what an absurd demand is told.
+    ///
+    /// A test on the constant rather than on 100, so raising the bound cannot
+    /// leave this asserting yesterday's number.
+    #[test]
+    fn the_floor_stops_exactly_at_what_the_model_tracks() {
+        let mut counts = ClientCounts::new();
+        let at_bound = counts.observe(
+            windows(),
+            client(1),
+            RequiredClients(MAX_TRACKED_REQUIRED_CLIENTS),
+            at(0),
+        );
+        assert_eq!(at_bound.reported, MAX_TRACKED_REQUIRED_CLIENTS);
+        assert!(!at_bound.anomalous_demand);
+
+        let past_bound = counts.observe(
+            windows(),
+            client(2),
+            RequiredClients(MAX_TRACKED_REQUIRED_CLIENTS + 1),
+            at(0),
+        );
+        assert!(past_bound.anomalous_demand);
+        assert_eq!(past_bound.reported, past_bound.cached);
+
+        // And the value every real Microsoft product declares is nowhere near
+        // it, which is the whole argument for putting the boundary here.
+        for real in [5_u32, 25] {
+            assert!(real.saturating_mul(4) <= MAX_TRACKED_REQUIRED_CLIENTS);
         }
     }
 
