@@ -42,12 +42,25 @@
         in
         (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-      # `cleanCargoSource` keeps only Rust and Cargo files, which would drop the
-      # generated product data that `kmsrs-db`'s build.rs compiles into static
-      # tables (DB-003, #127), the committed golden wire vectors (TEST-002,
-      # #223) and the committed fuzz seeds (TEST-006, #227). All three are
-      # inputs to the build — the seeds because `kmsrs-vectors`' replay test
-      # reads them from disk — so all three have to survive the filter.
+      # `cleanCargoSource` keeps only Rust and Cargo files, which would drop
+      # several things the *tests* read from disk. Everything added back here is
+      # an input to the build in the same sense a source file is:
+      #
+      #   * the generated product data `kmsrs-db`'s build.rs compiles into
+      #     static tables (DB-003, #127);
+      #   * the committed golden wire vectors (TEST-002, #223) and fuzz seeds
+      #     (TEST-006, #227), the latter because `kmsrs-vectors`' replay test
+      #     reads them;
+      #   * the packaging files, because `packaging_invariants.rs` asserts
+      #     properties *of* them — that the image is two static binaries, that
+      #     `replicas: 1` is hardcoded, that every dependency is pinned. A test
+      #     that cannot see the file it is about is a test that passes for the
+      #     wrong reason, and this filter is how it silently would.
+      #
+      # This does mean editing `flake.nix` rebuilds the workspace crates. It
+      # does not rebuild dependencies: crane's `buildDepsOnly` builds from a
+      # dummy source derived from the manifests, so the expensive layer is
+      # unaffected.
       srcFor = system:
         let
           pkgs = pkgsFor system;
@@ -60,7 +73,14 @@
             (craneLib.filterCargoSources path type)
             || (builtins.match ".*/crates/kmsrs-db/data(/.*)?" path != null)
             || (builtins.match ".*/crates/kmsrs-vectors/vectors(/.*)?" path != null)
-            || (builtins.match ".*/fuzz/seeds(/.*)?" path != null);
+            || (builtins.match ".*/fuzz/seeds(/.*)?" path != null)
+            # What `packaging_invariants.rs` and `platform_invariants.rs` read.
+            || (builtins.match ".*/flake\\.(nix|lock)" path != null)
+            || (builtins.match ".*/rust-toolchain\\.toml" path != null)
+            || (builtins.match ".*/deny\\.toml" path != null)
+            || (builtins.match ".*/deploy(/.*)?" path != null)
+            || (builtins.match ".*/docs(/.*)?" path != null)
+            || (builtins.match ".*/ci(/.*)?" path != null);
         };
 
       commonArgsFor = system:
