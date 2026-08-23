@@ -38,3 +38,9 @@ htmlcov/
 # Local environment overrides (if any)
 .env.local
 .envrc.local
+
+# Artifacts downloaded by kmsrs-dbgen. Not committed: the generated
+# products.toml records a digest per source instead, so a silently
+# republished artifact shows up as a changed digest rather than as a
+# 4 MB diff of Microsoft's files (DB-002, #126).
+crates/kmsrs-dbgen/artifacts/

@@ -56,6 +56,17 @@ hex = { version = "=0.4.3", default-features = false }
 proptest = { version = "=1.11.0" }
 toml = { version = "=1.1.4" }
 
+# `kmsrs-dbgen` only. Nothing that ships may name these; the test in
+# crates/kmsrs-server/tests/workspace_invariants.rs is what enforces it
+# (ARCH-001, #1).
+roxmltree = { version = "=0.21.1" }
+base64 = { version = "=0.23.1" }
+flate2 = { version = "=1.1.9" }
+tar = { version = "=0.4.46" }
+ureq = { version = "=3.4.0" }
+cab = { version = "=0.6.0" }
+serde_json = { version = "=1.0.151" }
+
 # Workspace lint policy (ARCH-008, #8; SEC-001, #193).
 #
 # `unsafe_code = "forbid"` is set here rather than per-crate so that a new crate
