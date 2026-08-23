@@ -543,6 +543,23 @@
             exit 1
           fi
 
+          # `OS-003` (#254): the address came from DHCP, not from the kernel's
+          # compile-time fallback. Both produce a guest that answers on the
+          # forwarded port, so "it served" does not distinguish them — and a
+          # guest that quietly came up on 10.0.5.3 is one that would be
+          # unreachable on any real network.
+          if ! grep -q "DHCP config acquired" "$serial"; then
+            echo "the guest never acquired a DHCPv4 lease (OS-003, #254)" >&2
+            cat "$serial" >&2 || true
+            exit 1
+          fi
+          if grep -q "10\.0\.5\.3" "$serial"; then
+            echo "the guest used HERMIT_IP's built-in default rather than a \
+          lease (OS-003, #254)" >&2
+            cat "$serial" >&2 || true
+            exit 1
+          fi
+
           mkdir -p $out
           cp "$serial" $out/serial.log
         '';

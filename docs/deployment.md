@@ -394,6 +394,26 @@ Editing that file is the entire in-place reconfiguration story, and it is delibe
 doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch
 settings that cannot change a byte on the wire (`CFG-001`, #166).
 
+### Addressing is DHCPv4 (`OS-003`, #254)
+
+The guest takes its address from DHCP and there is nothing to configure. The `dhcpv4` feature is in
+the shipped kernel's feature set, the server binds `0.0.0.0`, and no part of this program reads its
+own IP to decide anything — so a lease that arrives late, changes, or is renewed is not an event the
+host has to handle. Give the VM a network the way you would give any other VM one, and reserve an
+address on the DHCP server if you want it to be stable, which you do: the SRV record has to point
+somewhere.
+
+The `HERMIT_IP`, `HERMIT_GATEWAY` and `HERMIT_MASK` variables exist, and are **not** the way to give
+this host a static address. With DHCPv4 compiled in the kernel treats them as a pre-lease fallback,
+logs a warning saying so, and overwrites them the moment a lease arrives. Worse, the kernel reads
+them through `option_env!` as well as at runtime, so a value set when the kernel was *built* is baked
+into every image — which is why nothing in `flake.nix` sets one and
+`crates/kmsrs-server/tests/hermit_addressing.rs` fails if that changes.
+
+If a genuinely static address is ever needed, the honest way to get it is a DHCP reservation. The
+kernel's own advice — disable the DHCP feature — would mean a second kernel build whose addressing
+came from the image rather than from the network.
+
 ### No disk, structurally (`OS-006`, #257)
 
 Axiom A5 — no disk I/O — is a promise this program keeps on Linux and Windows. On Hermit it is a
