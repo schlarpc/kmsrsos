@@ -6,6 +6,7 @@
 //! request path — py-kms parses an 88 KB XML catalogue twice per activation,
 //! which is about 4 ms of pure parsing before it has looked at anything.
 
+use crate::date::Date;
 use crate::guid::Guid;
 
 /// What kind of product key a configuration describes.
@@ -158,6 +159,49 @@ pub struct CountedId {
     pub guid: Guid,
     /// Indices into [`CSVLKS`] of every host key that counts this product.
     pub csvlks: &'static [u16],
+}
+
+/// A Windows build a generated ePID may claim (`DB-011`, #135).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostBuild {
+    /// The build number, as it appears in an ePID.
+    pub build: u32,
+    /// The platform identifier this build reports (`ID-009`, #114).
+    ///
+    /// 3612 for every build from 10240 onwards — a finding corroborated by two
+    /// genuine ePIDs from real machines, and one that appears in no published
+    /// Microsoft document.
+    pub platform_id: u32,
+    /// Release date, the lower bound for a randomised activation date
+    /// (`ID-007`, #112).
+    ///
+    /// Present exactly where [`Self::use_for_epid`] is set; the build asserts
+    /// that pairing, because a build with no date cannot produce an ePID.
+    pub release_date: Option<Date>,
+    /// Whether an ePID may claim this build.
+    pub use_for_epid: bool,
+    /// Whether this build speaks NDR64 (`ID-010`, #115).
+    ///
+    /// Advertising a build and then refusing its transfer syntax is a
+    /// combination no real host produces — py-kms claims build 17763 while
+    /// rejecting NDR64 — so the two travel together rather than being
+    /// configured separately.
+    pub ndr64: bool,
+    /// What the build is, for the log and the web UI.
+    pub description: &'static str,
+}
+
+/// A locale identifier a generated ePID may carry (`ID-008`, #113).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lcid {
+    /// The numeric identifier, emitted **unpadded** (`ID-005`, #110).
+    pub value: u32,
+    /// The BCP 47 language tag, for the log.
+    pub tag: &'static str,
+    /// The language name.
+    pub language: &'static str,
+    /// The region name.
+    pub location: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/tables.rs"));

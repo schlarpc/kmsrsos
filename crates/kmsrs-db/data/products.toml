@@ -23,11 +23,23 @@ generator_version = "0.1.0"
 # here rather than copied silently onto each row.
 
 [[source]]
+id = "ms-lcid"
+description = "[MS-LCID] Windows Language Code Identifier reference"
+origin = "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/a9eac961-e77d-41a6-90a5-ce1a8b0cdb9c"
+sha256 = ""
+
+[[source]]
 id = "office-ltsc-2024"
 description = "Microsoft Office LTSC 2024 Volume License Pack (16.0.17830.20004)"
 origin = "https://download.microsoft.com/download/1/4/0/140c97ae-7360-4dfc-9ba0-5f509600a06e/Office2024VolumeLicensePack_x64.exe"
 sha256 = "35a6801799fda3ae909827d2be6493b1869f9e0c0666b6c78b4430d261c0fafa"
 application = "0ff1ce15-a989-479d-af46-f275c6370663"
+
+[[source]]
+id = "research"
+description = "Host build table established in docs/research-findings.md"
+origin = "committed at crates/kmsrs-dbgen/host-builds.toml"
+sha256 = "87db119ce6fc023a38e3fd78d65de2106a810bb0d8cf2bc22fa699c5018e5e3e"
 
 [[source]]
 id = "windows-server-2025"
@@ -9766,3 +9778,1736 @@ counted_ids = []
 part_number = "[TH]X99-99999"
 start = 2000066
 end = 2000066
+
+# Windows builds a generated ePID may claim (`DB-011`, #135).
+#
+# `platform_id` appears in no published Microsoft document and is not
+# in pkeyconfig; this table is the one curated input in the pipeline,
+# and its source row says so. `release_date` is the lower bound for
+# the randomised activation date, so it is present exactly where
+# `use_for_epid` is set.
+#
+# `ndr64` is not independent of the build number — 9200 was the first
+# — but it is carried as data so the coupling can be checked against
+# the research (`ID-010`, #115).
+
+[[host_build]]
+build = 6002
+platform_id = 55041
+release_date = "2009-05-26"
+use_for_epid = true
+ndr64 = false
+description = "Windows Vista SP2 / Server 2008 SP2"
+source = "research"
+
+[[host_build]]
+build = 7601
+platform_id = 55041
+release_date = "2011-02-22"
+use_for_epid = true
+ndr64 = false
+description = "Windows 7 SP1 / Server 2008 R2 SP1"
+source = "research"
+
+[[host_build]]
+build = 9200
+platform_id = 5426
+release_date = "2012-10-26"
+use_for_epid = true
+ndr64 = true
+description = "Windows 8 / Server 2012"
+source = "research"
+
+[[host_build]]
+build = 9600
+platform_id = 6401
+release_date = "2013-10-18"
+use_for_epid = true
+ndr64 = true
+description = "Windows 8.1 / Server 2012 R2"
+source = "research"
+
+[[host_build]]
+build = 10240
+platform_id = 3612
+release_date = "2015-07-29"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1507"
+source = "research"
+
+[[host_build]]
+build = 14393
+platform_id = 3612
+release_date = "2016-08-02"
+use_for_epid = true
+ndr64 = true
+description = "Windows 10 1607 / Server 2016"
+source = "research"
+
+[[host_build]]
+build = 15063
+platform_id = 3612
+release_date = "2017-04-05"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1703"
+source = "research"
+
+[[host_build]]
+build = 16299
+platform_id = 3612
+release_date = "2017-10-17"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1709"
+source = "research"
+
+[[host_build]]
+build = 17134
+platform_id = 3612
+release_date = "2018-04-30"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1803"
+source = "research"
+
+[[host_build]]
+build = 17763
+platform_id = 3612
+release_date = "2018-10-02"
+use_for_epid = true
+ndr64 = true
+description = "Windows 10 1809 / Server 2019"
+source = "research"
+
+[[host_build]]
+build = 18362
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1903"
+source = "research"
+
+[[host_build]]
+build = 18363
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1909"
+source = "research"
+
+[[host_build]]
+build = 19041
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 2004"
+source = "research"
+
+[[host_build]]
+build = 19042
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 20H2"
+source = "research"
+
+[[host_build]]
+build = 19043
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 21H1"
+source = "research"
+
+[[host_build]]
+build = 19044
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 21H2"
+source = "research"
+
+[[host_build]]
+build = 20348
+platform_id = 3612
+release_date = "2021-08-18"
+use_for_epid = true
+ndr64 = true
+description = "Windows Server 2022"
+source = "research"
+
+[[host_build]]
+build = 22000
+platform_id = 3612
+release_date = "2021-10-04"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 21H2"
+source = "research"
+
+[[host_build]]
+build = 22621
+platform_id = 3612
+release_date = "2022-09-20"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 22H2"
+source = "research"
+
+[[host_build]]
+build = 22631
+platform_id = 3612
+release_date = "2023-10-31"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 23H2"
+source = "research"
+
+[[host_build]]
+build = 26100
+platform_id = 3612
+release_date = "2024-10-01"
+use_for_epid = true
+ndr64 = true
+description = "Windows 11 24H2 / Server 2025"
+source = "research"
+
+[[host_build]]
+build = 26200
+platform_id = 3612
+release_date = "2025-09-30"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 25H2"
+source = "research"
+
+[[host_build]]
+build = 28000
+platform_id = 3612
+release_date = "2026-02-10"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 26H1"
+source = "research"
+
+# Locale identifiers a generated ePID may carry (`ID-008`, #113),
+# from [MS-LCID]. Specific cultures only: the entries below 0x0400 are
+# primary language identifiers rather than locales, and 0x1000 is the
+# placeholder every unassigned locale shares.
+#
+# One is drawn per process and shared across host-key groups, which is
+# what makes a set of ePIDs from one host look self-consistent.
+[[lcid]]
+value = 1025
+tag = "ar-SA"
+language = "Arabic"
+location = "Saudi Arabia"
+source = "ms-lcid"
+[[lcid]]
+value = 1026
+tag = "bg-BG"
+language = "Bulgarian"
+location = "Bulgaria"
+source = "ms-lcid"
+[[lcid]]
+value = 1027
+tag = "ca-ES"
+language = "Catalan"
+location = "Spain"
+source = "ms-lcid"
+[[lcid]]
+value = 1028
+tag = "zh-TW"
+language = "Chinese (Traditional)"
+location = "Taiwan"
+source = "ms-lcid"
+[[lcid]]
+value = 1029
+tag = "cs-CZ"
+language = "Czech"
+location = "Czech Republic"
+source = "ms-lcid"
+[[lcid]]
+value = 1030
+tag = "da-DK"
+language = "Danish"
+location = "Denmark"
+source = "ms-lcid"
+[[lcid]]
+value = 1031
+tag = "de-DE"
+language = "German"
+location = "Germany"
+source = "ms-lcid"
+[[lcid]]
+value = 1032
+tag = "el-GR"
+language = "Greek"
+location = "Greece"
+source = "ms-lcid"
+[[lcid]]
+value = 1033
+tag = "en-US"
+language = "English"
+location = "United States"
+source = "ms-lcid"
+[[lcid]]
+value = 1035
+tag = "fi-FI"
+language = "Finnish"
+location = "Finland"
+source = "ms-lcid"
+[[lcid]]
+value = 1036
+tag = "fr-FR"
+language = "French"
+location = "France"
+source = "ms-lcid"
+[[lcid]]
+value = 1037
+tag = "he-IL"
+language = "Hebrew"
+location = "Israel"
+source = "ms-lcid"
+[[lcid]]
+value = 1038
+tag = "hu-HU"
+language = "Hungarian"
+location = "Hungary"
+source = "ms-lcid"
+[[lcid]]
+value = 1039
+tag = "is-IS"
+language = "Icelandic"
+location = "Iceland"
+source = "ms-lcid"
+[[lcid]]
+value = 1040
+tag = "it-IT"
+language = "Italian"
+location = "Italy"
+source = "ms-lcid"
+[[lcid]]
+value = 1041
+tag = "ja-JP"
+language = "Japanese"
+location = "Japan"
+source = "ms-lcid"
+[[lcid]]
+value = 1042
+tag = "ko-KR"
+language = "Korean"
+location = "Korea"
+source = "ms-lcid"
+[[lcid]]
+value = 1043
+tag = "nl-NL"
+language = "Dutch"
+location = "Netherlands"
+source = "ms-lcid"
+[[lcid]]
+value = 1044
+tag = "nb-NO"
+language = "Norwegian (Bokmal)"
+location = "Norway"
+source = "ms-lcid"
+[[lcid]]
+value = 1045
+tag = "pl-PL"
+language = "Polish"
+location = "Poland"
+source = "ms-lcid"
+[[lcid]]
+value = 1046
+tag = "pt-BR"
+language = "Portuguese"
+location = "Brazil"
+source = "ms-lcid"
+[[lcid]]
+value = 1047
+tag = "rm-CH"
+language = "Romansh"
+location = "Switzerland"
+source = "ms-lcid"
+[[lcid]]
+value = 1048
+tag = "ro-RO"
+language = "Romanian"
+location = "Romania"
+source = "ms-lcid"
+[[lcid]]
+value = 1049
+tag = "ru-RU"
+language = "Russian"
+location = "Russia"
+source = "ms-lcid"
+[[lcid]]
+value = 1050
+tag = "hr-HR"
+language = "Croatian"
+location = "Croatia"
+source = "ms-lcid"
+[[lcid]]
+value = 1051
+tag = "sk-SK"
+language = "Slovak"
+location = "Slovakia"
+source = "ms-lcid"
+[[lcid]]
+value = 1052
+tag = "sq-AL"
+language = "Albanian"
+location = "Albania"
+source = "ms-lcid"
+[[lcid]]
+value = 1053
+tag = "sv-SE"
+language = "Swedish"
+location = "Sweden"
+source = "ms-lcid"
+[[lcid]]
+value = 1054
+tag = "th-TH"
+language = "Thai"
+location = "Thailand"
+source = "ms-lcid"
+[[lcid]]
+value = 1055
+tag = "tr-TR"
+language = "Turkish"
+location = "Turkey"
+source = "ms-lcid"
+[[lcid]]
+value = 1056
+tag = "ur-PK"
+language = "Urdu"
+location = "Islamic Republic of Pakistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1057
+tag = "id-ID"
+language = "Indonesian"
+location = "Indonesia"
+source = "ms-lcid"
+[[lcid]]
+value = 1058
+tag = "uk-UA"
+language = "Ukrainian"
+location = "Ukraine"
+source = "ms-lcid"
+[[lcid]]
+value = 1059
+tag = "be-BY"
+language = "Belarusian"
+location = "Belarus"
+source = "ms-lcid"
+[[lcid]]
+value = 1060
+tag = "sl-SI"
+language = "Slovenian"
+location = "Slovenia"
+source = "ms-lcid"
+[[lcid]]
+value = 1061
+tag = "et-EE"
+language = "Estonian"
+location = "Estonia"
+source = "ms-lcid"
+[[lcid]]
+value = 1062
+tag = "lv-LV"
+language = "Latvian"
+location = "Latvia"
+source = "ms-lcid"
+[[lcid]]
+value = 1063
+tag = "lt-LT"
+language = "Lithuanian"
+location = "Lithuania"
+source = "ms-lcid"
+[[lcid]]
+value = 1064
+tag = "tg-Cyrl-TJ"
+language = "Tajik (Cyrillic)"
+location = "Tajikistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1065
+tag = "fa-IR"
+language = "Persian"
+location = "Iran"
+source = "ms-lcid"
+[[lcid]]
+value = 1066
+tag = "vi-VN"
+language = "Vietnamese"
+location = "Vietnam"
+source = "ms-lcid"
+[[lcid]]
+value = 1067
+tag = "hy-AM"
+language = "Armenian"
+location = "Armenia"
+source = "ms-lcid"
+[[lcid]]
+value = 1068
+tag = "az-Latn-AZ"
+language = "Azerbaijani (Latin)"
+location = "Azerbaijan"
+source = "ms-lcid"
+[[lcid]]
+value = 1069
+tag = "eu-ES"
+language = "Basque"
+location = "Spain"
+source = "ms-lcid"
+[[lcid]]
+value = 1070
+tag = "hsb-DE"
+language = "Upper Sorbian"
+location = "Germany"
+source = "ms-lcid"
+[[lcid]]
+value = 1071
+tag = "mk-MK"
+language = "Macedonian"
+location = "North Macedonia"
+source = "ms-lcid"
+[[lcid]]
+value = 1072
+tag = "st-ZA"
+language = "Sotho"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1073
+tag = "ts-ZA"
+language = "Tsonga"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1074
+tag = "tn-ZA"
+language = "Setswana"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1075
+tag = "ve-ZA"
+language = "Venda"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1076
+tag = "xh-ZA"
+language = "Xhosa"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1077
+tag = "zu-ZA"
+language = "Zulu"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1078
+tag = "af-ZA"
+language = "Afrikaans"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1079
+tag = "ka-GE"
+language = "Georgian"
+location = "Georgia"
+source = "ms-lcid"
+[[lcid]]
+value = 1080
+tag = "fo-FO"
+language = "Faroese"
+location = "Faroe Islands"
+source = "ms-lcid"
+[[lcid]]
+value = 1081
+tag = "hi-IN"
+language = "Hindi"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1082
+tag = "mt-MT"
+language = "Maltese"
+location = "Malta"
+source = "ms-lcid"
+[[lcid]]
+value = 1083
+tag = "se-NO"
+language = "Sami (Northern)"
+location = "Norway"
+source = "ms-lcid"
+[[lcid]]
+value = 1085
+tag = "yi-001"
+language = "Yiddish"
+location = "World"
+source = "ms-lcid"
+[[lcid]]
+value = 1086
+tag = "ms-MY"
+language = "Malay"
+location = "Malaysia"
+source = "ms-lcid"
+[[lcid]]
+value = 1087
+tag = "kk-KZ"
+language = "Kazakh"
+location = "Kazakhstan"
+source = "ms-lcid"
+[[lcid]]
+value = 1088
+tag = "ky-KG"
+language = "Kyrgyz"
+location = "Kyrgyzstan"
+source = "ms-lcid"
+[[lcid]]
+value = 1089
+tag = "sw-KE"
+language = "Kiswahili"
+location = "Kenya"
+source = "ms-lcid"
+[[lcid]]
+value = 1090
+tag = "tk-TM"
+language = "Turkmen"
+location = "Turkmenistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1091
+tag = "uz-Latn-UZ"
+language = "Uzbek (Latin)"
+location = "Uzbekistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1092
+tag = "tt-RU"
+language = "Tatar"
+location = "Russia"
+source = "ms-lcid"
+[[lcid]]
+value = 1093
+tag = "bn-IN"
+language = "Bangla"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1094
+tag = "pa-IN"
+language = "Punjabi"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1095
+tag = "gu-IN"
+language = "Gujarati"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1096
+tag = "or-IN"
+language = "Odia"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1097
+tag = "ta-IN"
+language = "Tamil"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1098
+tag = "te-IN"
+language = "Telugu"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1099
+tag = "kn-IN"
+language = "Kannada"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1100
+tag = "ml-IN"
+language = "Malayalam"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1101
+tag = "as-IN"
+language = "Assamese"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1102
+tag = "mr-IN"
+language = "Marathi"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1103
+tag = "sa-IN"
+language = "Sanskrit"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1104
+tag = "mn-MN"
+language = "Mongolian (Cyrillic)"
+location = "Mongolia"
+source = "ms-lcid"
+[[lcid]]
+value = 1105
+tag = "bo-CN"
+language = "Tibetan"
+location = "People's Republic of China"
+source = "ms-lcid"
+[[lcid]]
+value = 1106
+tag = "cy-GB"
+language = "Welsh"
+location = "United Kingdom"
+source = "ms-lcid"
+[[lcid]]
+value = 1107
+tag = "km-KH"
+language = "Khmer"
+location = "Cambodia"
+source = "ms-lcid"
+[[lcid]]
+value = 1108
+tag = "lo-LA"
+language = "Lao"
+location = "Lao P.D.R."
+source = "ms-lcid"
+[[lcid]]
+value = 1109
+tag = "my-MM"
+language = "Burmese"
+location = "Myanmar"
+source = "ms-lcid"
+[[lcid]]
+value = 1110
+tag = "gl-ES"
+language = "Galician"
+location = "Spain"
+source = "ms-lcid"
+[[lcid]]
+value = 1111
+tag = "kok-IN"
+language = "Konkani"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 1114
+tag = "syr-SY"
+language = "Syriac"
+location = "Syria"
+source = "ms-lcid"
+[[lcid]]
+value = 1115
+tag = "si-LK"
+language = "Sinhala"
+location = "Sri Lanka"
+source = "ms-lcid"
+[[lcid]]
+value = 1116
+tag = "chr-Cher-US"
+language = "Cherokee"
+location = "United States"
+source = "ms-lcid"
+[[lcid]]
+value = 1117
+tag = "iu-Cans-CA"
+language = "Inuktitut (Syllabics)"
+location = "Canada"
+source = "ms-lcid"
+[[lcid]]
+value = 1118
+tag = "am-ET"
+language = "Amharic"
+location = "Ethiopia"
+source = "ms-lcid"
+[[lcid]]
+value = 1119
+tag = "tzm-Arab-MA"
+language = "Central Atlas Tamazight (Arabic)"
+location = "Morocco"
+source = "ms-lcid"
+[[lcid]]
+value = 1121
+tag = "ne-NP"
+language = "Nepali"
+location = "Nepal"
+source = "ms-lcid"
+[[lcid]]
+value = 1122
+tag = "fy-NL"
+language = "Frisian"
+location = "Netherlands"
+source = "ms-lcid"
+[[lcid]]
+value = 1123
+tag = "ps-AF"
+language = "Pashto"
+location = "Afghanistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1124
+tag = "fil-PH"
+language = "Filipino"
+location = "Philippines"
+source = "ms-lcid"
+[[lcid]]
+value = 1125
+tag = "dv-MV"
+language = "Divehi"
+location = "Maldives"
+source = "ms-lcid"
+[[lcid]]
+value = 1127
+tag = "ff-NG"
+language = "Fulah"
+location = "Nigeria"
+source = "ms-lcid"
+[[lcid]]
+value = 1128
+tag = "ha-Latn-NG"
+language = "Hausa (Latin)"
+location = "Nigeria"
+source = "ms-lcid"
+[[lcid]]
+value = 1130
+tag = "yo-NG"
+language = "Yoruba"
+location = "Nigeria"
+source = "ms-lcid"
+[[lcid]]
+value = 1131
+tag = "quz-BO"
+language = "Quechua"
+location = "Bolivia"
+source = "ms-lcid"
+[[lcid]]
+value = 1132
+tag = "nso-ZA"
+language = "Sesotho sa Leboa"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 1133
+tag = "ba-RU"
+language = "Bashkir"
+location = "Russia"
+source = "ms-lcid"
+[[lcid]]
+value = 1134
+tag = "lb-LU"
+language = "Luxembourgish"
+location = "Luxembourg"
+source = "ms-lcid"
+[[lcid]]
+value = 1135
+tag = "kl-GL"
+language = "Greenlandic"
+location = "Greenland"
+source = "ms-lcid"
+[[lcid]]
+value = 1136
+tag = "ig-NG"
+language = "Igbo"
+location = "Nigeria"
+source = "ms-lcid"
+[[lcid]]
+value = 1137
+tag = "kr-Latn-NG"
+language = "Kanuri (Latin)"
+location = "Nigeria"
+source = "ms-lcid"
+[[lcid]]
+value = 1138
+tag = "om-ET"
+language = "Oromo"
+location = "Ethiopia"
+source = "ms-lcid"
+[[lcid]]
+value = 1139
+tag = "ti-ET"
+language = "Tigrinya"
+location = "Ethiopia"
+source = "ms-lcid"
+[[lcid]]
+value = 1140
+tag = "gn-PY"
+language = "Guarani"
+location = "Paraguay"
+source = "ms-lcid"
+[[lcid]]
+value = 1141
+tag = "haw-US"
+language = "Hawaiian"
+location = "United States"
+source = "ms-lcid"
+[[lcid]]
+value = 1142
+tag = "la-VA"
+language = "Latin"
+location = "Vatican City"
+source = "ms-lcid"
+[[lcid]]
+value = 1143
+tag = "so-SO"
+language = "Somali"
+location = "Somalia"
+source = "ms-lcid"
+[[lcid]]
+value = 1144
+tag = "ii-CN"
+language = "Yi"
+location = "People's Republic of China"
+source = "ms-lcid"
+[[lcid]]
+value = 1146
+tag = "arn-CL"
+language = "Mapudungun"
+location = "Chile"
+source = "ms-lcid"
+[[lcid]]
+value = 1148
+tag = "moh-CA"
+language = "Mohawk"
+location = "Canada"
+source = "ms-lcid"
+[[lcid]]
+value = 1150
+tag = "br-FR"
+language = "Breton"
+location = "France"
+source = "ms-lcid"
+[[lcid]]
+value = 1152
+tag = "ug-CN"
+language = "Uyghur"
+location = "People's Republic of China"
+source = "ms-lcid"
+[[lcid]]
+value = 1153
+tag = "mi-NZ"
+language = "Maori"
+location = "New Zealand"
+source = "ms-lcid"
+[[lcid]]
+value = 1154
+tag = "oc-FR"
+language = "Occitan"
+location = "France"
+source = "ms-lcid"
+[[lcid]]
+value = 1155
+tag = "co-FR"
+language = "Corsican"
+location = "France"
+source = "ms-lcid"
+[[lcid]]
+value = 1156
+tag = "gsw-FR"
+language = "Alsatian"
+location = "France"
+source = "ms-lcid"
+[[lcid]]
+value = 1157
+tag = "sah-RU"
+language = "Sakha"
+location = "Russia"
+source = "ms-lcid"
+[[lcid]]
+value = 1158
+tag = "quc-Latn-GT"
+language = "K'iche"
+location = "Guatemala"
+source = "ms-lcid"
+[[lcid]]
+value = 1159
+tag = "rw-RW"
+language = "Kinyarwanda"
+location = "Rwanda"
+source = "ms-lcid"
+[[lcid]]
+value = 1160
+tag = "wo-SN"
+language = "Wolof"
+location = "Senegal"
+source = "ms-lcid"
+[[lcid]]
+value = 1164
+tag = "prs-AF"
+language = "Dari"
+location = "Afghanistan"
+source = "ms-lcid"
+[[lcid]]
+value = 1169
+tag = "gd-GB"
+language = "Scottish Gaelic"
+location = "United Kingdom"
+source = "ms-lcid"
+[[lcid]]
+value = 1170
+tag = "ku-Arab-IQ"
+language = "Central Kurdish"
+location = "Iraq"
+source = "ms-lcid"
+[[lcid]]
+value = 2049
+tag = "ar-IQ"
+language = "Arabic"
+location = "Iraq"
+source = "ms-lcid"
+[[lcid]]
+value = 2052
+tag = "zh-CN"
+language = "Chinese (Simplified)"
+location = "People's Republic of China"
+source = "ms-lcid"
+[[lcid]]
+value = 2055
+tag = "de-CH"
+language = "German"
+location = "Switzerland"
+source = "ms-lcid"
+[[lcid]]
+value = 2057
+tag = "en-GB"
+language = "English"
+location = "United Kingdom"
+source = "ms-lcid"
+[[lcid]]
+value = 2058
+tag = "es-MX"
+language = "Spanish"
+location = "Mexico"
+source = "ms-lcid"
+[[lcid]]
+value = 2060
+tag = "fr-BE"
+language = "French"
+location = "Belgium"
+source = "ms-lcid"
+[[lcid]]
+value = 2064
+tag = "it-CH"
+language = "Italian"
+location = "Switzerland"
+source = "ms-lcid"
+[[lcid]]
+value = 2067
+tag = "nl-BE"
+language = "Dutch"
+location = "Belgium"
+source = "ms-lcid"
+[[lcid]]
+value = 2068
+tag = "nn-NO"
+language = "Norwegian (Nynorsk)"
+location = "Norway"
+source = "ms-lcid"
+[[lcid]]
+value = 2070
+tag = "pt-PT"
+language = "Portuguese"
+location = "Portugal"
+source = "ms-lcid"
+[[lcid]]
+value = 2072
+tag = "ro-MD"
+language = "Romanian"
+location = "Moldova"
+source = "ms-lcid"
+[[lcid]]
+value = 2073
+tag = "ru-MD"
+language = "Russian"
+location = "Moldova"
+source = "ms-lcid"
+[[lcid]]
+value = 2074
+tag = "sr-Latn-CS"
+language = "Serbian (Latin)"
+location = "Serbia and Montenegro (Former)"
+source = "ms-lcid"
+[[lcid]]
+value = 2077
+tag = "sv-FI"
+language = "Swedish"
+location = "Finland"
+source = "ms-lcid"
+[[lcid]]
+value = 2080
+tag = "ur-IN"
+language = "Urdu"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 2092
+tag = "az-Cyrl-AZ"
+language = "Azerbaijani (Cyrillic)"
+location = "Azerbaijan"
+source = "ms-lcid"
+[[lcid]]
+value = 2094
+tag = "dsb-DE"
+language = "Lower Sorbian"
+location = "Germany"
+source = "ms-lcid"
+[[lcid]]
+value = 2098
+tag = "tn-BW"
+language = "Setswana"
+location = "Botswana"
+source = "ms-lcid"
+[[lcid]]
+value = 2107
+tag = "se-SE"
+language = "Sami (Northern)"
+location = "Sweden"
+source = "ms-lcid"
+[[lcid]]
+value = 2108
+tag = "ga-IE"
+language = "Irish"
+location = "Ireland"
+source = "ms-lcid"
+[[lcid]]
+value = 2110
+tag = "ms-BN"
+language = "Malay"
+location = "Brunei Darussalam"
+source = "ms-lcid"
+[[lcid]]
+value = 2115
+tag = "uz-Cyrl-UZ"
+language = "Uzbek (Cyrillic)"
+location = "Uzbekistan"
+source = "ms-lcid"
+[[lcid]]
+value = 2117
+tag = "bn-BD"
+language = "Bangla"
+location = "Bangladesh"
+source = "ms-lcid"
+[[lcid]]
+value = 2118
+tag = "pa-Arab-PK"
+language = "Punjabi"
+location = "Islamic Republic of Pakistan"
+source = "ms-lcid"
+[[lcid]]
+value = 2121
+tag = "ta-LK"
+language = "Tamil"
+location = "Sri Lanka"
+source = "ms-lcid"
+[[lcid]]
+value = 2128
+tag = "mn-Mong-CN"
+language = "Mongolian (Traditional Mongolian)"
+location = "People's Republic of China"
+source = "ms-lcid"
+[[lcid]]
+value = 2137
+tag = "sd-Arab-PK"
+language = "Sindhi"
+location = "Islamic Republic of Pakistan"
+source = "ms-lcid"
+[[lcid]]
+value = 2141
+tag = "iu-Latn-CA"
+language = "Inuktitut (Latin)"
+location = "Canada"
+source = "ms-lcid"
+[[lcid]]
+value = 2143
+tag = "tzm-Latn-DZ"
+language = "Tamazight (Latin)"
+location = "Algeria"
+source = "ms-lcid"
+[[lcid]]
+value = 2144
+tag = "ks-Deva-IN"
+language = "Kashmiri (Devanagari)"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 2145
+tag = "ne-IN"
+language = "Nepali"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 2151
+tag = "ff-Latn-SN"
+language = "Fulah"
+location = "Senegal"
+source = "ms-lcid"
+[[lcid]]
+value = 2155
+tag = "quz-EC"
+language = "Quechua"
+location = "Ecuador"
+source = "ms-lcid"
+[[lcid]]
+value = 2163
+tag = "ti-ER"
+language = "Tigrinya"
+location = "Eritrea"
+source = "ms-lcid"
+[[lcid]]
+value = 3073
+tag = "ar-EG"
+language = "Arabic"
+location = "Egypt"
+source = "ms-lcid"
+[[lcid]]
+value = 3076
+tag = "zh-HK"
+language = "Chinese (Traditional)"
+location = "Hong Kong S.A.R."
+source = "ms-lcid"
+[[lcid]]
+value = 3079
+tag = "de-AT"
+language = "German"
+location = "Austria"
+source = "ms-lcid"
+[[lcid]]
+value = 3081
+tag = "en-AU"
+language = "English"
+location = "Australia"
+source = "ms-lcid"
+[[lcid]]
+value = 3082
+tag = "es-ES"
+language = "Spanish"
+location = "Spain"
+source = "ms-lcid"
+[[lcid]]
+value = 3084
+tag = "fr-CA"
+language = "French"
+location = "Canada"
+source = "ms-lcid"
+[[lcid]]
+value = 3098
+tag = "sr-Cyrl-CS"
+language = "Serbian (Cyrillic)"
+location = "Serbia and Montenegro (Former)"
+source = "ms-lcid"
+[[lcid]]
+value = 3131
+tag = "se-FI"
+language = "Sami (Northern)"
+location = "Finland"
+source = "ms-lcid"
+[[lcid]]
+value = 3152
+tag = "mn-Mong-MN"
+language = "Mongolian (Traditional Mongolian)"
+location = "Mongolia"
+source = "ms-lcid"
+[[lcid]]
+value = 3153
+tag = "dz-BT"
+language = "Dzongkha"
+location = "Bhutan"
+source = "ms-lcid"
+[[lcid]]
+value = 3179
+tag = "quz-PE"
+language = "Quechua"
+location = "Peru"
+source = "ms-lcid"
+[[lcid]]
+value = 4097
+tag = "ar-LY"
+language = "Arabic"
+location = "Libya"
+source = "ms-lcid"
+[[lcid]]
+value = 4100
+tag = "zh-SG"
+language = "Chinese (Simplified)"
+location = "Singapore"
+source = "ms-lcid"
+[[lcid]]
+value = 4103
+tag = "de-LU"
+language = "German"
+location = "Luxembourg"
+source = "ms-lcid"
+[[lcid]]
+value = 4105
+tag = "en-CA"
+language = "English"
+location = "Canada"
+source = "ms-lcid"
+[[lcid]]
+value = 4106
+tag = "es-GT"
+language = "Spanish"
+location = "Guatemala"
+source = "ms-lcid"
+[[lcid]]
+value = 4108
+tag = "fr-CH"
+language = "French"
+location = "Switzerland"
+source = "ms-lcid"
+[[lcid]]
+value = 4122
+tag = "hr-BA"
+language = "Croatian (Latin)"
+location = "Bosnia and Herzegovina"
+source = "ms-lcid"
+[[lcid]]
+value = 4155
+tag = "smj-NO"
+language = "Sami (Lule)"
+location = "Norway"
+source = "ms-lcid"
+[[lcid]]
+value = 5121
+tag = "ar-DZ"
+language = "Arabic"
+location = "Algeria"
+source = "ms-lcid"
+[[lcid]]
+value = 5124
+tag = "zh-MO"
+language = "Chinese (Traditional)"
+location = "Macao S.A.R."
+source = "ms-lcid"
+[[lcid]]
+value = 5127
+tag = "de-LI"
+language = "German"
+location = "Liechtenstein"
+source = "ms-lcid"
+[[lcid]]
+value = 5129
+tag = "en-NZ"
+language = "English"
+location = "New Zealand"
+source = "ms-lcid"
+[[lcid]]
+value = 5130
+tag = "es-CR"
+language = "Spanish"
+location = "Costa Rica"
+source = "ms-lcid"
+[[lcid]]
+value = 5132
+tag = "fr-LU"
+language = "French"
+location = "Luxembourg"
+source = "ms-lcid"
+[[lcid]]
+value = 5146
+tag = "bs-Latn-BA"
+language = "Bosnian (Latin)"
+location = "Bosnia and Herzegovina"
+source = "ms-lcid"
+[[lcid]]
+value = 5179
+tag = "smj-SE"
+language = "Sami (Lule)"
+location = "Sweden"
+source = "ms-lcid"
+[[lcid]]
+value = 6145
+tag = "ar-MA"
+language = "Arabic"
+location = "Morocco"
+source = "ms-lcid"
+[[lcid]]
+value = 6153
+tag = "en-IE"
+language = "English"
+location = "Ireland"
+source = "ms-lcid"
+[[lcid]]
+value = 6154
+tag = "es-PA"
+language = "Spanish"
+location = "Panama"
+source = "ms-lcid"
+[[lcid]]
+value = 6156
+tag = "fr-MC"
+language = "French"
+location = "Principality of Monaco"
+source = "ms-lcid"
+[[lcid]]
+value = 6170
+tag = "sr-Latn-BA"
+language = "Serbian (Latin)"
+location = "Bosnia and Herzegovina"
+source = "ms-lcid"
+[[lcid]]
+value = 6203
+tag = "sma-NO"
+language = "Sami (Southern)"
+location = "Norway"
+source = "ms-lcid"
+[[lcid]]
+value = 7169
+tag = "ar-TN"
+language = "Arabic"
+location = "Tunisia"
+source = "ms-lcid"
+[[lcid]]
+value = 7177
+tag = "en-ZA"
+language = "English"
+location = "South Africa"
+source = "ms-lcid"
+[[lcid]]
+value = 7178
+tag = "es-DO"
+language = "Spanish"
+location = "Dominican Republic"
+source = "ms-lcid"
+[[lcid]]
+value = 7180
+tag = "fr-029"
+language = "French"
+location = "Caribbean"
+source = "ms-lcid"
+[[lcid]]
+value = 7194
+tag = "sr-Cyrl-BA"
+language = "Serbian (Cyrillic)"
+location = "Bosnia and Herzegovina"
+source = "ms-lcid"
+[[lcid]]
+value = 7227
+tag = "sma-SE"
+language = "Sami (Southern)"
+location = "Sweden"
+source = "ms-lcid"
+[[lcid]]
+value = 8193
+tag = "ar-OM"
+language = "Arabic"
+location = "Oman"
+source = "ms-lcid"
+[[lcid]]
+value = 8201
+tag = "en-JM"
+language = "English"
+location = "Jamaica"
+source = "ms-lcid"
+[[lcid]]
+value = 8202
+tag = "es-VE"
+language = "Spanish"
+location = "Bolivarian Republic of Venezuela"
+source = "ms-lcid"
+[[lcid]]
+value = 8204
+tag = "fr-RE"
+language = "French"
+location = "Reunion"
+source = "ms-lcid"
+[[lcid]]
+value = 8218
+tag = "bs-Cyrl-BA"
+language = "Bosnian (Cyrillic)"
+location = "Bosnia and Herzegovina"
+source = "ms-lcid"
+[[lcid]]
+value = 8251
+tag = "sms-FI"
+language = "Sami (Skolt)"
+location = "Finland"
+source = "ms-lcid"
+[[lcid]]
+value = 9217
+tag = "ar-YE"
+language = "Arabic"
+location = "Yemen"
+source = "ms-lcid"
+[[lcid]]
+value = 9225
+tag = "en-029"
+language = "English"
+location = "Caribbean"
+source = "ms-lcid"
+[[lcid]]
+value = 9226
+tag = "es-CO"
+language = "Spanish"
+location = "Colombia"
+source = "ms-lcid"
+[[lcid]]
+value = 9228
+tag = "fr-CD"
+language = "French"
+location = "Congo, DRC"
+source = "ms-lcid"
+[[lcid]]
+value = 9242
+tag = "sr-Latn-RS"
+language = "Serbian (Latin)"
+location = "Serbia"
+source = "ms-lcid"
+[[lcid]]
+value = 9275
+tag = "smn-FI"
+language = "Sami (Inari)"
+location = "Finland"
+source = "ms-lcid"
+[[lcid]]
+value = 10241
+tag = "ar-SY"
+language = "Arabic"
+location = "Syria"
+source = "ms-lcid"
+[[lcid]]
+value = 10249
+tag = "en-BZ"
+language = "English"
+location = "Belize"
+source = "ms-lcid"
+[[lcid]]
+value = 10250
+tag = "es-PE"
+language = "Spanish"
+location = "Peru"
+source = "ms-lcid"
+[[lcid]]
+value = 10252
+tag = "fr-SN"
+language = "French"
+location = "Senegal"
+source = "ms-lcid"
+[[lcid]]
+value = 10266
+tag = "sr-Cyrl-RS"
+language = "Serbian (Cyrillic)"
+location = "Serbia"
+source = "ms-lcid"
+[[lcid]]
+value = 11265
+tag = "ar-JO"
+language = "Arabic"
+location = "Jordan"
+source = "ms-lcid"
+[[lcid]]
+value = 11273
+tag = "en-TT"
+language = "English"
+location = "Trinidad and Tobago"
+source = "ms-lcid"
+[[lcid]]
+value = 11274
+tag = "es-AR"
+language = "Spanish"
+location = "Argentina"
+source = "ms-lcid"
+[[lcid]]
+value = 11276
+tag = "fr-CM"
+language = "French"
+location = "Cameroon"
+source = "ms-lcid"
+[[lcid]]
+value = 11290
+tag = "sr-Latn-ME"
+language = "Serbian (Latin)"
+location = "Montenegro"
+source = "ms-lcid"
+[[lcid]]
+value = 12289
+tag = "ar-LB"
+language = "Arabic"
+location = "Lebanon"
+source = "ms-lcid"
+[[lcid]]
+value = 12297
+tag = "en-ZW"
+language = "English"
+location = "Zimbabwe"
+source = "ms-lcid"
+[[lcid]]
+value = 12298
+tag = "es-EC"
+language = "Spanish"
+location = "Ecuador"
+source = "ms-lcid"
+[[lcid]]
+value = 12300
+tag = "fr-CI"
+language = "French"
+location = "Côte d'Ivoire"
+source = "ms-lcid"
+[[lcid]]
+value = 12314
+tag = "sr-Cyrl-ME"
+language = "Serbian (Cyrillic)"
+location = "Montenegro"
+source = "ms-lcid"
+[[lcid]]
+value = 13313
+tag = "ar-KW"
+language = "Arabic"
+location = "Kuwait"
+source = "ms-lcid"
+[[lcid]]
+value = 13321
+tag = "en-PH"
+language = "English"
+location = "Republic of the Philippines"
+source = "ms-lcid"
+[[lcid]]
+value = 13322
+tag = "es-CL"
+language = "Spanish"
+location = "Chile"
+source = "ms-lcid"
+[[lcid]]
+value = 13324
+tag = "fr-ML"
+language = "French"
+location = "Mali"
+source = "ms-lcid"
+[[lcid]]
+value = 14337
+tag = "ar-AE"
+language = "Arabic"
+location = "U.A.E."
+source = "ms-lcid"
+[[lcid]]
+value = 14346
+tag = "es-UY"
+language = "Spanish"
+location = "Uruguay"
+source = "ms-lcid"
+[[lcid]]
+value = 14348
+tag = "fr-MA"
+language = "French"
+location = "Morocco"
+source = "ms-lcid"
+[[lcid]]
+value = 15361
+tag = "ar-BH"
+language = "Arabic"
+location = "Bahrain"
+source = "ms-lcid"
+[[lcid]]
+value = 15369
+tag = "en-HK"
+language = "English"
+location = "Hong Kong"
+source = "ms-lcid"
+[[lcid]]
+value = 15370
+tag = "es-PY"
+language = "Spanish"
+location = "Paraguay"
+source = "ms-lcid"
+[[lcid]]
+value = 15372
+tag = "fr-HT"
+language = "French"
+location = "Haiti"
+source = "ms-lcid"
+[[lcid]]
+value = 16385
+tag = "ar-QA"
+language = "Arabic"
+location = "Qatar"
+source = "ms-lcid"
+[[lcid]]
+value = 16393
+tag = "en-IN"
+language = "English"
+location = "India"
+source = "ms-lcid"
+[[lcid]]
+value = 16394
+tag = "es-BO"
+language = "Spanish"
+location = "Bolivia"
+source = "ms-lcid"
+[[lcid]]
+value = 17417
+tag = "en-MY"
+language = "English"
+location = "Malaysia"
+source = "ms-lcid"
+[[lcid]]
+value = 17418
+tag = "es-SV"
+language = "Spanish"
+location = "El Salvador"
+source = "ms-lcid"
+[[lcid]]
+value = 18441
+tag = "en-SG"
+language = "English"
+location = "Singapore"
+source = "ms-lcid"
+[[lcid]]
+value = 18442
+tag = "es-HN"
+language = "Spanish"
+location = "Honduras"
+source = "ms-lcid"
+[[lcid]]
+value = 19465
+tag = "en-AE"
+language = "English"
+location = "United Arab Emirates"
+source = "ms-lcid"
+[[lcid]]
+value = 19466
+tag = "es-NI"
+language = "Spanish"
+location = "Nicaragua"
+source = "ms-lcid"
+[[lcid]]
+value = 20490
+tag = "es-PR"
+language = "Spanish"
+location = "Puerto Rico"
+source = "ms-lcid"
+[[lcid]]
+value = 21514
+tag = "es-US"
+language = "Spanish"
+location = "United States"
+source = "ms-lcid"
+[[lcid]]
+value = 22538
+tag = "es-419"
+language = "Spanish"
+location = "Latin America"
+source = "ms-lcid"
+[[lcid]]
+value = 23562
+tag = "es-CU"
+language = "Spanish"
+location = "Cuba"
+source = "ms-lcid"

@@ -6,7 +6,10 @@
 //! bare-metal target.
 
 use crate::guid::Guid;
-use crate::tables::{APPLICATIONS, Application, COUNTED_IDS, CSVLKS, Csvlk, PRODUCTS, Product};
+use crate::tables::{
+    APPLICATIONS, Application, COUNTED_IDS, CSVLKS, Csvlk, EPID_HOST_BUILDS, HOST_BUILDS,
+    HostBuild, LCIDS, Lcid, PRODUCTS, Product,
+};
 
 /// The application a GUID names, if it is one of the three.
 #[must_use]
@@ -76,6 +79,46 @@ pub fn is_known_counted_id(counted_id: Guid) -> bool {
     !csvlks_counting(counted_id).is_empty()
 }
 
+/// Every host build an ePID may claim (`ID-009`, #114; `ID-011`, #116).
+///
+/// Non-empty by construction: the build fails if the table would be empty, so
+/// callers do not have to handle "no build to claim". vlmcsd's equivalent
+/// coupling is a `while (TRUE)` loop that hangs at start-up instead.
+pub fn epid_host_builds() -> impl Iterator<Item = &'static HostBuild> {
+    EPID_HOST_BUILDS
+        .iter()
+        .filter_map(|index| HOST_BUILDS.get(usize::from(*index)))
+}
+
+/// How many host builds an ePID may draw from.
+///
+/// Never zero: the build fails if the table would be empty, which is what
+/// makes [`epid_host_build_at`] a lookup rather than a search.
+#[must_use]
+pub const fn epid_host_build_count() -> usize {
+    EPID_HOST_BUILDS.len()
+}
+
+/// How many locales an ePID may draw from. Never zero.
+#[must_use]
+pub const fn lcid_count() -> usize {
+    LCIDS.len()
+}
+
+/// The host build at an index in [`EPID_HOST_BUILDS`].
+#[must_use]
+pub fn epid_host_build_at(position: usize) -> Option<&'static HostBuild> {
+    EPID_HOST_BUILDS
+        .get(position)
+        .and_then(|index| HOST_BUILDS.get(usize::from(*index)))
+}
+
+/// The locale at an index in [`LCIDS`].
+#[must_use]
+pub fn lcid_at(position: usize) -> Option<&'static Lcid> {
+    LCIDS.get(position)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -87,9 +130,12 @@ mod tests {
         reason = "test code: a failed expectation should abort loudly"
     )]
 
-    use super::{application, csvlk, csvlk_at, csvlks_counting, is_known_counted_id, product};
+    use super::{
+        application, csvlk, csvlk_at, csvlks_counting, epid_host_build_at, epid_host_builds,
+        is_known_counted_id, lcid_at, product,
+    };
     use crate::guid::Guid;
-    use crate::tables::{APPLICATIONS, COUNTED_IDS, CSVLKS, KeyKind, PRODUCTS};
+    use crate::tables::{APPLICATIONS, COUNTED_IDS, CSVLKS, HOST_BUILDS, KeyKind, LCIDS, PRODUCTS};
     use alloc::format;
     use alloc::vec::Vec;
 
@@ -315,5 +361,100 @@ mod tests {
         for entry in &COUNTED_IDS {
             assert!(is_known_counted_id(entry.guid));
         }
+    }
+
+    /// `DB-011` (#135): the host build table, against the research it came
+    /// from. PlatformId appears in no published Microsoft document, so these
+    /// are the values the two genuine ePIDs corroborate.
+    #[test]
+    fn the_host_build_table_matches_the_research() {
+        assert!(HOST_BUILDS.len() >= 20);
+
+        // PlatformId is 3612 for every build from 10240 onwards.
+        for entry in &HOST_BUILDS {
+            if entry.build >= 10_240 {
+                assert_eq!(entry.platform_id, 3612, "build {}", entry.build);
+            }
+        }
+
+        // Sorted, and the pre-NDR64 builds carry their own platform ids.
+        let mut previous = 0;
+        for entry in &HOST_BUILDS {
+            assert!(entry.build > previous, "not sorted at {}", entry.build);
+            previous = entry.build;
+        }
+        assert_eq!(
+            HOST_BUILDS
+                .iter()
+                .find(|entry| entry.build == 7601)
+                .unwrap()
+                .platform_id,
+            55_041
+        );
+
+        // Build 28000 is real — KB5077179, 2026-02-10 — not speculation.
+        assert!(HOST_BUILDS.iter().any(|entry| entry.build == 28_000));
+    }
+
+    /// `ID-010` (#115): the build and its transfer syntax travel together, so
+    /// a host cannot claim build 26100 while refusing NDR64 — a combination no
+    /// real host produces and one py-kms emits.
+    #[test]
+    fn no_build_claims_a_syntax_its_era_did_not_have() {
+        for entry in &HOST_BUILDS {
+            assert_eq!(
+                entry.ndr64,
+                entry.build >= 9200,
+                "build {} says ndr64={}",
+                entry.build,
+                entry.ndr64
+            );
+        }
+    }
+
+    /// `ID-011` (#116): non-empty by construction, and every drawable build
+    /// carries the release date an activation date is drawn from.
+    #[test]
+    fn every_drawable_build_can_actually_produce_an_epid() {
+        let builds: alloc::vec::Vec<u32> = epid_host_builds().map(|entry| entry.build).collect();
+        assert_eq!(
+            builds,
+            [6002, 7601, 9200, 9600, 14_393, 17_763, 20_348, 26_100]
+        );
+
+        for entry in epid_host_builds() {
+            assert!(entry.use_for_epid);
+            let date = entry.release_date.expect("a drawable build has a date");
+            assert!(date.year() >= 2009, "{date} for build {}", entry.build);
+            assert!(date.day_of_year() >= 1, "the day-of-year is 1-based");
+        }
+
+        assert!(epid_host_build_at(0).is_some());
+        assert!(epid_host_build_at(builds.len()).is_none());
+    }
+
+    /// `ID-008` (#113): the locale pool. Every entry is a specific culture, so
+    /// none is below 1025 — which is the research note restated.
+    #[test]
+    fn the_locale_table_holds_only_specific_cultures() {
+        assert!(LCIDS.len() > 100, "{} locales", LCIDS.len());
+
+        let mut previous = 0;
+        for entry in &LCIDS {
+            assert!(
+                entry.value >= 1025,
+                "{} is a primary language id",
+                entry.value
+            );
+            assert!(entry.value > previous, "not sorted at {}", entry.value);
+            previous = entry.value;
+            assert!(entry.tag.contains('-'), "{} has no region", entry.tag);
+        }
+
+        // en-US, the one every reader can check by eye.
+        let american_english = LCIDS.iter().find(|entry| entry.value == 1033).unwrap();
+        assert_eq!(american_english.tag, "en-US");
+        assert_eq!(lcid_at(0).map(|entry| entry.value), Some(LCIDS[0].value));
+        assert!(lcid_at(LCIDS.len()).is_none());
     }
 }
