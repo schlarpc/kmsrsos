@@ -46,7 +46,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 11 | RPC fragmentation | Implement, **inbound reassembly only** (#80) |
 | 12 | Source-IP ACL | Default allow-all; CIDR allow/deny lists available (#101) |
 | 13 | Runtime config | Doctrine: rebuild from the flake. Escape hatch: one env var, wire-invisible fields only (#167) |
-| 14 | Log format | JSON Lines; ANSI only when stderr is a TTY and `NO_COLOR` unset (#178) |
+| 14 | Log format | JSON Lines; ANSI only when stderr is a TTY, the terminal understands it, and `NO_COLOR` is unset (#178, #162) |
 | 15 | Windows Event Log | Narrow exception: six lifecycle/fatal events only (#192). Linux syslog declined → [D7](#d7) |
 | 16 | Metrics | `/metrics` in Prometheus text format, including an entropy-health gauge (#189) |
 | 17 | Web UI | Read-only — under A5 there is nothing durable to mutate (#186) |
