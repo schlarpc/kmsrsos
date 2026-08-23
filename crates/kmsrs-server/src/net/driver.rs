@@ -56,7 +56,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 use kmsrs_policy::access::Admission;
 use kmsrs_policy::events::Peer;
-use kmsrs_proto::entropy::Entropy;
+use kmsrs_proto::entropy::{Entropy, EntropyExt as _};
 use kmsrs_proto::time::Instant;
 use kmsrs_proto::wire::connection::Connection;
 use mio::event::Event;
@@ -124,6 +124,15 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// conversation, which is what a slowloris actually attacks — a peer sending
 /// one byte just inside every read timeout resets the idle deadline forever.
 pub const CONNECTION_DEADLINE: Duration = Duration::from_mins(2);
+
+/// How often the entropy source is re-tested (`OS-012`, #263).
+///
+/// Not per request: the test draws 64 bytes and compares them, which is cheap
+/// but not free, and a source that degrades does not degrade between two
+/// packets in a way five minutes would miss. Hermit reseeds every second, so
+/// the failure this catches is a reseed that started failing — a state that
+/// persists until the machine is rebooted.
+pub const ENTROPY_RECHECK_INTERVAL: Duration = Duration::from_mins(5);
 
 /// The longest a single poll will block.
 ///
@@ -300,9 +309,18 @@ pub struct Driver {
     /// The ports the KMS listeners are on, for the web UI to report.
     kms_ports: Vec<u16>,
     /// Whether the entropy source still passes its self-test
-    /// (`OS-012`, #263). Read once at start-up, because a source that has
-    /// started repeating itself will not stop.
+    /// (`OS-012`, #263).
+    ///
+    /// Start-up already refused to serve on a source that was broken then, so
+    /// this is about a source that breaks *later* — which is not hypothetical
+    /// on Hermit, where reseeding happens every second and a failed reseed is
+    /// silent. What it changes is `/healthz` and `/metrics`, not whether a
+    /// request is answered: the identity was drawn at start-up from a source
+    /// that worked, and taking a host out of rotation mid-request would trade a
+    /// visible failure for an invisible one.
     entropy_healthy: bool,
+    /// When the entropy source is next re-tested.
+    next_entropy_check: Instant,
 }
 
 impl Driver {
@@ -373,6 +391,7 @@ impl Driver {
             server,
             kms_ports,
             entropy_healthy,
+            next_entropy_check: Instant::from_nanos(0),
         })
     }
 
@@ -466,7 +485,55 @@ impl Driver {
             }
 
             self.expire(clock());
+            self.recheck_entropy(entropy, clock());
         }
+    }
+
+    /// Re-test the entropy source, at most once per
+    /// [`ENTROPY_RECHECK_INTERVAL`] (`OS-012`, #263).
+    ///
+    /// Start-up refused to serve on a source that was already broken. This is
+    /// the one that breaks later, which on Hermit is a live possibility: the
+    /// kernel reseeds every second and a failed reseed is silent, so a guest
+    /// that was fine at boot can start returning a deterministic LCG stream
+    /// while `getrandom` keeps reporting success.
+    ///
+    /// The same two questions the start-up test asks, because they are the two
+    /// that catch the failure that actually happens — a source that keeps
+    /// succeeding while repeating itself. This is not a test of randomness
+    /// *quality*; that belongs to the operating system.
+    fn recheck_entropy(&mut self, entropy: &mut dyn Entropy, now: Instant) {
+        if now < self.next_entropy_check {
+            return;
+        }
+        self.next_entropy_check = now
+            .checked_add(ENTROPY_RECHECK_INTERVAL)
+            .unwrap_or(self.next_entropy_check);
+
+        let healthy = match (entropy.array::<32>(), entropy.array::<32>()) {
+            (Ok(first), Ok(second)) => first != second && !first.iter().all(|byte| *byte == 0),
+            _ => false,
+        };
+
+        if healthy == self.entropy_healthy {
+            return;
+        }
+        self.entropy_healthy = healthy;
+        self.server.logger().message(
+            if healthy {
+                crate::log::Severity::Info
+            } else {
+                crate::log::Severity::Error
+            },
+            "entropy",
+            if healthy {
+                "the entropy source passes its self-test again"
+            } else {
+                "the entropy source has started repeating itself; /healthz now \
+                 reports unhealthy. Every value this host draws is predictable \
+                 from here — see docs/deployment.md."
+            },
+        );
     }
 
     /// How long the next poll may block.

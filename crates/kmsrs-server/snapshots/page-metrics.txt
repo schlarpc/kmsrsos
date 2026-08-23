@@ -1,0 +1,27 @@
+status: 200
+content-type: Metrics
+
+# HELP kmsrsos_requests_total Requests recorded since start.
+# TYPE kmsrsos_requests_total counter
+kmsrsos_requests_total 2
+# HELP kmsrsos_activations_total Requests in the retained window that were activated.
+# TYPE kmsrsos_activations_total gauge
+kmsrsos_activations_total 1
+# HELP kmsrsos_events_held Events currently in the bounded log.
+# TYPE kmsrsos_events_held gauge
+kmsrsos_events_held 2
+# HELP kmsrsos_events_dropped_by_capacity_total Events evicted because the log was full.
+# TYPE kmsrsos_events_dropped_by_capacity_total counter
+kmsrsos_events_dropped_by_capacity_total 0
+# HELP kmsrsos_events_dropped_by_retention_total Events removed because they aged out.
+# TYPE kmsrsos_events_dropped_by_retention_total counter
+kmsrsos_events_dropped_by_retention_total 0
+# HELP kmsrsos_listener_up 1 when the KMS listener is accepting.
+# TYPE kmsrsos_listener_up gauge
+kmsrsos_listener_up 1
+# HELP kmsrsos_entropy_healthy 1 when the entropy source passes its self-test.
+# TYPE kmsrsos_entropy_healthy gauge
+kmsrsos_entropy_healthy 1
+# HELP kmsrsos_build_info Which build this is; the value is always 1.
+# TYPE kmsrsos_build_info gauge
+kmsrsos_build_info{version="0.1.0",revision="«redacted»",source_date_epoch="«redacted»"} 1

@@ -10,6 +10,7 @@ any of this are in [`decisions.md`](decisions.md).
 - [Where the host has to live](#where-the-host-has-to-live) — the loopback constraint
 - [DNS: the `_vlmcs._tcp` SRV record](#dns-the-_vlmcs_tcp-srv-record)
 - [Building it, and configuring it](#building-it-and-configuring-it)
+- [systemd](#systemd)
 - [Containers and Kubernetes](#containers-and-kubernetes)
 - [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
@@ -189,6 +190,58 @@ build date — which is what makes two builds of one revision identical, and is 
 
 ---
 
+## systemd
+
+```sh
+sudo install -m 0755 result/bin/kmsrsos /usr/local/bin/
+sudo install -m 0644 deploy/systemd/kmsrsos.service /etc/systemd/system/
+sudo systemctl enable --now kmsrsos
+journalctl -u kmsrsos -f
+```
+
+Both audited projects have only a documentation snippet for this, and py-kms's is `User=root` with no
+hardening whatever. `deploy/systemd/kmsrsos.service` is a real unit (`PKG-007`, #244), and almost
+every line of its hardening is **free** rather than aspirational — it forbids things the program
+genuinely does not do:
+
+| Setting | Why it costs nothing |
+|---|---|
+| `DynamicUser=yes` | there is no state to own: no data directory, no cache, no files at all (axiom A5) |
+| `ProtectSystem=strict`, `ReadOnlyPaths=/` | no filesystem I/O, proven in CI by running the binary under `strace` (`SEC-006`, #198) |
+| `CapabilityBoundingSet=`, `AmbientCapabilities=` | 1688 is unprivileged, so nothing needs one |
+| `RestrictAddressFamilies=AF_INET AF_INET6` | TCP only; no Unix socket, no netlink, no UDP |
+| `MemoryDenyWriteExecute=yes` | no JIT, no dynamic code |
+| `MemoryMax=128M` | the heap ceiling is 8 MiB and asserted at compile time (`OS-011`, #262) |
+
+**Privileges are never dropped, because they never exist** ([D41](decisions.md#d41)). The issue that
+proposed `setuid`/`setgid` named this path as the preferred one itself; with `DynamicUser` and an
+unprivileged port there is nothing left for the drop to remove, and three `unsafe` libc calls in a
+specific order is a large amount of famous footgun to add for it.
+
+### There is no `.socket` unit
+
+Deliberately ([D40](decisions.md#d40)). Socket activation was wanted so that systemd would bind 1688
+and the service would never need `CAP_NET_BIND_SERVICE` — but **1688 is unprivileged**, so that
+benefit is a restatement of something already true. What is left is zero-downtime restarts, which for
+a service whose clients retry and whose activations last 180 days is worth nothing.
+
+Against it: adopting an inherited file descriptor means `FromRawFd`, which is `unsafe` in every
+spelling, in a project whose first axiom is pure safe Rust with exactly one permitted boundary
+elsewhere.
+
+So the binary **refuses to start** if `LISTEN_FDS` is set, rather than binding its own socket
+alongside a manager's:
+
+```
+kmsrsos: started with LISTEN_FDS=1, but this build does not adopt inherited sockets.
+```
+
+That is not fussiness. Ignoring it under `Accept=yes` would mean one process per connection, which
+destroys both the stable ePID and the CMID table **while continuing to answer** — the way
+vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declined-with-rationale)).
+
+---
+
 ## Containers and Kubernetes
 
 ```sh
@@ -323,9 +376,30 @@ rather than the edge case, and every value this host draws — the RPC associati
 and salts, the hardware ID, the randomised ePID fields — would quietly become a constant while the
 service kept working perfectly.
 
-**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) refuses to serve
-rather than serving a predictable identity, and `/healthz` and `/metrics` report it, so a mistake here
-is loud rather than silent — but it is still a mistake, and this is how not to make it.
+**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) **refuses to
+serve** rather than serving a predictable identity: the process exits 69 and says so, naming RDSEED,
+because the operator who reads that line is one hypervisor setting away from the fix. The source is
+re-tested every five minutes thereafter — Hermit reseeds every second and a failed reseed is
+silent — and a source that starts repeating takes `/healthz` to 503 and
+`kmsrsos_entropy_healthy` to 0.
+
+So the mistake is loud rather than silent. It is still a mistake, and this is how not to make it.
+
+### Memory (`OS-011`, #262)
+
+A unikernel has a fixed memory budget decided when the VM is created, no swap, and no OOM killer to
+pick a victim: a failed allocation in a program compiled with `panic = "abort"` stops the machine, and
+only the hypervisor can restart it. So the number that matters is not how much this host uses but how
+much it *can* use, and that is bounded by constants rather than by traffic.
+
+`crates/kmsrs-server/src/budget.rs` adds them up — the CMID table, the event-log ring buffer and the
+connection state budget — and asserts the total at **compile time**, so a build that would exceed the
+ceiling does not link. The product database is not in that sum: it is `static` data in `.rodata`
+(`DB-003`, #127), part of the image rather than of the heap, and `DB-018` (#142) is where it is
+measured.
+
+The current ceiling is 8 MiB of heap. A Hermit guest is normally given 64 MiB or more, which leaves
+the kernel, the stacks and the network buffers an order of magnitude more room than this takes.
 
 ### virtio-net may not attach at all (`OS-004`, #255)
 

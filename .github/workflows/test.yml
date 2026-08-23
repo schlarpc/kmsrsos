@@ -83,10 +83,20 @@ jobs:
       # timeout and `cargo test` has none. The first Windows run of this matrix
       # sat in `cargo test` for the better part of an hour, and a job that never
       # finishes says nothing about which test is wrong.
+      #
+      # The prebuilt binary when it works, `cargo install` when it does not.
+      # The action fails intermittently on the Windows runner image — a bash
+      # startup failure its own retry does not survive — and a job that fails
+      # for a reason unrelated to the change is a job people learn to re-run
+      # without reading, which is how a real failure gets missed.
       - if: runner.os == 'Windows'
+        id: nextest
+        continue-on-error: true
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - if: runner.os == 'Windows' && steps.nextest.outcome != 'success'
+        run: cargo install cargo-nextest --locked
       - if: runner.os == 'Windows'
         run: cargo build --locked --package kmsrs-server --package kmsrs-client --all-targets
       - if: runner.os == 'Windows'

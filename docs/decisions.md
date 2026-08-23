@@ -46,12 +46,12 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 11 | RPC fragmentation | Implement, **inbound reassembly only** (#80) |
 | 12 | Source-IP ACL | Default allow-all; CIDR allow/deny lists available (#101) |
 | 13 | Runtime config | Doctrine: rebuild from the flake. Escape hatch: one env var, wire-invisible fields only (#167) |
-| 14 | Log format | JSON Lines; ANSI only when stderr is a TTY and `NO_COLOR` unset (#178) |
+| 14 | Log format | JSON Lines; ANSI only when stderr is a TTY, the terminal understands it, and `NO_COLOR` is unset (#178, #162) |
 | 15 | Windows Event Log | Narrow exception: six lifecycle/fatal events only (#192). Linux syslog declined → [D7](#d7) |
 | 16 | Metrics | `/metrics` in Prometheus text format, including an entropy-health gauge (#189) |
 | 17 | Web UI | Read-only — under A5 there is nothing durable to mutate (#186) |
-| 18 | Socket activation | Supported, `Accept=no` only, hard refusal on `Accept=yes` (#165) |
-| 19 | Linux hardening | Privilege drop + Landlock + seccomp; socket activation makes privileges unnecessary (#197, #199) |
+| 18 | Socket activation | Declined → [D40](#d40). The binary refuses to start if `LISTEN_FDS` is set, rather than degrading |
+| 19 | Linux hardening | Landlock + seccomp (#197); privilege drop declined → [D41](#d41), because there is never a privilege to drop |
 | 20 | Windows hardening | Self-applicable process mitigations only; AppContainer skipped, asymmetry documented (#197) |
 | 21 | Windows service | Dispatcher + control handler; **no installer**; web UI mandatory in service mode (#245) |
 | 22 | SRV publishing | RFC 2136 dropped → [D15](#d15). Instructions page emits zone snippet, `nsupdate` **and** `dnscmd`/PowerShell (#148) |
@@ -214,7 +214,9 @@ manually", hinting they may not use the KMS RPC path at all. Revisit if a Micros
 (#126) or it does not ship.
 
 **D20 — inetd / xinetd mode, and systemd `Accept=yes`.** One process per connection destroys both the
-CMID table and the stable ePID. #165 detects and refuses it rather than degrading silently.
+CMID table and the stable ePID. The binary refuses to start on *any* `LISTEN_FDS`, which covers this
+and [D40](#d40) with one check — a manager that passes a connection and a manager that passes a
+listening socket are both told to stop.
 
 **D21 — Windows TAP/TeamViewer-VPN adapter mirroring.** 370 lines of driver IOCTLs, an internal DHCP
 server and a packet-rewriting thread, all to work around Windows clients refusing to activate against
@@ -371,6 +373,46 @@ client-supplied workstation names.
 That is a bad trade for a convenience the browser already provides: the snippets are in `<pre>`
 blocks, which double-click and triple-click select whole. Revisit only if the UI acquires script for
 some other reason, at which point the marginal cost is zero rather than the entire policy.
+
+<a id="d40"></a>**D40 — systemd socket activation (`NET-016`, #165).** The issue is right about the
+trap: `Accept=yes` is the inetd convention, one process per connection, which silently destroys both
+the stable ePID and the CMID table — and that is exactly how vlmcsd-under-systemd degrades without
+telling anyone. What it is wrong about is the payoff.
+
+> *"systemd binds 1688 so we never need `CAP_NET_BIND_SERVICE` — a process that never had privileges
+> beats one that dropped them."*
+
+**1688 is unprivileged.** There is no capability to avoid, so the entire benefit is a restatement of
+something already true. What remains is zero-downtime restarts, which for a service whose clients
+retry and whose activations last 180 days is worth nothing.
+
+Against that: adopting an inherited file descriptor means `FromRawFd`, which is `unsafe` in every
+spelling — `std`, `socket2` and `rustix` alike — and axiom A1 is pure safe Rust with exactly one
+permitted boundary, in `kmsrs-os`, for a different target and a different reason ([D13](#d13),
+`OS-013` #264). A dependency that performs the `unsafe` on our behalf moves the code without moving
+the risk, and adds a dependency to a project whose whole dependency posture is the point of
+`SEC-009` (#201).
+
+So the answer is to refuse rather than to support. `LISTEN_FDS` set to anything non-zero exits 64 and
+says to remove the `.socket` unit. That is the same detection the issue asked for, applied to the
+whole feature rather than to one mode of it, and it forecloses the silent degradation completely
+rather than for one configuration.
+
+<a id="d41"></a>**D41 — Privilege drop on Linux (`SEC-007`, #199).** The issue names the preferred
+path itself — *"socket activation plus DynamicUser, where privileges never exist to drop"* — and half
+of that is now [D40](#d40). The other half is enough on its own: `DynamicUser=yes` with
+`CapabilityBoundingSet=` and `AmbientCapabilities=` starts the service with **no capabilities at
+all**, and 1688 is unprivileged, so there is nothing to bind that would have needed one.
+
+`setgid`/`setgroups`/`setuid` therefore exist to drop a privilege this process never has. They are
+also three `unsafe` libc calls in a specific order whose failure modes are famous — `setgroups`
+before `setuid`, checking every return value, and the whole sequence being untestable without running
+as root — added to remove a privilege that `deploy/systemd/kmsrsos.service` never grants. A container
+runs as `65534:65534` for the same reason ([`PKG-004`](#d17), #241).
+
+If someone runs the binary as root outside those two paths, it stays root. That is a true statement
+about a deployment nobody has to make, and it is a better one than a partial implementation that
+looks like it solved the problem.
 
 ### What the panic-freedom gate actually found (`ARCH-009`, #9)
 

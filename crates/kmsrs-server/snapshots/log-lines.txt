@@ -1,0 +1,14 @@
+--- json ---
+{"level":"debug","event":"listening","detail":"0.0.0.0:1688"}
+{"level":"info","event":"listening","detail":"0.0.0.0:1688"}
+{"level":"warn","event":"listening","detail":"0.0.0.0:1688"}
+{"level":"error","event":"listening","detail":"0.0.0.0:1688"}
+{"level":"info","event":"activation","sequence":0,"protocol":"6.0","virtual_machine":false,"license_status":"out-of-box grace","application":"55555555-5555-5555-5555-555555555555","application_name":"unknown","kms_id":"33333333-3333-3333-3333-333333333333","product":"unknown","known_product":false,"client_machine_id":"44444444-4444-4444-4444-444444444444","workstation_name":"WKS-4J2QZ8","source_address":null,"count":25,"cached":1,"host_key_resolved":false,"host_key_index":0}
+{"level":"info","event":"refusal","sequence":1,"protocol":"6.0","virtual_machine":false,"license_status":"out-of-box grace","application":"55555555-5555-5555-5555-555555555555","application_name":"unknown","kms_id":"33333333-3333-3333-3333-333333333333","product":"unknown","known_product":false,"client_machine_id":"44444444-4444-4444-4444-444444444444","workstation_name":"WKS-4J2QZ8","source_address":null,"refusal":"PreviewProduct","hresult":"0xC004F042"}
+--- text ---
+debug listening: 0.0.0.0:1688
+info listening: 0.0.0.0:1688
+warn listening: 0.0.0.0:1688
+error listening: 0.0.0.0:1688
+info - v6.0 unknown out-of-box grace "WKS-4J2QZ8" -> activated, count 25 of 1 cached (fallback host key)
+info - v6.0 unknown out-of-box grace "WKS-4J2QZ8" -> refused 0xC004F042 (PreviewProduct)

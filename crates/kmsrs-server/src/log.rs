@@ -570,6 +570,7 @@ mod tests {
         let piped = Discovered {
             hostname: None,
             stderr_is_terminal: false,
+            ansi_capable: true,
             no_color: false,
             listen_fds: 0,
         };

@@ -71,6 +71,35 @@ fn main() {
 fn run(operational: Operational) -> Result<(), i32> {
     let discovered = Discovered::observe();
     let compiled = Compiled::BUILD;
+
+    // `NET-016` (#165), declined as D40: this build does not adopt inherited
+    // sockets, and refuses to start rather than binding its own alongside a
+    // manager's.
+    //
+    // Silently ignoring `LISTEN_FDS` is the failure this exists to prevent. A
+    // `.socket` unit holds 1688; this process would then try to bind it too and
+    // fail with EADDRINUSE — or worse, succeed on a different address and serve
+    // nothing anybody reaches. Under `Accept=yes` it would be worse still: one
+    // process per connection, which destroys both the stable ePID
+    // (`ID-001`, #106) and the CMID table (`POL-001`, #89) while continuing to
+    // answer, which is exactly how vlmcsd-under-systemd degrades without
+    // telling anyone (declined item D20).
+    //
+    // Written before the logger exists, because the logger is built from
+    // configuration and this is a fact about how the process was started.
+    if discovered.listen_fds > 0 {
+        eprintln!(
+            "{PRODUCT_NAME}: started with LISTEN_FDS={}, but this build does \
+             not adopt inherited sockets.",
+            discovered.listen_fds
+        );
+        eprintln!(
+            "Remove the .socket unit and let the service bind 1688 itself: it \
+             is an unprivileged port, so nothing is gained by having systemd \
+             open it. See deploy/systemd/kmsrsos.service."
+        );
+        return Err(EXIT_BAD_USAGE);
+    }
     // Everything from here on goes through the logger, so it is shaped and
     // filtered the same way a request is (`OBS-001`, #177). The two failures
     // above happen before a logger can exist, since the logger is built from
@@ -143,19 +172,35 @@ fn run(operational: Operational) -> Result<(), i32> {
         }
     }
 
-    // `OS-012` (#263): a source that has started repeating itself will not
-    // stop, so this is read once and reported by `/healthz` thereafter.
-    let entropy_healthy = OsEntropy.self_test().is_ok();
-    if !entropy_healthy {
+    // `OS-012` (#263): refuse to serve rather than serve a predictable
+    // identity.
+    //
+    // This is not defensive coding. Hermit's `sys_read_entropy` *silently
+    // succeeds* on a seeding failure, filling the buffer from a Park-Miller
+    // LCG seeded with a static zero — a stream identical across boots — and
+    // emitting a warning the guest never sees. `getrandom` reports success and
+    // hands it on. On a default Proxmox VM that is the likely path rather than
+    // the edge case: the `kvm64` CPU model exposes no RDSEED and Proxmox's
+    // virtio-rng lands on a bus Hermit rejects.
+    //
+    // Every anti-fingerprinting property this host has would become a constant
+    // while it kept working perfectly: the association group, response IVs and
+    // salts, the hardware ID, the randomised ePID fields. A host that answers
+    // every client with the same "random" values is worse than one that does
+    // not answer, because nobody finds out.
+    if let Err(failure) = OsEntropy.self_test() {
         logger.message(
             Severity::Error,
             "entropy",
-            "the entropy self-test is failing; /healthz will report unhealthy",
+            &format!(
+                "{failure}; refusing to serve. On a virtual machine, check that                  the CPU model exposes RDSEED — see docs/deployment.md."
+            ),
         );
+        return Err(EXIT_UNAVAILABLE);
     }
 
-    let mut driver = Driver::with_roles(server, listeners, MAX_CONNECTIONS, entropy_healthy)
-        .map_err(|error| {
+    let mut driver =
+        Driver::with_roles(server, listeners, MAX_CONNECTIONS, true).map_err(|error| {
             logger.message(Severity::Error, "startup", &error.to_string());
             EXIT_UNAVAILABLE
         })?;

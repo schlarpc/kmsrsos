@@ -394,6 +394,144 @@ fn only_the_operational_config_can_be_deserialised() {
     );
 }
 
+/// `OS-013` (#264): the unsafe boundary is empty, and there is exactly one
+/// place it could ever be.
+///
+/// The workspace lint table sets `unsafe_code = "forbid"`, and `forbid` cannot
+/// be lifted by an inner `allow` — which is the property that makes it worth
+/// setting there. `kmsrs-os` is the single crate permitted to override it, and
+/// it sets `deny` instead: a boundary would have to name itself with an
+/// explicit `#[expect(unsafe_code)]` carrying a safety comment, and every other
+/// line in the crate is still rejected.
+///
+/// Today it contains **none**, which is the answer this issue was open to
+/// establish rather than to arrange. The Hermit platform layer is still
+/// `OS-001` (#252), so the honest statement is "no unsafe yet, and one place it
+/// may appear" rather than "no unsafe ever" — and this test is what turns the
+/// second half into something that has to be argued for at a review rather than
+/// spread quietly.
+#[test]
+fn the_unsafe_boundary_is_empty_and_singular() {
+    let root = workspace_root();
+
+    // Nothing that ships contains the word at all — not even in a comment,
+    // which is a deliberate over-reach: the point is that a reader grepping for
+    // `unsafe` in this tree finds either nothing or the one boundary, and never
+    // has to decide which hits are real.
+    let mut found = Vec::new();
+    for (name, manifest_path) in crate_manifests(&root) {
+        let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        if !source_dir.is_dir() {
+            continue;
+        }
+        for (path, text) in rust_sources_with_paths(&source_dir) {
+            for (number, line) in text.lines().enumerate() {
+                // `unsafe_code` is the lint's name and appears in the prose that
+                // explains the policy; `unsafe` as a keyword is what matters.
+                let code = match line.find("//") {
+                    Some(comment) => line.split_at(comment).0,
+                    None => line,
+                };
+                if code.contains("unsafe ") || code.contains("unsafe(") {
+                    found.push(format!(
+                        "{name} {}:{}",
+                        path.display(),
+                        number.saturating_add(1)
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        found.is_empty(),
+        "the unsafe boundary is supposed to be empty (OS-013, #264). If one of          these is the documented boundary in {UNSAFE_BOUNDARY_CRATE}, this test          is what should be updated — deliberately, in the same commit:          {found:#?}"
+    );
+
+    // And the one crate that *could* hold one still declares the weaker lint,
+    // so a boundary would have to name itself rather than appearing.
+    let manifest = std::fs::read_to_string(
+        root.join("crates")
+            .join(UNSAFE_BOUNDARY_CRATE)
+            .join("Cargo.toml"),
+    )
+    .expect("the boundary crate's manifest");
+    assert!(
+        manifest.contains("unsafe_code = \"deny\""),
+        "{UNSAFE_BOUNDARY_CRATE} no longer denies unsafe, so a boundary could \
+         appear without saying so"
+    );
+}
+
+/// `ARCH-005` (#5): one driver, and no `[patch.crates-io]` anywhere.
+///
+/// The issue originally called for tokio on Linux and Windows and a blocking
+/// `std::net` driver on Hermit. The superseding decision is one `mio` loop on
+/// all three (see `docs/decisions.md`), and two of the three properties it
+/// asked for survive that change unchanged — they were always the point:
+///
+/// * **No async abstraction layer.** There is one loop, so there is nothing for
+///   an async trait to abstract over.
+/// * **No `[patch.crates-io]`.** Adopting `hermit-os/tokio` would have needed
+///   one, and a patch table is workspace-*global*: pinning Hermit to a
+///   four-commit fork of tokio 1.45.0 would have pinned Linux and Windows to it
+///   too. That is the decision this assertion protects, and it protects it from
+///   any future dependency, not only from that one.
+#[test]
+fn there_is_one_driver_and_no_patched_dependencies() {
+    let root = workspace_root();
+
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest");
+    assert!(
+        !workspace.contains("[patch."),
+        "a [patch] table appeared. It is workspace-global, so patching one \
+         target's dependency pins every target to the same fork (ARCH-005, #5)."
+    );
+    for (_, manifest_path) in crate_manifests(&root) {
+        let text = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+        assert!(
+            !text.contains("[patch."),
+            "{} declares a [patch] table",
+            manifest_path.display()
+        );
+    }
+
+    // One driver module, not one per platform. The platform differences that
+    // remain are named capabilities in `platform.rs` whose branches all compile
+    // everywhere — never a `cfg` on an item, which only ever compiles on the
+    // platform that cannot be tested.
+    let net = root.join("crates/kmsrs-server/src/net");
+    let drivers: Vec<String> = std::fs::read_dir(&net)
+        .expect("the net module exists")
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.contains("driver"))
+        .collect();
+    assert_eq!(
+        drivers.len(),
+        1,
+        "there should be exactly one driver, and there are {drivers:?}"
+    );
+
+    // And no async runtime reached the tree. `deny.toml` bans them by name
+    // (SEC-009, #201); this catches the case where somebody adds one and
+    // updates the ban list in the same breath.
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("the lockfile");
+    for runtime in [
+        "name = \"tokio\"",
+        "name = \"async-std\"",
+        "name = \"smol\"",
+    ] {
+        assert!(
+            !lock.contains(runtime),
+            "{runtime} is in the lockfile; there is one mio loop on all three \
+             targets (ARCH-005, #5)"
+        );
+    }
+}
+
 /// Every `.rs` file under a directory, read into memory.
 fn rust_sources(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();

@@ -1,0 +1,115 @@
+# kmsrsos as a systemd service (PKG-007, #244).
+#
+# Both audited projects have only a documentation snippet for this, and py-kms's
+# is `User=root` with no hardening whatever. This is a real unit, and almost
+# every line of it is free rather than aspirational — the hardening below costs
+# nothing because the program genuinely does none of the things it forbids.
+#
+#   sudo cp kmsrsos /usr/local/bin/
+#   sudo cp kmsrsos.service /etc/systemd/system/
+#   sudo systemctl enable --now kmsrsos
+#
+# There is deliberately **no `.socket` unit**. See declined item D40: the payoff
+# socket activation was wanted for — systemd binding the port so the service
+# never needs `CAP_NET_BIND_SERVICE` — does not exist, because 1688 is
+# unprivileged and nothing here ever had a capability to drop. Adopting an
+# inherited file descriptor would mean `FromRawFd`, and this project's first
+# axiom is pure safe Rust.
+#
+# The binary refuses to start if `LISTEN_FDS` is set, rather than silently
+# binding its own socket alongside a systemd-held one.
+
+[Unit]
+Description=kmsrsos — a KMS host emulator in pure safe Rust
+Documentation=https://github.com/schlarpc/kmsrsos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/kmsrsos
+
+# No configuration file, no command line, no per-knob variable (declined item
+# D5). The single runtime setting is a TOML document in one variable, and it may
+# only touch fields that cannot change a byte on the wire (CFG-001, #166).
+# Uncomment to use it:
+#
+# Environment=KMSRSOS_CONFIG=web_ui_port = 8081
+
+# The log is JSON Lines on stderr (OBS-001, #177), which systemd captures into
+# the journal. That is why there is no syslog support and no log file: the gap
+# does not exist on Linux (declined item D7), and axiom A5 forbids the file.
+#
+#   journalctl -u kmsrsos -f
+#   journalctl -u kmsrsos -o cat | jq 'select(.event == "activation")'
+StandardOutput=journal
+StandardError=journal
+
+# --- Identity -----------------------------------------------------------
+#
+# DynamicUser creates and destroys the account per start, so there is no service
+# user for a package to create and none to leave behind after an uninstall.
+# It works here only because the program has no state to own: no data directory,
+# no cache, no runtime directory, no files at all (axiom A5).
+DynamicUser=yes
+
+# 1688 is unprivileged, so the service needs no capability to bind it and none
+# to drop afterwards (SEC-007, #199). A process that never had a privilege beats
+# one that dropped it, and this is that process — stated explicitly rather than
+# left to the default, because an empty set is the assertion.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# --- Filesystem ---------------------------------------------------------
+#
+# The program performs no filesystem I/O at all, and CI proves it by running the
+# real binary under strace (SEC-006, #198). So every one of these is free: none
+# of them can break something that works.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/
+InaccessiblePaths=/boot /srv /media /mnt
+
+# --- Kernel and process surface -----------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateUsers=yes
+RemoveIPC=yes
+UMask=0077
+
+# --- Syscalls and sockets -----------------------------------------------
+#
+# One event loop, TCP only. There is no UDP listener, no Unix socket, no
+# netlink, and nothing that forks.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io @debug @cpu-emulation
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# --- Resources ----------------------------------------------------------
+#
+# The heap ceiling is asserted at compile time (OS-011, #262) and is 8 MiB; this
+# is generous slack over it, and is a backstop rather than a tuning knob. A
+# process that hits it has a bug, and the right response is to find out.
+MemoryMax=128M
+TasksMax=16
+
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

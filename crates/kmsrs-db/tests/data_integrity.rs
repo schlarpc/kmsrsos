@@ -342,6 +342,71 @@ fn no_two_products_share_an_activation_id() {
     assert!(duplicates.is_empty(), "{duplicates:#?}");
 }
 
+/// `DB-018` (#142): the whole shipped payload, strings included, and what it
+/// costs on the target where it is the image.
+///
+/// `kmsrs_db::size` counts the `static` arrays, which is what a `const` can
+/// see: a `&'static str` in an array is a pointer and a length, and the bytes
+/// it points at are elsewhere in `.rodata`. Those bytes are two thirds of the
+/// database — every product description, every host key's name, every locale
+/// tag — so a figure that omitted them would be the wrong answer to the
+/// question the issue asks.
+///
+/// This is a test rather than a `const` because a string's length is not
+/// reachable in const evaluation across a table, and because the number is
+/// worth *printing*: the whole point is that somebody sees it grow.
+#[test]
+fn the_whole_shipped_payload_fits_the_image_budget() {
+    let mut strings = 0_usize;
+
+    for application in kmsrs_db::APPLICATIONS {
+        strings += application.name.len();
+    }
+    for product in kmsrs_db::PRODUCTS {
+        strings += product.description.len() + product.key_type.len() + product.edition_id.len();
+    }
+    for csvlk in kmsrs_db::CSVLKS {
+        strings += csvlk.description.len();
+        // The key blocks and counted-ID lists are slices into `.rodata` too,
+        // and a slice in a struct is a pointer and a length just as a string
+        // is — so they are counted here rather than by `size_of_val` above.
+        strings += core::mem::size_of_val(csvlk.key_blocks);
+        strings += core::mem::size_of_val(csvlk.counted_ids);
+    }
+    for counted in kmsrs_db::COUNTED_IDS {
+        strings += core::mem::size_of_val(counted.csvlks);
+    }
+    for build in kmsrs_db::HOST_BUILDS {
+        strings += build.description.len();
+    }
+    for lcid in kmsrs_db::LCIDS {
+        strings += lcid.language.len() + lcid.tag.len() + lcid.location.len();
+    }
+
+    let arrays = kmsrs_db::TABLE_BYTES;
+    let total = arrays + strings;
+
+    eprintln!(
+        "shipped database: {total} bytes — {arrays} of arrays, {strings} of \
+         string and slice contents"
+    );
+
+    // On Hermit every byte of `.rodata` is a byte of the guest's memory,
+    // permanently, whether or not anything reads it. 256 KiB is generous
+    // against the issue's "roughly 15-20 KB" estimate and against what this
+    // actually is; what it catches is a change in kind rather than growth.
+    assert!(
+        total <= kmsrs_db::size::BUDGET_BYTES,
+        "the shipped database is {total} bytes, past the {} it is built to fit \
+         (DB-018, #142)",
+        kmsrs_db::size::BUDGET_BYTES
+    );
+
+    // And the halves are both real. A zero here would mean this test walked
+    // the wrong thing and passed for it.
+    assert!(strings > 0 && arrays > 0);
+}
+
 #[test]
 fn every_host_build_row_that_is_not_drawable_says_so() {
     let drawable = kmsrs_db::epid_host_build_count();
