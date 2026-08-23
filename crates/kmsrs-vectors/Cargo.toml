@@ -18,6 +18,11 @@ publish = false
 [dependencies]
 kmsrs-proto = { workspace = true, features = ["testing"] }
 kmsrs-crypto.workspace = true
+# The HTTP request parser (SEC-013, #306) lives in kmsrs-server, because the web
+# UI is folded into that crate (ARCH-001, #1). The edge back the other way is a
+# *dev*-dependency, which is a cycle cargo permits and which nothing that ships
+# can see — the same shape as the kmsrs-proto edge above.
+kmsrs-server.workspace = true
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

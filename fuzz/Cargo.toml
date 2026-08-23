@@ -61,3 +61,10 @@ path = "fuzz_targets/response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false

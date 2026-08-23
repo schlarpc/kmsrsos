@@ -173,12 +173,98 @@ fn seeds_for(target: &str) -> Vec<Seed> {
             }
         }
 
+        // The HTTP parser sees text, and the seeds are written out rather than
+        // generated (`SEC-013`, #306). A generator would produce only the
+        // requests this codebase can already build — the six routes, correctly
+        // framed — which is precisely the half of the input space the parser is
+        // least likely to be wrong about. The interesting seeds are the ones a
+        // browser never sends.
+        "http_request" => {
+            for (name, text) in HTTP_SEEDS {
+                seeds.push((format!("{name}.txt"), text.as_bytes().to_vec()));
+            }
+        }
+
         other => panic!("no seed rule for target {other}"),
     }
 
     seeds.sort_by(|left, right| left.0.cmp(&right.0));
     seeds
 }
+
+/// The HTTP seeds (`SEC-013`, #306).
+///
+/// Half are the requests a browser makes, so the fuzzer starts from something
+/// that parses. The other half are the shapes that break parsers: a header with
+/// a space before its colon, a bare newline, an absolute-form target, a
+/// declared body, a request line with a space inside the target, and a head
+/// that never ends.
+const HTTP_SEEDS: &[(&str, &str)] = &[
+    ("get-root", "GET / HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    ("get-events", "GET /events HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    (
+        "get-instructions",
+        "GET /instructions HTTP/1.1\r\nHost: kms.example.net:8080\r\n\r\n",
+    ),
+    ("get-metrics", "GET /metrics HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    (
+        "head-healthz",
+        "HEAD /healthz HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    ("http-1-0", "GET / HTTP/1.0\r\n\r\n"),
+    (
+        "query-string",
+        "GET /events?after=7 HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    // Two requests in one buffer: `consumed` must leave the second alone.
+    (
+        "pipelined",
+        "GET / HTTP/1.1\r\nHost: kms\r\n\r\nGET /events HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    // The shapes that break parsers.
+    ("method-post", "POST / HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    (
+        "method-unknown",
+        "FROBNICATE / HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    ("version-2", "GET / HTTP/2.0\r\nHost: kms\r\n\r\n"),
+    (
+        "absolute-form",
+        "GET http://elsewhere/ HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    ("asterisk-form", "OPTIONS * HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    ("space-in-target", "GET /a b HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    ("no-target", "GET HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    ("space-before-colon", "GET / HTTP/1.1\r\nHost : kms\r\n\r\n"),
+    ("header-no-colon", "GET / HTTP/1.1\r\nHost kms\r\n\r\n"),
+    ("bare-newline", "GET / HTTP/1.1\nHost: kms\n\n"),
+    (
+        "declared-body",
+        "GET / HTTP/1.1\r\nHost: kms\r\nContent-Length: 12\r\n\r\nhello world!",
+    ),
+    (
+        "chunked",
+        "GET / HTTP/1.1\r\nHost: kms\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ),
+    ("two-hosts", "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"),
+    (
+        "traversal",
+        "GET /../../etc/passwd HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    (
+        "percent-encoded",
+        "GET /%65vents HTTP/1.1\r\nHost: kms\r\n\r\n",
+    ),
+    ("unknown-route", "GET /nope HTTP/1.1\r\nHost: kms\r\n\r\n"),
+    ("empty", ""),
+    ("newlines-only", "\r\n\r\n"),
+    ("no-terminator", "GET / HTTP/1.1\r\nHost: kms"),
+    // A `Host` a page would render if nothing filtered it (`DISC-006`, #148).
+    (
+        "hostile-host",
+        "GET /instructions HTTP/1.1\r\nHost: <script>alert(1)</script>\r\n\r\n",
+    ),
+];
 
 /// The ePID seeds, written out rather than generated.
 ///
