@@ -1,0 +1,6 @@
+GET / HTTP/1.1
+Host: kms
+
+GET /events HTTP/1.1
+Host: kms
+

@@ -191,6 +191,7 @@ jobs:
           - decrypt_unpad
           - epid
           - response
+          - http_request
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: DeterminateSystems/nix-installer-action@v22

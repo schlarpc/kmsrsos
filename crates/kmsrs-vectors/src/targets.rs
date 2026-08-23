@@ -1,4 +1,4 @@
-//! The bodies of the six fuzz targets (`SEC-004`, #196).
+//! The bodies of the seven fuzz targets (`SEC-004`, #196; `SEC-013`, #306).
 //!
 //! # Why these live here and not in `fuzz/fuzz_targets`
 //!
@@ -46,6 +46,7 @@ use kmsrs_proto::wire::connection::{Connection, Decision, Grant, Step};
 use kmsrs_proto::wire::header::RpcHeader;
 use kmsrs_proto::wire::syntax::TransferSyntax;
 use kmsrs_proto::wire::{bind, stub};
+use kmsrs_server::web::{self, Answered, Response};
 use zerocopy::FromBytes;
 
 /// A target body: bytes in, nothing out, a panic if it found something.
@@ -62,6 +63,7 @@ pub const TARGETS: &[(&str, Target)] = &[
     ("decrypt_unpad", decrypt_unpad),
     ("epid", epid),
     ("response", response),
+    ("http_request", http_request),
 ];
 
 /// Run one target by name.
@@ -306,4 +308,124 @@ pub fn response(data: &[u8]) {
         let mut scratch = vec![0_u8; data.len().saturating_add(64)];
         let _ = response::decode(version, data, ciphers.schedule(version), &mut scratch);
     }
+}
+
+/// The HTTP request parser (`SEC-013`, #306).
+///
+/// The highest-risk parser in the tree, and the last one to get a target
+/// because it was the last one to exist. It is the only one that reads
+/// variable-length *text* off a socket with no fixed frame in front of it, and
+/// the only one reachable by anything that can open a TCP connection rather
+/// than only by a KMS client.
+///
+/// # What is asserted, and why each one
+///
+/// Not merely "it did not crash". The four invariants below are the ones a
+/// driver depends on, and a violation of any of them is a bug that a crash-only
+/// fuzzer would never find:
+///
+/// * **A reply never claims more input than it was given.** `consumed` is what
+///   a driver removes from its buffer. Over-consuming loses a pipelined
+///   request; under-consuming loops forever on the same bytes.
+/// * **Every reply is a well-formed status line.** A refusal is answered, never
+///   dropped — `OBS-009` (#185) — so even the most malformed input produces
+///   `HTTP/1.1 <code> <reason>`.
+/// * **`Content-Length` is the truth.** A body longer than its declared length
+///   is request smuggling's other half; shorter is a hung client.
+/// * **Nothing the client sent comes back.** The Organization fork's `/readyz`
+///   answers `Whooops! {e}` including filesystem paths. Here a refusal's
+///   message is a constant, and the fuzzer is what proves it: if any four-byte
+///   run of a refused request appears in the answer, something is echoing.
+pub fn http_request(data: &[u8]) {
+    // A router that renders the path, so an echo of the *path* would be
+    // deliberate and is excluded below. Everything else reaching the output
+    // would be the parser leaking.
+    let answered = web::answer(data, &mut |request| {
+        Response::html(alloc::format!("<p>{}</p>", request.path.len()))
+    });
+
+    let Answered::Reply {
+        bytes,
+        consumed,
+        error,
+    } = answered
+    else {
+        // `NeedMore` is the honest answer to an incomplete head, and it says
+        // nothing else to check.
+        return;
+    };
+
+    assert!(
+        consumed <= data.len(),
+        "the parser consumed {consumed} of {} bytes",
+        data.len()
+    );
+
+    let text = alloc::string::String::from_utf8_lossy(&bytes);
+    assert!(
+        text.starts_with("HTTP/1.1 "),
+        "a reply did not begin with a status line: {:?}",
+        text.get(..32)
+    );
+    assert!(
+        text.contains("\r\n\r\n"),
+        "a reply had no header terminator"
+    );
+
+    // `Content-Length` must equal the body actually written. A `HEAD` is
+    // answered without its body by design, and the header still states the
+    // length the `GET` would have had — so the check is against whichever the
+    // response carries.
+    if let Some((head, body)) = text.split_once("\r\n\r\n")
+        && let Some(declared) = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        assert!(
+            body.len() == declared || body.is_empty(),
+            "Content-Length says {declared} and the body is {}",
+            body.len()
+        );
+    }
+
+    // `OBS-009` (#185): a refusal says nothing the caller did not already
+    // know. Checked against the fixed vocabulary rather than by looking for
+    // echoed bytes: `Status::reason` is a closed set of constant strings, and
+    // "the body is one of these" is both stronger and free of the coincidences
+    // a substring search produces — a request declaring `HTTP/2.0` legitimately
+    // shares the word "HTTP" with the reason phrase that refuses it.
+    if error.is_some() {
+        let body = body_of(&text);
+        assert!(
+            REFUSAL_BODIES.contains(&body),
+            "a refusal answered with something outside its fixed vocabulary: \
+             {body:?}"
+        );
+    }
+}
+
+/// Every body a refusal may carry (`OBS-009`, #185).
+///
+/// `Status::reason` is the whole of an error body, and it is a closed set of
+/// constants. Repeated here rather than reached for, so that adding a status
+/// with a formatted body fails this target rather than passing it.
+const REFUSAL_BODIES: &[&str] = &[
+    "Bad Request",
+    "Not Found",
+    "Method Not Allowed",
+    "Payload Too Large",
+    "URI Too Long",
+    "Request Header Fields Too Large",
+    "Service Unavailable",
+    "HTTP Version Not Supported",
+    // A `HEAD` is answered without its body, and a refusal is answered in full
+    // even to a `HEAD` — but the method is one of the things that may have been
+    // unreadable, so an empty body is reachable here.
+    "",
+];
+
+/// The body of a serialised response, or the whole thing if it has no body.
+fn body_of(text: &str) -> &str {
+    text.split_once("\r\n\r\n").map_or(text, |(_, body)| body)
 }

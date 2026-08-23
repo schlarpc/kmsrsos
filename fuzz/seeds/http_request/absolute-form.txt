@@ -1,0 +1,3 @@
+GET http://elsewhere/ HTTP/1.1
+Host: kms
+

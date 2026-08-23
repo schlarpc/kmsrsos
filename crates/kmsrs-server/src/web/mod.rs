@@ -4,9 +4,9 @@
 //!
 //! `kmsrs-server` owns the sockets, and this module owns none of them. It takes
 //! bytes and returns bytes, exactly like `kmsrs-proto` does for the KMS
-//! protocol, and for the same three reasons: it can be fuzzed
-//! (`SEC-013`, #306), it can be tested without binding a port, and it works
-//! unchanged on Hermit.
+//! protocol, and for the same three reasons: it is fuzzed (`SEC-013`, #306 —
+//! the `http_request` target in `crates/kmsrs-vectors/src/targets.rs`), it can
+//! be tested without binding a port, and it works unchanged on Hermit.
 //!
 //! It lives here rather than in a crate of its own because `ARCH-001` (#1)
 //! folded the web UI into the server: it renders this server's state, so a

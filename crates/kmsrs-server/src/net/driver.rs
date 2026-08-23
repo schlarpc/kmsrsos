@@ -459,7 +459,7 @@ impl Driver {
                     continue;
                 }
                 if self.listeners.iter().any(|entry| entry.token == token) {
-                    self.accept_from(token, clock());
+                    self.accept_from(token, clock(), entropy);
                 } else {
                     self.service(token, readable, writable, entropy, clock);
                 }
@@ -483,7 +483,7 @@ impl Driver {
     }
 
     /// Accept everything queued on one listener, up to the free capacity.
-    fn accept_from(&mut self, token: Token, now: Instant) {
+    fn accept_from(&mut self, token: Token, now: Instant, entropy: &mut dyn Entropy) {
         loop {
             if self.requested.load(Ordering::Acquire) {
                 return;
@@ -551,7 +551,7 @@ impl Driver {
             // silently goes nowhere is indistinguishable from a client that
             // never connected, which is the class of invisibility `SEC-012`
             // (#204) exists to prevent.
-            if let Err(error) = self.register(stream, peer, now, accepting_port, role) {
+            if let Err(error) = self.register(stream, peer, now, accepting_port, role, entropy) {
                 self.server.logger().message(
                     crate::log::Severity::Warn,
                     "register",
@@ -569,7 +569,34 @@ impl Driver {
         now: Instant,
         accepting_port: u16,
         role: Role,
+        entropy: &mut dyn Entropy,
     ) -> io::Result<()> {
+        // `WIRE-010` (#68): a fresh association group per connection, drawn
+        // here because this is the one place that knows a connection has begun.
+        //
+        // It is on the wire in every `bind_ack`, so a constant is a value an
+        // observer can read in one packet and compare against another
+        // connection's — which is what `Finding::AssociationGroupConstant`
+        // exists to catch and what a hardcoded `0x12345678` used to be.
+        //
+        // Refusing the connection rather than falling back is the `OS-012`
+        // (#263) rule applied at the right layer: serving a predictable
+        // identity is worse than not serving, and a source that has started
+        // repeating itself will not stop.
+        let assoc_group = if role == Role::Kms {
+            match entropy.next_u32() {
+                Ok(group) => group,
+                Err(_) => {
+                    return Err(io::Error::other(
+                        "the entropy source failed, so this connection would \
+                         have been given a predictable association group",
+                    ));
+                }
+            }
+        } else {
+            0
+        };
+
         let mut stream = stream;
         let token = Token(self.next_token);
         self.next_token = self.next_token.saturating_add(1);
@@ -579,7 +606,7 @@ impl Driver {
 
         let session = match role {
             Role::Kms => Session::Kms(Box::new(
-                self.server.connection(0x1234_5678, accepting_port),
+                self.server.connection(assoc_group, accepting_port),
             )),
             Role::Web => Session::Web {
                 inbound: Vec::new(),
