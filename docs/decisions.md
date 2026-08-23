@@ -230,3 +230,13 @@ express a KMS host. Ruled out on paper, not by experiment.
 
 **D33 — Reimplementing DNS, standard AES, SHA-256, HMAC, HTTP, TLS or binary framing by hand.**
 Two exceptions, both in #41.
+
+**D34 — A `MinActiveClients` field per host key (`POL-009`, #97).** The field is inert in both
+existing implementations, for opposite reasons. vlmcsd declares it in `KmsData->CsvlkData` and reads
+it in `kms.c` to floor the reported count, but nothing ever writes it and it is 0 for every CSVLK in
+the shipped blob, so the floor does nothing. py-kms carries it in `KmsDataBase.xml` with real-looking
+values — 50 for Windows, 10 for each Office application — and no code path anywhere reads it. Those
+two numbers are exactly the saturation values the client-count model computes from `2N`, so the
+concept is subsumed rather than dropped: `POL-001` (#89) produces them from observed clients instead
+of from a constant nobody populated. Carrying a dead column would invite someone to populate it later
+with a value that fights the model.

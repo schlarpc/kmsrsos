@@ -16,8 +16,12 @@
 
 extern crate alloc;
 
+pub mod counting;
 pub mod error;
+pub mod gate;
 pub mod identity;
 
+pub use counting::{ClientCounts, CountOutcome, CountView};
 pub use error::EntropyUnavailable;
+pub use gate::{Decision, Grant, Observations, Refusal};
 pub use identity::{GroupIdentity, HostIdentity};
