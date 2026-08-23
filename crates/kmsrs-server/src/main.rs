@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use kmsrs_proto::time::Instant;
 use kmsrs_server::config::{Compiled, Discovered, Operational};
 use kmsrs_server::log::{Logger, Severity};
-use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS};
+use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS, Role};
 use kmsrs_server::net::listener::bind_all;
 use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server};
 
@@ -112,10 +112,52 @@ fn run(operational: Operational) -> Result<(), i32> {
         logger.message(Severity::Info, "listening", &entry.address.to_string());
     }
 
-    let mut driver = Driver::new(server, bound, MAX_CONNECTIONS).map_err(|error| {
-        logger.message(Severity::Error, "startup", &error.to_string());
-        EXIT_UNAVAILABLE
-    })?;
+    // `OBS-014` (#190): the web UI is another listener on the same loop, not a
+    // second server. One loop means one place where a deadline, a capacity
+    // check and a shutdown have to be right.
+    let mut listeners: Vec<(kmsrs_server::net::listener::Bound, Role)> =
+        bound.into_iter().map(|entry| (entry, Role::Kms)).collect();
+
+    if operational.web_ui {
+        match kmsrs_server::net::listener::bind_each(&kmsrs_server::net::addr::web_addresses(
+            operational.web_ui_port,
+        )) {
+            Ok((web_bound, web_failures)) => {
+                for (address, error) in &web_failures {
+                    logger.message(
+                        Severity::Warn,
+                        "web-bind-skipped",
+                        &format!("{address}: {error}"),
+                    );
+                }
+                for entry in &web_bound {
+                    logger.message(Severity::Info, "web-listening", &entry.address.to_string());
+                }
+                listeners.extend(web_bound.into_iter().map(|entry| (entry, Role::Web)));
+            }
+            // A web port that will not bind is not a reason to refuse to
+            // activate anything. Said out loud rather than swallowed
+            // (`SEC-012`, #204).
+            Err(error) => logger.message(Severity::Warn, "web-bind", &error.to_string()),
+        }
+    }
+
+    // `OS-012` (#263): a source that has started repeating itself will not
+    // stop, so this is read once and reported by `/healthz` thereafter.
+    let entropy_healthy = OsEntropy.self_test().is_ok();
+    if !entropy_healthy {
+        logger.message(
+            Severity::Error,
+            "entropy",
+            "the entropy self-test is failing; /healthz will report unhealthy",
+        );
+    }
+
+    let mut driver = Driver::with_roles(server, listeners, MAX_CONNECTIONS, entropy_healthy)
+        .map_err(|error| {
+            logger.message(Severity::Error, "startup", &error.to_string());
+            EXIT_UNAVAILABLE
+        })?;
     let shutdown = driver.shutdown_handle();
 
     // `NET-007` (#157): SIGINT and SIGTERM on Unix, `SetConsoleCtrlHandler` on

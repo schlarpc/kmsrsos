@@ -194,13 +194,28 @@ struct Listener {
     token: Token,
     socket: TcpListener,
     port: u16,
+    role: Role,
+}
+
+/// What a listener, and the connections it accepts, are for.
+///
+/// One loop serves both (`OBS-014`, #190). Two loops would mean two places
+/// where a deadline, a capacity check or a shutdown has to be got right, and
+/// the whole reason `ARCH-005` (#5) collapsed to one event loop was that the
+/// second copy is the one that drifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The KMS protocol.
+    Kms,
+    /// The read-only web UI (`OBS-008`, #184).
+    Web,
 }
 
 /// One client's connection.
 #[derive(Debug)]
 struct Conn {
     stream: TcpStream,
-    connection: Connection,
+    session: Session,
     peer: SocketAddr,
     /// Response bytes not yet written.
     outbound: Vec<u8>,
@@ -217,6 +232,33 @@ struct Conn {
     /// The application the last request named, for the rate-limit key
     /// (`POL-014`, #102).
     last_application: kmsrs_db::Guid,
+}
+
+/// The protocol state one connection is in the middle of.
+#[derive(Debug)]
+enum Session {
+    /// A KMS conversation, in the sans-io state machine.
+    ///
+    /// Boxed because it is far larger than the web variant — it carries the
+    /// reassembly and receive buffers — and an unboxed enum would make every
+    /// web connection pay for a KMS one it is not.
+    Kms(Box<Connection>),
+    /// A web request being accumulated until its head is complete.
+    ///
+    /// The buffer is bounded at [`crate::web::request::MAX_REQUEST`]: a client
+    /// that never sends a blank line is closed rather than buffered
+    /// (`OBS-012`, #188).
+    Web { inbound: Vec<u8> },
+}
+
+impl Session {
+    /// Which listener accepted this.
+    const fn role(&self) -> Role {
+        match self {
+            Self::Kms(_) => Role::Kms,
+            Self::Web { .. } => Role::Web,
+        }
+    }
 }
 
 impl Conn {
@@ -255,6 +297,12 @@ pub struct Driver {
     requested: Arc<AtomicBool>,
     waker: Arc<Waker>,
     server: Server,
+    /// The ports the KMS listeners are on, for the web UI to report.
+    kms_ports: Vec<u16>,
+    /// Whether the entropy source still passes its self-test
+    /// (`OS-012`, #263). Read once at start-up, because a source that has
+    /// started repeating itself will not stop.
+    entropy_healthy: bool,
 }
 
 impl Driver {
@@ -265,14 +313,41 @@ impl Driver {
     /// Returns an [`io::Error`] if the poller could not be created or a listener
     /// could not be registered.
     pub fn new(server: Server, listeners: Vec<Bound>, limit: usize) -> io::Result<Self> {
+        Self::with_roles(
+            server,
+            listeners
+                .into_iter()
+                .map(|bound| (bound, Role::Kms))
+                .collect(),
+            limit,
+            true,
+        )
+    }
+
+    /// The same, with a role per listener (`OBS-014`, #190).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the poller could not be created or a
+    /// listener could not be registered.
+    pub fn with_roles(
+        server: Server,
+        listeners: Vec<(Bound, Role)>,
+        limit: usize,
+        entropy_healthy: bool,
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN)?);
 
         let mut registered = Vec::with_capacity(listeners.len());
-        for (index, bound) in listeners.into_iter().enumerate() {
+        let mut kms_ports = Vec::new();
+        for (index, (bound, role)) in listeners.into_iter().enumerate() {
             // mio requires a non-blocking listener.
             bound.listener.set_nonblocking(true)?;
             let port = bound.address.port();
+            if role == Role::Kms && !kms_ports.contains(&port) {
+                kms_ports.push(port);
+            }
             let mut listener = TcpListener::from_std(bound.listener);
             let token = Token(FIRST_LISTENER_TOKEN.saturating_add(index));
             poll.registry()
@@ -281,6 +356,7 @@ impl Driver {
                 token,
                 socket: listener,
                 port,
+                role,
             });
         }
 
@@ -295,7 +371,31 @@ impl Driver {
             requested: Arc::new(AtomicBool::new(false)),
             waker,
             server,
+            kms_ports,
+            entropy_healthy,
         })
+    }
+
+    /// The most connection slots the web UI may hold at once.
+    ///
+    /// A share of the same budget, not a budget of its own (`OBS-014`, #190).
+    /// Two independent limits would mean the host's real ceiling is their sum,
+    /// which is a number nobody wrote down; one budget with a share means the
+    /// ceiling is [`MAX_CONNECTIONS`] no matter what arrives.
+    ///
+    /// A quarter, because the web UI must never be able to starve the KMS
+    /// listener — a browser tab left open, or a monitor polling `/healthz`
+    /// every second, must not cost a client its activation. Three quarters of
+    /// the budget is reserved for the thing this program is for.
+    #[must_use]
+    pub const fn web_limit(limit: usize) -> usize {
+        // `checked_div` rather than `/`: the workspace deny list applies here
+        // too, and the fallback is the honest one — a budget too small to
+        // divide has room for exactly one.
+        match limit.checked_div(4) {
+            Some(0) | None => 1,
+            Some(share) => share,
+        }
     }
 
     /// A handle that can stop this loop from another thread.
@@ -392,6 +492,7 @@ impl Driver {
                 return;
             };
             let accepting_port = entry.port;
+            let role = entry.role;
 
             let (stream, peer) = match entry.socket.accept() {
                 Ok(accepted) => accepted,
@@ -423,6 +524,18 @@ impl Driver {
 
             // `POL-013` (#101): checked here, before any RPC state exists, so a
             // refused peer never reaches the parser.
+            // `OBS-014` (#190): the web UI holds at most its share, so a
+            // flood of page loads cannot take the slots a client needs.
+            if role == Role::Web && self.web_connections() >= Self::web_limit(self.limit) {
+                drop(stream);
+                self.server.logger().message(
+                    crate::log::Severity::Warn,
+                    "web-at-capacity",
+                    &peer.ip().to_string(),
+                );
+                continue;
+            }
+
             if let Err(denial) = self.server.compiled().access.check(peer.ip()) {
                 drop(stream);
                 self.server.logger().message(
@@ -438,7 +551,7 @@ impl Driver {
             // silently goes nowhere is indistinguishable from a client that
             // never connected, which is the class of invisibility `SEC-012`
             // (#204) exists to prevent.
-            if let Err(error) = self.register(stream, peer, now, accepting_port) {
+            if let Err(error) = self.register(stream, peer, now, accepting_port, role) {
                 self.server.logger().message(
                     crate::log::Severity::Warn,
                     "register",
@@ -455,6 +568,7 @@ impl Driver {
         peer: SocketAddr,
         now: Instant,
         accepting_port: u16,
+        role: Role,
     ) -> io::Result<()> {
         let mut stream = stream;
         let token = Token(self.next_token);
@@ -463,12 +577,19 @@ impl Driver {
             .registry()
             .register(&mut stream, token, Interest::READABLE)?;
 
-        let connection = self.server.connection(0x1234_5678, accepting_port);
+        let session = match role {
+            Role::Kms => Session::Kms(Box::new(
+                self.server.connection(0x1234_5678, accepting_port),
+            )),
+            Role::Web => Session::Web {
+                inbound: Vec::new(),
+            },
+        };
         self.connections.insert(
             token,
             Conn {
                 stream,
-                connection,
+                session,
                 peer,
                 outbound: Vec::new(),
                 written: 0,
@@ -565,15 +686,17 @@ impl Driver {
                 host_time: None,
             };
 
+            let input = buffer.get(..read).unwrap_or(&[]);
             let handled = {
-                let Some(conn) = self.connections.remove(&token) else {
+                let Some(mut conn) = self.connections.remove(&token) else {
                     return Ok(());
                 };
-                let mut conn = conn;
-                let input = buffer.get(..read).unwrap_or(&[]);
-                let handled = self
-                    .server
-                    .handle(&mut conn.connection, input, context, entropy);
+                let handled = match &mut conn.session {
+                    Session::Kms(connection) => {
+                        self.server.handle(connection, input, context, entropy)
+                    }
+                    Session::Web { inbound } => self.serve_web(inbound, input, peer),
+                };
                 self.connections.insert(token, conn);
                 handled
             };
@@ -616,6 +739,81 @@ impl Driver {
                 return Ok(());
             }
         }
+    }
+
+    /// Accumulate a web request and answer it once its head is complete.
+    ///
+    /// Returns a [`Handled`] so the write path is the same one the KMS side
+    /// uses — the flush loop, the outbound ceiling and the deadline are written
+    /// once and apply to both (`OBS-014`, #190).
+    ///
+    /// Every response closes the connection, because there is no keep-alive
+    /// (`OBS-007`, #183): a browser fetching six fixed pages gains nothing from
+    /// one, and a persistent connection is how a slow client holds a slot the
+    /// KMS listener could have had.
+    fn serve_web(
+        &self,
+        inbound: &mut Vec<u8>,
+        input: &[u8],
+        peer: SocketAddr,
+    ) -> crate::server::Handled {
+        // Bounded before the bytes are kept, not after (`OBS-012`, #188).
+        if inbound.len().saturating_add(input.len()) > crate::web::request::MAX_REQUEST {
+            let response =
+                crate::web::Response::error(crate::web::Status::HeadersTooLarge).write(true);
+            self.server.logger().message(
+                crate::log::Severity::Warn,
+                "web-refused",
+                &format!("{}: request head too long", peer.ip()),
+            );
+            return crate::server::Handled {
+                response,
+                close: true,
+            };
+        }
+        inbound.extend_from_slice(input);
+
+        let snapshot = self.snapshot();
+        match crate::web::answer(inbound, &mut |request| {
+            crate::web::routes::route(request, &snapshot)
+        }) {
+            crate::web::Answered::NeedMore => crate::server::Handled {
+                response: Vec::new(),
+                close: false,
+            },
+            crate::web::Answered::Reply { bytes, error, .. } => {
+                // The refusal is logged and never sent (`OBS-009`, #185;
+                // `SEC-012`, #204): an operator gets the reason, the caller
+                // gets a constant.
+                if let Some(error) = error {
+                    self.server.logger().message(
+                        crate::log::Severity::Warn,
+                        "web-refused",
+                        &format!("{}: {error}", peer.ip()),
+                    );
+                }
+                crate::server::Handled {
+                    response: bytes,
+                    close: true,
+                }
+            }
+        }
+    }
+
+    /// What the web UI is allowed to know about this process.
+    fn snapshot(&self) -> crate::web::routes::Snapshot<'_> {
+        crate::web::routes::Snapshot {
+            listening: !self.kms_ports_slice().is_empty(),
+            entropy_healthy: self.entropy_healthy,
+            kms_ports: self.kms_ports_slice(),
+            identity: self.server.host().identity(),
+            events: self.server.host().events(),
+        }
+    }
+
+    /// The ports the KMS listener is bound to.
+    fn kms_ports_slice(&self) -> &[u16] {
+        &self.kms_ports
     }
 
     /// Write as much of the outbound buffer as the socket will take.
@@ -683,6 +881,14 @@ impl Driver {
                 conn.watching_writable = wants_writable;
             }
         }
+    }
+
+    /// How many connections the web UI currently holds.
+    fn web_connections(&self) -> usize {
+        self.connections
+            .values()
+            .filter(|conn| conn.session.role() == Role::Web)
+            .count()
     }
 
     /// Close and forget one connection.

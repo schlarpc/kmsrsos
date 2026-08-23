@@ -81,6 +81,34 @@ pub const DUAL_STACK_ADDRESSES: [SocketAddr; 2] = [
 pub const SINGLE_SOCKET_ADDRESSES: [SocketAddr; 1] =
     [SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), KMS_PORT)];
 
+/// The addresses the web UI listens on, for a chosen port.
+///
+/// The same platform rule as [`bind_addresses`]: a target whose `bind()`
+/// ignores the address gets exactly one socket (`OS-009`), everything else gets
+/// the dual-stack pair. Built rather than `const`, because the port is an
+/// operational setting — it moves no byte on the KMS wire, which is what
+/// `CFG-001` (#166) permits it to be (`OBS-014`, #190).
+#[must_use]
+pub fn web_addresses(port: u16) -> Vec<SocketAddr> {
+    if SINGLE_SOCKET_ONLY {
+        vec![SocketAddr::new(
+            core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+            port,
+        )]
+    } else {
+        vec![
+            SocketAddr::new(
+                core::net::IpAddr::V6(core::net::Ipv6Addr::UNSPECIFIED),
+                port,
+            ),
+            SocketAddr::new(
+                core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED),
+                port,
+            ),
+        ]
+    }
+}
+
 /// Every address the KMS listener binds (`NET-001`, #150; `NET-002`, #151;
 /// `OS-009`, #260).
 ///

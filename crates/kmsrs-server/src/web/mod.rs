@@ -27,6 +27,7 @@
 
 pub mod request;
 pub mod response;
+pub mod routes;
 
 pub use request::{Method, Parsed, Request, RequestError};
 pub use response::{ContentType, Response, Status};
