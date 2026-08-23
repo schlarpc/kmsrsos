@@ -27,6 +27,7 @@ arrayvec.workspace = true
 # feature (ARCH-003, #3).
 kmsrs-proto = { path = ".", features = ["testing"] }
 hex.workspace = true
+kmsrs-vectors.workspace = true
 proptest.workspace = true
 
 [lints]
