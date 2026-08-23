@@ -20,7 +20,7 @@ use kmsrs_policy::access::RateLimiter;
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::kms::layout::MAX_RESPONSE_LEN;
 use kmsrs_proto::time::Instant;
-use kmsrs_proto::wire::connection::{Connection, Step};
+use kmsrs_proto::wire::connection::{Connection, SecondaryAddress, Step};
 
 /// A configured host.
 #[derive(Debug)]
@@ -166,9 +166,16 @@ impl Server {
     }
 
     /// A fresh connection using this build's negotiation settings.
+    ///
+    /// `accepting_port` is the port of the socket that actually accepted, which
+    /// the `bind_ack` advertises (`WIRE-011`, #69). With two listeners each
+    /// must report its own — py-kms echoes its configured primary port
+    /// regardless, so a client reconnecting to the advertised endpoint can be
+    /// sent somewhere the host is not.
     #[must_use]
-    pub fn connection(&self, assoc_group: u32) -> Connection {
+    pub fn connection(&self, assoc_group: u32, accepting_port: u16) -> Connection {
         Connection::new(assoc_group, self.host.identity().advertises_ndr64())
+            .with_secondary_address(SecondaryAddress::for_port(accepting_port))
     }
 
     /// When an idle connection should be closed (`NET-004`, #153).

@@ -168,6 +168,18 @@ impl ShutdownHandle {
     }
 }
 
+/// A bound listener and the port it is on.
+///
+/// The port is kept beside the socket because a `bind_ack` must advertise the
+/// endpoint that *actually accepted* (`WIRE-011`, #69), and asking the socket
+/// again per accept would be a syscall for an answer that cannot change.
+#[derive(Debug)]
+struct Listener {
+    token: Token,
+    socket: TcpListener,
+    port: u16,
+}
+
 /// One client's connection.
 #[derive(Debug)]
 struct Conn {
@@ -220,7 +232,7 @@ impl Conn {
 pub struct Driver {
     poll: Poll,
     events: Events,
-    listeners: Vec<(Token, TcpListener)>,
+    listeners: Vec<Listener>,
     connections: HashMap<Token, Conn>,
     next_token: usize,
     limit: usize,
@@ -244,11 +256,16 @@ impl Driver {
         for (index, bound) in listeners.into_iter().enumerate() {
             // mio requires a non-blocking listener.
             bound.listener.set_nonblocking(true)?;
+            let port = bound.address.port();
             let mut listener = TcpListener::from_std(bound.listener);
             let token = Token(FIRST_LISTENER_TOKEN.saturating_add(index));
             poll.registry()
                 .register(&mut listener, token, Interest::READABLE)?;
-            registered.push((token, listener));
+            registered.push(Listener {
+                token,
+                socket: listener,
+                port,
+            });
         }
 
         let next_token = FIRST_LISTENER_TOKEN.saturating_add(registered.len());
@@ -324,11 +341,7 @@ impl Driver {
                 if token == WAKER_TOKEN {
                     continue;
                 }
-                if self
-                    .listeners
-                    .iter()
-                    .any(|(candidate, _)| *candidate == token)
-                {
+                if self.listeners.iter().any(|entry| entry.token == token) {
                     self.accept_from(token, clock());
                 } else {
                     self.service(token, readable, writable, entropy, clock);
@@ -358,15 +371,12 @@ impl Driver {
             if self.requested.load(Ordering::Acquire) {
                 return;
             }
-            let Some((_, listener)) = self
-                .listeners
-                .iter()
-                .find(|(candidate, _)| *candidate == token)
-            else {
+            let Some(entry) = self.listeners.iter().find(|entry| entry.token == token) else {
                 return;
             };
+            let accepting_port = entry.port;
 
-            let (stream, peer) = match listener.accept() {
+            let (stream, peer) = match entry.socket.accept() {
                 Ok(accepted) => accepted,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => return,
                 // `EINTR`: nothing was accepted, so go round again.
@@ -408,12 +418,18 @@ impl Driver {
 
             // A registration failure drops the connection and moves on; the
             // listener is still fine.
-            let _ = self.register(stream, peer, now);
+            let _ = self.register(stream, peer, now, accepting_port);
         }
     }
 
     /// Register an accepted stream with the poller.
-    fn register(&mut self, stream: TcpStream, peer: SocketAddr, now: Instant) -> io::Result<()> {
+    fn register(
+        &mut self,
+        stream: TcpStream,
+        peer: SocketAddr,
+        now: Instant,
+        accepting_port: u16,
+    ) -> io::Result<()> {
         let mut stream = stream;
         let token = Token(self.next_token);
         self.next_token = self.next_token.saturating_add(1);
@@ -421,7 +437,7 @@ impl Driver {
             .registry()
             .register(&mut stream, token, Interest::READABLE)?;
 
-        let connection = self.server.connection(0x1234_5678);
+        let connection = self.server.connection(0x1234_5678, accepting_port);
         self.connections.insert(
             token,
             Conn {

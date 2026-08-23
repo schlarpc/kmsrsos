@@ -135,7 +135,7 @@ fn context(index: u64) -> RequestContext {
 /// Run a whole conversation and return every byte the server sent.
 fn conversation(operational: Operational, version: Version) -> Vec<u8> {
     let mut server = server(operational);
-    let mut connection = server.connection(0x1234_5678);
+    let mut connection = server.connection(0x1234_5678, 1688);
     // The response's random salt must not vary between the two runs, so both
     // get the same deterministic stream.
     let mut entropy = DeterministicEntropy::from_seed(0x5A17);
@@ -234,7 +234,7 @@ fn a_compiled_setting_does_change_the_wire() {
         kmsrs_db::Date::new(2026, 8, 1).unwrap(),
     )
     .unwrap();
-    let mut connection = server.connection(0x1234_5678);
+    let mut connection = server.connection(0x1234_5678, 1688);
     let mut entropy = DeterministicEntropy::from_seed(0x5A17);
     let mut sent = Vec::new();
 
@@ -278,7 +278,7 @@ fn operational_settings_affect_what_they_are_supposed_to() {
         event_log_capacity: 3,
         ..Operational::default()
     });
-    let mut connection = small.connection(1);
+    let mut connection = small.connection(1, 1688);
     let mut entropy = DeterministicEntropy::from_seed(1);
 
     let bind = pdu(PacketType::Bind, PacketFlags::COMPLETE, 2, &bind_body());
