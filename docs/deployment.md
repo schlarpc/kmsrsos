@@ -323,9 +323,30 @@ rather than the edge case, and every value this host draws — the RPC associati
 and salts, the hardware ID, the randomised ePID fields — would quietly become a constant while the
 service kept working perfectly.
 
-**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) refuses to serve
-rather than serving a predictable identity, and `/healthz` and `/metrics` report it, so a mistake here
-is loud rather than silent — but it is still a mistake, and this is how not to make it.
+**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) **refuses to
+serve** rather than serving a predictable identity: the process exits 69 and says so, naming RDSEED,
+because the operator who reads that line is one hypervisor setting away from the fix. The source is
+re-tested every five minutes thereafter — Hermit reseeds every second and a failed reseed is
+silent — and a source that starts repeating takes `/healthz` to 503 and
+`kmsrsos_entropy_healthy` to 0.
+
+So the mistake is loud rather than silent. It is still a mistake, and this is how not to make it.
+
+### Memory (`OS-011`, #262)
+
+A unikernel has a fixed memory budget decided when the VM is created, no swap, and no OOM killer to
+pick a victim: a failed allocation in a program compiled with `panic = "abort"` stops the machine, and
+only the hypervisor can restart it. So the number that matters is not how much this host uses but how
+much it *can* use, and that is bounded by constants rather than by traffic.
+
+`crates/kmsrs-server/src/budget.rs` adds them up — the CMID table, the event-log ring buffer and the
+connection state budget — and asserts the total at **compile time**, so a build that would exceed the
+ceiling does not link. The product database is not in that sum: it is `static` data in `.rodata`
+(`DB-003`, #127), part of the image rather than of the heap, and `DB-018` (#142) is where it is
+measured.
+
+The current ceiling is 8 MiB of heap. A Hermit guest is normally given 64 MiB or more, which leaves
+the kernel, the stacks and the network buffers an order of magnitude more room than this takes.
 
 ### virtio-net may not attach at all (`OS-004`, #255)
 

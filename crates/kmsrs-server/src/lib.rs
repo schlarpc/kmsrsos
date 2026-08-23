@@ -19,6 +19,7 @@
 // `fmt::Result` and the discipline buys nothing.
 #![deny(clippy::let_underscore_untyped)]
 
+pub mod budget;
 pub mod config;
 pub mod entropy;
 pub mod host;
