@@ -1,0 +1,244 @@
+# Deployment
+
+What an operator needs to know that the binary cannot tell them. The running server's own
+`/instructions` page covers the per-client half — `slmgr /skms`, the SRV record, the GVLKs — with its
+real address and port filled in. This document is the part that is about *where to put it*.
+
+Work items live in [GitHub issues](https://github.com/schlarpc/kmsrsos/issues); the decisions behind
+any of this are in [`decisions.md`](decisions.md).
+
+- [Where the host has to live](#where-the-host-has-to-live) — the loopback constraint
+- [DNS: the `_vlmcs._tcp` SRV record](#dns-the-_vlmcs_tcp-srv-record)
+- [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
+- [What is not in the artifact](#what-is-not-in-the-artifact)
+
+---
+
+## Where the host has to live
+
+**A Windows client will not activate against `127.0.0.1` or `::1`.** Software Protection Platform
+refuses a KMS host on the loopback interface whatever the port, and reports a generic failure rather
+than saying why. This is not our behaviour and there is nothing to configure — it is the client side
+of the protocol.
+
+It is also not folklore. It is the entire reason vlmcsd carries a 370-line TAP/TUN driver that swaps
+`ip_src` and `ip_dst` on every packet, together with an internal DHCP server and a packet-rewriting
+thread, so that a loopback conversation arrives looking like a LAN one. That is declined here as
+[D21](decisions.md#declined-with-rationale): it is a large amount of privileged, platform-specific
+code to work around a constraint that has four ordinary answers.
+
+So give the clients a non-loopback address. Any of these is one:
+
+| Situation | What to point clients at |
+|---|---|
+| Server on a LAN machine | that machine's LAN address |
+| Server in a container | the container's bridge address, or a published port on the host's LAN address |
+| Server on the same machine as a Hyper-V or WSL2 client | the host-side address of the virtual switch (`vEthernet (WSL)`, typically `172.x`) |
+| Server on the same machine as a VirtualBox/VMware client | the host-only adapter's address |
+| One physical machine, no VMs, nothing else | a second NIC, or a loopback *alias* that is not in `127.0.0.0/8` |
+
+The `/instructions` page detects this case: browse to the web UI over loopback and it says so at the
+top of the page, because an operator who has just typed `localhost:8080` is about to spend an
+afternoon on it.
+
+`NET-014` (#163) is the issue; `D21` is the declined workaround.
+
+---
+
+## DNS: the `_vlmcs._tcp` SRV record
+
+A Windows client with no explicit host configured looks up `_vlmcs._tcp` in the domains it searches.
+That is how a real KMS deployment is found, and it is strictly better than `slmgr /skms` on every
+client: the address can change without touching any of them.
+
+The record shape (`DISC-007`, #149):
+
+```
+_vlmcs._tcp.EXAMPLE.COM.  3600  IN  SRV  0 0 1688  kms.example.com.
+```
+
+The four values after `SRV` are **priority, weight, port, target**.
+
+- **Priority** — ascending. Clients try the lowest-numbered priority first and only fall through to
+  the next if every host in that band fails.
+- **Weight** — a proportional share *within* one priority, chosen randomly per lookup (RFC 2782).
+  `kmsrs-client` implements the ordering exactly, including the `(rand % 256) * isqrt(weight * 1000)`
+  form the reference implementations use.
+- **Port** — 1688, and not configurable at either end (`NET-002`, #151). A client discovers the port
+  from the record; a host listening elsewhere is a host nobody finds.
+- **Target** — a name, with a trailing dot, that resolves to an address. Not an IP literal: SRV
+  targets are names.
+
+**Zero for both priority and weight is the convention** for a single host, and is what Microsoft's
+own KMS host publishes. Multiple hosts only need them if the shares should be unequal.
+
+Note the domain. Clients look up `_vlmcs._tcp` under their **primary DNS suffix** and under the
+domains in their search list — in an Active Directory domain that is the domain itself, and on a
+workgroup machine it is often nothing at all, in which case there is no SRV lookup to answer and
+`slmgr /skms` is the only route. `DISC-004` (#146) is the harness that measures which of those cases
+actually fire.
+
+### Publishing it
+
+The running server's `/instructions` page renders all three of these with its own address and port
+substituted; they are repeated here so the shape is legible without a server to hand.
+
+BIND-style zone file:
+
+```
+_vlmcs._tcp  IN  SRV  0 0 1688  kms.example.com.
+```
+
+`nsupdate`, against a zone that accepts dynamic updates:
+
+```sh
+nsupdate <<'EOF'
+update add _vlmcs._tcp.EXAMPLE.COM. 3600 SRV 0 0 1688 kms.example.com.
+send
+EOF
+```
+
+Windows DNS in an Active Directory domain:
+
+```powershell
+Add-DnsServerResourceRecord -ZoneName EXAMPLE.COM `
+  -Name _vlmcs._tcp -Srv -Priority 0 -Weight 0 `
+  -Port 1688 -DomainName kms.example.com
+```
+
+**The server never publishes this itself.** Dynamic DNS update via RFC 2136 is declined as
+[D15](decisions.md#d15): AD DNS defaults to secure-updates-only and real hosts register with
+**GSS-TSIG** using machine-account Kerberos credentials, so a shared-key TSIG does not serve the
+primary use case at all — and either mechanism would mean a secret inside the shipped artifact, which
+is the one thing [there is not](#what-is-not-in-the-artifact).
+
+### Checking it
+
+```
+nslookup -type=srv _vlmcs._tcp.EXAMPLE.COM
+slmgr /dlv
+```
+
+`/dlv` prints the host the client used and its activation interval, which is the quickest way to tell
+*"the client never found a host"* from *"the client found one and did not like the answer"*.
+
+---
+
+## Hermit on QEMU and Proxmox
+
+The bare-metal target is a [Hermit](https://github.com/hermit-os) unikernel: one binary that is the
+whole operating system, booted by a UEFI loader, talking to virtio-net. QEMU/libvirt is the supported
+configuration, because that is what hermit's own CI exercises on every pull request. Proxmox is a
+nice-to-have (decision 25), and the constraints below are why.
+
+The findings this section rests on are in
+[`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
+kernel and `qemu-server` sources rather than from documentation.
+
+### A serial port is mandatory (`OS-005`, #256)
+
+**Hermit's only console is the 16550 UART at `0x3F8`.** There is no VGA text mode, no framebuffer
+console, and no kernel-side logging to anywhere else. A VM without a serial port is a VM that boots
+in complete silence — including when it panics, which on a unikernel means the guest simply stops.
+
+In the Proxmox web UI, on the VM:
+
+1. **Hardware → Add → Serial Port**, port number `0`.
+2. **Options → Display → Serial terminal 0**.
+
+Then `qm terminal <vmid>` from the Proxmox host attaches to it. Under plain QEMU the equivalent is
+`-serial stdio` or `-nographic`.
+
+Do this **before** the first boot. Adding it afterwards works, but the first boot is the one whose
+output decides whether virtio-net attached at all, and that output is gone.
+
+### The configuration channel (`OS-008`, #259)
+
+There is exactly one runtime setting (`KMSRSOS_CONFIG`, `CFG-002` #167) and it reaches a Hermit guest
+through the loader's boot-arguments file, not through anything the hypervisor offers. What a Proxmox
+admin can set from the GUI, and whether it arrives:
+
+| Setting | GUI-settable | Reaches a Hermit guest |
+|---|:---:|---|
+| DHCP, via the network | yes | **yes** — the sanctioned path, and how the guest gets its address (#254) |
+| MAC address | yes | yes — readable by the guest, so it is a per-VM identifier if one is needed |
+| Serial port | yes | yes, and mandatory — see above |
+| CPU type (`host`) | yes | yes, and **required** — see entropy below |
+| SMBIOS type 1 fields | yes | **no** — the kernel has no DMI code and the loader discards the pointer |
+| Cloud-init drive | yes | **no** — it arrives as an ISO9660 block device, and there is no block driver |
+| `args` / kernel command line | **no** (CLI only) | would work, but Proxmox does not expose it in the web UI |
+
+So the whole GUI-settable channel is **DHCP plus the MAC address**. Everything else comes from the
+ESP: a GPT disk whose EFI system partition holds `\EFI\BOOT\BOOTX64.EFI` (the hermit loader),
+`\EFI\hermit\hermit-app` (this binary) and optionally `\EFI\hermit\hermit-bootargs`, a plain text file
+the loader reads. Boot args accept `env=KEY=VALUE` tokens, which is how `KMSRSOS_CONFIG` is set.
+
+Worked example — serve the web UI on 8081 instead of 8080:
+
+```
+# \EFI\hermit\hermit-bootargs on the image's ESP
+env=KMSRSOS_CONFIG=web_ui_port = 8081
+```
+
+Editing that file is the entire in-place reconfiguration story, and it is deliberately small: the
+doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch
+settings that cannot change a byte on the wire (`CFG-001`, #166).
+
+### Set the CPU type to `host`
+
+Not cosmetic, and not about speed. Hermit's CSPRNG seeds from **RDSEED** or from virtio-rng, and on a
+seeding failure `sys_read_entropy` *silently succeeds* — filling the buffer from a Park–Miller–Lehmer
+LCG seeded with a static zero, a stream that is identical across boots, and emitting only a warning
+the guest never sees. `getrandom` sees an ordinary success and hands it on.
+
+Proxmox's default `kvm64` CPU model **does not expose RDSEED**, and Proxmox's `virtio-rng-pci` lands
+on the same conventional PCI bus Hermit rejects. So on a default Proxmox VM this is the likely path
+rather than the edge case, and every value this host draws — the RPC association group, response IVs
+and salts, the hardware ID, the randomised ePID fields — would quietly become a constant while the
+service kept working perfectly.
+
+**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) refuses to serve
+rather than serving a predictable identity, and `/healthz` and `/metrics` report it, so a mistake here
+is loud rather than silent — but it is still a mistake, and this is how not to make it.
+
+### virtio-net may not attach at all (`OS-004`, #255)
+
+Proxmox always places NICs on a conventional PCI bus — `pci.0` is a `pci-bridge` behind an i82801b11
+bridge even on q35 — and **never** emits `disable-legacy=on`; there are zero occurrences of it in
+`qemu-server`. QEMU therefore presents a *transitional* virtio-net device with PCI ID `0x1000`, and
+Hermit refuses anything below `0x1040`.
+
+That chain is solid link-by-link from the sources and has **never been observed**, which is what #255
+is for. If it does fail, the serial console will say so on the first boot — which is the other reason
+to attach one before that boot rather than after.
+
+---
+
+## What is not in the artifact
+
+**No secrets, of any kind** (`SEC-013`, #205). Not "the secrets are well protected" — there are none
+to protect, and this is a property of the design rather than of care taken.
+
+- **The three protocol keys are published constants.** They are compiled into every genuine KMS host,
+  every KMS client, and both open-source emulators; recovering them takes a disassembler and an
+  afternoon. The protocol uses them for framing and for proof-of-decryption, not for
+  confidentiality — a KMS activation exchange protects nothing, because there is nothing in it worth
+  protecting. That is also why `kmsrs-crypto` skips constant-time discipline entirely
+  (`CRY-017`, #56).
+- **No DNS update credential.** RFC 2136 is declined ([D15](decisions.md#d15)), and the reason given
+  there is partly this one: a shared TSIG key in a published container image is a secret in name
+  only.
+- **No authentication anywhere.** The web UI is read-only ([D27](decisions.md#declined-with-rationale)),
+  so there is no password, no session, no token and no cookie. RPC authentication is declined
+  ([D4](decisions.md#declined-with-rationale)) because real KMS clients never authenticate.
+- **No disk I/O at all** (axiom A5), so there is no key file, no credential file and no database
+  connection string — nor anywhere to put one.
+- **No configuration that could carry one.** The single runtime setting is a TOML document restricted
+  to fields that cannot change a byte on the wire (`CFG-001`, #166), and
+  `wire_is_not_configurable.rs` is the test that keeps it that way.
+
+Checked rather than asserted: `no_secret_material_is_embedded` in
+`crates/kmsrs-server/tests/workspace_invariants.rs` fails if a shipped source names anything
+credential-shaped, if a PEM block or an access-key prefix appears anywhere, or if `kmsrs-crypto`'s key
+module grows a fourth constant — which is the one place in the tree where key material would arrive
+looking like it belonged.
