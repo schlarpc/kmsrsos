@@ -251,3 +251,14 @@ detection oracle. `HResult::InvalidActivationData` remains in the vocabulary so 
 name the code when a *real* host sends one. The neighbouring question for `N_Policy` is left open as
 #283 rather than declined, because a differential test against a genuine host could still turn up a
 divergence there.
+
+**D36 — Honouring py-kms's `InvalidWinBuild` per CSVLK (`ID-017`, #122).** The *intent* is sound — a
+host key should not be paired with a host build that could not have had it installed — but the field
+itself cannot be adopted. It exists only in py-kms's `KmsDataBase.xml`, it is hand-entered, and its
+values are **indices into py-kms's own `WinBuild` table** (`[0,1,2]`, `[0]`, `[]`), so they carry no
+meaning outside that file's row order. No Microsoft artifact contains it, or anything equivalent:
+`pkeyconfig` gives `ActConfigId`, `RefGroupId`, `EditionId`, `ProductDescription`, `ProductKeyType`
+and `IsRandomized`, and nothing about host builds. Copying the values would be exactly the practice
+that produced every fabricated GUID the audits found. The constraint is worth enforcing, so it is
+reopened as #286 in the form that has a real data source — deriving each host key's earliest build
+from the images its `pkeyconfig` appears in — rather than closed outright.

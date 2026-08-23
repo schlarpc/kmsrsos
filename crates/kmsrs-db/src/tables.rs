@@ -131,6 +131,69 @@ pub struct Product {
     pub application: Option<Guid>,
 }
 
+impl Product {
+    /// Whether this SKU is a server edition (`DB-012`, #136).
+    ///
+    /// Derived from Microsoft's own `EditionId` rather than carried as a
+    /// column, because it is a *function* of data already here and a column
+    /// would be a second place for it to be wrong. Every server edition
+    /// identifier Microsoft ships begins with `Server` — `ServerDatacenter`,
+    /// `ServerStandard`, `ServerRdsh`, `ServerSolution` — and a multi-edition
+    /// row lists them separated by semicolons.
+    ///
+    /// vlmcsd calls the equivalent flag `MayBeServer` and the name is apt: it
+    /// says a request for this SKU *may* come from a server, not that it did.
+    /// Nothing refuses on it; it selects the client count a real client would
+    /// declare (see [`crate::required_clients`]).
+    #[must_use]
+    pub fn may_be_server(&self) -> bool {
+        self.edition_id
+            .split(';')
+            .any(|edition| edition.trim_start().starts_with("Server"))
+    }
+
+    /// Whether this SKU is a pre-release build (`DB-012`, #136;
+    /// `POL-010`, #98).
+    ///
+    /// Derived from Microsoft's `ProductDescription`, which marks them in
+    /// plain text — `Windows Server Next Beta ServerRdsh`, and so on.
+    ///
+    /// py-kms carries this as a hand-entered `IsPreview` attribute on nine of
+    /// its several hundred rows, which is both incomplete and unverifiable.
+    /// Reading Microsoft's own description instead means the flag tracks
+    /// whatever the pipeline extracts, with no catalogue to fall out of date.
+    #[must_use]
+    pub fn is_preview(&self) -> bool {
+        const MARKERS: [&str; 4] = ["Beta", "Pre-Release", "Prerelease", "Preview"];
+        MARKERS
+            .iter()
+            .any(|marker| contains_ignoring_case(self.description, marker))
+    }
+}
+
+/// Whether `haystack` contains `needle`, ignoring ASCII case.
+///
+/// `core` has no case-insensitive substring search and this crate has no
+/// dependencies, so it is written out. The inputs are short and this runs at
+/// most a few hundred times.
+fn contains_ignoring_case(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    let Some(last_start) = haystack.len().checked_sub(needle.len()) else {
+        return false;
+    };
+    (0..=last_start).any(|start| {
+        haystack
+            .get(start..start.saturating_add(needle.len()))
+            .is_some_and(|window| {
+                window
+                    .iter()
+                    .zip(needle.iter())
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            })
+    })
+}
+
 /// A KMS host key, with what it can activate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Csvlk {

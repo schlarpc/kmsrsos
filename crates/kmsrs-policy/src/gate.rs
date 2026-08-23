@@ -19,6 +19,10 @@
 //!   seeing it succeed identifies an emulator in one packet. This is only
 //!   viable because the database carries real key types from Microsoft's own
 //!   artifacts (`DB-015`, #139) rather than a hand-copied catalogue.
+//! * **Pre-release SKUs — refuse, with a caveat.** Same probe, but not the same
+//!   cost: a pre-release SKU *can* carry a GVLK, and the shipped database
+//!   contains one. Refusing it therefore does affect a real Insider client,
+//!   which is why it is a flag. See [`REFUSE_PREVIEW`].
 //! * **Application mismatch — refuse.** A client claiming the Windows
 //!   application while presenting an Office product is not a client.
 //!
@@ -62,6 +66,20 @@ use kmsrs_proto::types::{CsvlkSelection, Intervals};
 /// compatibility cost, and leaving it open is a one-packet emulator probe.
 pub const REFUSE_NON_VOLUME: bool = !cfg!(feature = "permissive-retail");
 
+/// Whether pre-release SKUs are refused (`POL-010`, #98).
+///
+/// Driven by the same `permissive-retail` feature as [`REFUSE_NON_VOLUME`],
+/// because the two close the same kind of probe, but named separately because
+/// **their compatibility costs are not the same**, and the difference is worth
+/// having written down.
+///
+/// A retail SKU has no GVLK, so refusing one cannot affect a real client. A
+/// pre-release SKU *can* have a GVLK — the shipped database contains one, on
+/// `Windows Server Next Beta ServerRdsh` — so refusing it does affect anyone
+/// running that build against this host. That is a real if narrow cost, and it
+/// is precisely why the gate is a flag rather than a fact.
+pub const REFUSE_PREVIEW: bool = !cfg!(feature = "permissive-retail");
+
 /// Whether a clock-skewed request is refused (`POL-011`, #99).
 ///
 /// Off by default, and the default is the anti-fingerprinting choice rather
@@ -90,6 +108,13 @@ pub enum Refusal {
         kind: KeyKind,
     },
 
+    /// The activation ID names a pre-release SKU (`POL-010`, #98).
+    ///
+    /// Kept distinct from [`Refusal::NonVolumeProduct`] rather than folded into
+    /// it, because the two mean different things in a log: a retail ID is a
+    /// probe, a preview ID may be someone running an Insider build.
+    PreviewProduct,
+
     /// The application GUID does not match the product's (`POL-010`, #98).
     ApplicationMismatch,
 
@@ -110,7 +135,7 @@ impl Refusal {
     #[must_use]
     pub const fn hresult(self) -> HResult {
         match self {
-            Self::NonVolumeProduct { .. } | Self::ApplicationMismatch => {
+            Self::NonVolumeProduct { .. } | Self::PreviewProduct | Self::ApplicationMismatch => {
                 HResult::NotSupportedByKmsServer
             }
             Self::ClockSkew { .. } => HResult::TimestampDiffers,
@@ -205,6 +230,15 @@ pub fn evaluate<'a>(
         );
     }
 
+    // Gate one and a half: a pre-release SKU, which Microsoft's own product
+    // description marks (`DB-012`, #136).
+    if REFUSE_PREVIEW
+        && let Some(entry) = product
+        && entry.is_preview()
+    {
+        return (Decision::Refuse(Refusal::PreviewProduct), observations);
+    }
+
     // Gate two: the application must match the product's, when the database
     // knows both. A client claiming Windows while presenting Office is not a
     // client (`POL-010`, #98).
@@ -295,7 +329,7 @@ mod tests {
     fn product_of_kind(kind: KeyKind) -> &'static kmsrs_db::Product {
         kmsrs_db::PRODUCTS
             .iter()
-            .find(|entry| entry.kind == kind && entry.application.is_some())
+            .find(|entry| entry.kind == kind && entry.application.is_some() && !entry.is_preview())
             .unwrap()
     }
 
@@ -410,6 +444,56 @@ mod tests {
         assert_eq!(counts.applications().count(), 0);
     }
 
+    /// `POL-010` (#98): a pre-release SKU is refused, including the one that
+    /// carries a real GVLK — which is the case that distinguishes this gate
+    /// from the retail one.
+    #[cfg(not(feature = "permissive-retail"))]
+    #[test]
+    fn a_preview_sku_is_refused_even_with_a_volume_key() {
+        use super::REFUSE_PREVIEW;
+        assert!(REFUSE_PREVIEW);
+        let identity = identity();
+        let mut counts = ClientCounts::new();
+
+        let preview = kmsrs_db::PRODUCTS
+            .iter()
+            .find(|entry| {
+                entry.is_preview()
+                    && entry.kind == KeyKind::KmsClient
+                    && entry.application.is_some()
+            })
+            .expect("the shipped data has a pre-release GVLK");
+
+        let request = request_for(preview.application.unwrap(), preview.activation_id);
+        let (decision, _) = evaluate(&request, &identity, &mut counts, at(0), None);
+        assert_eq!(decision, Decision::Refuse(Refusal::PreviewProduct));
+        assert_eq!(
+            Refusal::PreviewProduct.hresult(),
+            HResult::NotSupportedByKmsServer
+        );
+    }
+
+    /// And it activates when the gate is open, because a pre-release GVLK is
+    /// something a real Insider client can hold.
+    #[cfg(feature = "permissive-retail")]
+    #[test]
+    fn a_preview_sku_activates_when_the_gate_is_open() {
+        let identity = identity();
+        let mut counts = ClientCounts::new();
+        let preview = kmsrs_db::PRODUCTS
+            .iter()
+            .find(|entry| {
+                entry.is_preview()
+                    && entry.kind == KeyKind::KmsClient
+                    && entry.application.is_some()
+            })
+            .expect("the shipped data has a pre-release GVLK");
+
+        let request = request_for(preview.application.unwrap(), preview.activation_id);
+        let (decision, _) = evaluate(&request, &identity, &mut counts, at(0), None);
+        assert!(matches!(decision, Decision::Grant(_)), "{decision:?}");
+    }
+
     /// A GVLK is the only key type a legitimate client has, and it must pass.
     #[test]
     fn a_volume_client_key_is_not_caught_by_the_retail_gate() {
@@ -417,6 +501,7 @@ mod tests {
         let mut counts = ClientCounts::new();
 
         let product = product_of_kind(KeyKind::KmsClient);
+        assert!(!product.is_preview(), "the fixture must be a shipping SKU");
         let request = request_for(product.application.unwrap(), product.activation_id);
         let (decision, _) = evaluate(&request, &identity, &mut counts, at(0), None);
         assert!(matches!(decision, Decision::Grant(_)), "{decision:?}");
