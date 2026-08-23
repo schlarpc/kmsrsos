@@ -1,0 +1,63 @@
+[package]
+name = "kmsrs-fuzz"
+description = "Fuzz targets for every parser that sees a byte from a socket (SEC-004)"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.11"
+# Every target body lives here, compiled and linted by the stable toolchain.
+# See `crates/kmsrs-vectors/src/targets.rs` for why.
+kmsrs-vectors = { path = "../crates/kmsrs-vectors" }
+
+# `unsafe_code` is *not* forbidden in this crate, and that is deliberate rather
+# than an oversight: `fuzz_target!` expands to an `#[unsafe(no_mangle)] extern
+# "C"` entry point, which is a use of `unsafe` in edition 2024 and cannot be
+# written any other way. Confining that to six three-line files — with no logic
+# of our own in them — is why the bodies were moved into the workspace.
+
+[[bin]]
+name = "rpc_pdu"
+path = "fuzz_targets/rpc_pdu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection"
+path = "fuzz_targets/connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kms_payload"
+path = "fuzz_targets/kms_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decrypt_unpad"
+path = "fuzz_targets/decrypt_unpad.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epid"
+path = "fuzz_targets/epid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response"
+path = "fuzz_targets/response.rs"
+test = false
+doc = false
+bench = false
