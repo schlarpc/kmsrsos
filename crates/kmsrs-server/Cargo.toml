@@ -1,0 +1,29 @@
+[package]
+name = "kmsrs-server"
+description = "KMS host emulator: platform layer, listeners, HTTP responder, wiring (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kmsrsos"
+path = "src/main.rs"
+
+[dependencies]
+kmsrs-proto.workspace = true
+kmsrs-policy.workspace = true
+kmsrs-db.workspace = true
+kmsrs-crypto.workspace = true
+getrandom = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# Used only by `tests/workspace_invariants.rs`, which reads the workspace's own
+# manifests and lockfile to check the structural invariants of ARCH-001,
+# ARCH-008, ARCH-016 and SEC-001.
+toml.workspace = true
+
+[lints]
+workspace = true

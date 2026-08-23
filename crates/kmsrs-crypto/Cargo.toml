@@ -1,0 +1,19 @@
+[package]
+name = "kmsrs-crypto"
+description = "KMS protocol cryptographic primitives (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sha2.workspace = true
+hmac.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+
+[lints]
+workspace = true

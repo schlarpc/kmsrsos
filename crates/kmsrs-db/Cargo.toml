@@ -1,0 +1,16 @@
+[package]
+name = "kmsrs-db"
+description = "Compile-time product database: CSVLKs, GVLKs, KMS IDs, host builds (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

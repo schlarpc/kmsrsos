@@ -1,0 +1,17 @@
+[package]
+name = "kmsrs-vectors"
+description = "Golden wire vectors and shared test infrastructure (TEST-002)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

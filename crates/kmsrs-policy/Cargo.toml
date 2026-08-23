@@ -1,0 +1,19 @@
+[package]
+name = "kmsrs-policy"
+description = "Sans-io activation policy, host-state model, identity and event log (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kmsrs-db.workspace = true
+kmsrs-proto.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

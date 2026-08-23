@@ -1,0 +1,20 @@
+# Rust formatting configuration
+# https://rust-lang.github.io/rustfmt/
+
+edition = "2024"
+
+# Maximum line width
+max_width = 100
+
+# Use spaces, not tabs
+hard_tabs = false
+tab_spaces = 4
+
+# Newline style (native = platform-specific)
+newline_style = "Auto"
+
+# These options are stable
+reorder_imports = true
+reorder_modules = true
+use_field_init_shorthand = true
+use_try_shorthand = true
