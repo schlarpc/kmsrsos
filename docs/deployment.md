@@ -10,6 +10,7 @@ any of this are in [`decisions.md`](decisions.md).
 - [Where the host has to live](#where-the-host-has-to-live) — the loopback constraint
 - [DNS: the `_vlmcs._tcp` SRV record](#dns-the-_vlmcs_tcp-srv-record)
 - [Building it, and configuring it](#building-it-and-configuring-it)
+- [systemd](#systemd)
 - [Containers and Kubernetes](#containers-and-kubernetes)
 - [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
@@ -186,6 +187,58 @@ kmsrsos_build_info{version="0.1.0",revision="…",source_date_epoch="…"} 1
 The revision and the date come from the flake, and the date is the **source** date rather than the
 build date — which is what makes two builds of one revision identical, and is checked by
 `nix build --rebuild` in CI. A `cargo build` in a checkout reports `unknown` rather than guessing.
+
+---
+
+## systemd
+
+```sh
+sudo install -m 0755 result/bin/kmsrsos /usr/local/bin/
+sudo install -m 0644 deploy/systemd/kmsrsos.service /etc/systemd/system/
+sudo systemctl enable --now kmsrsos
+journalctl -u kmsrsos -f
+```
+
+Both audited projects have only a documentation snippet for this, and py-kms's is `User=root` with no
+hardening whatever. `deploy/systemd/kmsrsos.service` is a real unit (`PKG-007`, #244), and almost
+every line of its hardening is **free** rather than aspirational — it forbids things the program
+genuinely does not do:
+
+| Setting | Why it costs nothing |
+|---|---|
+| `DynamicUser=yes` | there is no state to own: no data directory, no cache, no files at all (axiom A5) |
+| `ProtectSystem=strict`, `ReadOnlyPaths=/` | no filesystem I/O, proven in CI by running the binary under `strace` (`SEC-006`, #198) |
+| `CapabilityBoundingSet=`, `AmbientCapabilities=` | 1688 is unprivileged, so nothing needs one |
+| `RestrictAddressFamilies=AF_INET AF_INET6` | TCP only; no Unix socket, no netlink, no UDP |
+| `MemoryDenyWriteExecute=yes` | no JIT, no dynamic code |
+| `MemoryMax=128M` | the heap ceiling is 8 MiB and asserted at compile time (`OS-011`, #262) |
+
+**Privileges are never dropped, because they never exist** ([D41](decisions.md#d41)). The issue that
+proposed `setuid`/`setgid` named this path as the preferred one itself; with `DynamicUser` and an
+unprivileged port there is nothing left for the drop to remove, and three `unsafe` libc calls in a
+specific order is a large amount of famous footgun to add for it.
+
+### There is no `.socket` unit
+
+Deliberately ([D40](decisions.md#d40)). Socket activation was wanted so that systemd would bind 1688
+and the service would never need `CAP_NET_BIND_SERVICE` — but **1688 is unprivileged**, so that
+benefit is a restatement of something already true. What is left is zero-downtime restarts, which for
+a service whose clients retry and whose activations last 180 days is worth nothing.
+
+Against it: adopting an inherited file descriptor means `FromRawFd`, which is `unsafe` in every
+spelling, in a project whose first axiom is pure safe Rust with exactly one permitted boundary
+elsewhere.
+
+So the binary **refuses to start** if `LISTEN_FDS` is set, rather than binding its own socket
+alongside a manager's:
+
+```
+kmsrsos: started with LISTEN_FDS=1, but this build does not adopt inherited sockets.
+```
+
+That is not fussiness. Ignoring it under `Accept=yes` would mean one process per connection, which
+destroys both the stable ePID and the CMID table **while continuing to answer** — the way
+vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declined-with-rationale)).
 
 ---
 

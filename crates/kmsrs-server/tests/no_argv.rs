@@ -44,6 +44,49 @@ impl Started {
     }
 }
 
+/// `NET-016` (#165), declined as D40: an inherited socket is refused, not
+/// ignored.
+///
+/// The failure this prevents is silence. A `.socket` unit holds 1688 and passes
+/// it in; a process that ignored `LISTEN_FDS` would try to bind the port itself
+/// and fail with `EADDRINUSE`, or — under `Accept=yes` — be handed a *connection*
+/// and run one process per client, which destroys both the stable ePID and the
+/// CMID table while continuing to answer. That is how vlmcsd-under-systemd
+/// degrades without telling anybody (declined item D20).
+#[test]
+fn an_inherited_socket_is_refused_rather_than_ignored() {
+    let started = start_with(&[], None, &[("LISTEN_FDS", "1"), ("LISTEN_PID", "1")]);
+    assert_eq!(
+        started.code,
+        Some(EXIT_BAD_USAGE),
+        "LISTEN_FDS was not refused: {}",
+        started.stderr
+    );
+    assert!(
+        started.stderr.contains("LISTEN_FDS"),
+        "the refusal does not name what it refused: {}",
+        started.stderr
+    );
+    assert!(
+        started.stderr.contains(".socket"),
+        "the refusal does not say what to do about it: {}",
+        started.stderr
+    );
+}
+
+/// And without it the binary gets as far as serving, so the refusal above is
+/// about the variable rather than about the environment these tests run in.
+#[test]
+fn no_inherited_socket_is_the_ordinary_case() {
+    let started = start_with(&[], None, &[("LISTEN_FDS", "0")]);
+    assert_ne!(
+        started.code,
+        Some(EXIT_BAD_USAGE),
+        "LISTEN_FDS=0 was treated as an inherited socket: {}",
+        started.stderr
+    );
+}
+
 /// Start the binary and see what it does.
 ///
 /// The binary **serves until signalled**, so waiting for it to exit is not an
@@ -56,8 +99,20 @@ impl Started {
 /// what `CFG-002` (#167) or `CFG-007` (#172) are about. A bind failure exits
 /// with a third code, which `rejected` does not count.
 fn start(args: &[&str], config: Option<&str>) -> Started {
+    start_with(args, config, &[])
+}
+
+/// The same, with extra environment variables.
+fn start_with(args: &[&str], config: Option<&str>, environment: &[(&str, &str)]) -> Started {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kmsrsos"));
     command.args(args);
+    // Never inherit an activation manager's variables from whatever ran the
+    // tests, so each case says what it means.
+    command.env_remove("LISTEN_FDS");
+    command.env_remove("LISTEN_PID");
+    for (name, value) in environment {
+        command.env(name, value);
+    }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     // Never inherit the caller's setting, so the test says what it means.

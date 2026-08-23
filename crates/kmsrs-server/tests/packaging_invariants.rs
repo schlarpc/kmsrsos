@@ -293,6 +293,203 @@ fn the_container_image_is_non_root_static_and_probes_the_kms_port() {
     }
 }
 
+/// `PKG-003` (#240), `PKG-009` (#246) and `SEC-010` (#202): a tag produces
+/// every artifact, and produces it the way a developer would.
+///
+/// The property that matters is that there is **no release-only build path**.
+/// A release built differently from the thing that was tested is a release
+/// nobody tested, and the way that happens is one `cargo build --release` in a
+/// workflow that nothing else runs.
+#[test]
+fn the_release_workflow_builds_what_the_gate_checks() {
+    let root = workspace_root();
+    let workflow = read(&root, ".github/workflows/release.yml");
+
+    // Every artifact `PKG-003` (#240) names.
+    for output in [
+        ".#server",
+        ".#client",
+        ".#deb",
+        ".#rpm",
+        ".#container",
+        ".#windows",
+    ] {
+        assert!(
+            workflow.contains(output),
+            "the release does not build {output} (PKG-003, #240)"
+        );
+    }
+
+    // And nothing bypasses the flake. A `cargo build` here would be a second
+    // build path, which is the whole thing this test is about.
+    for bypass in ["cargo build --release", "cargo install", "docker build"] {
+        assert!(
+            !workflow.contains(bypass),
+            "the release workflow uses {bypass}, which is a build path nothing \
+             else exercises"
+        );
+    }
+
+    // `SEC-010` (#202): an SBOM, checksums, a signature, and a rebuild.
+    assert!(workflow.contains("cyclonedx"), "no SBOM is produced");
+    assert!(workflow.contains("sha256sum"), "no checksums are produced");
+    assert!(workflow.contains("cosign sign-blob"), "nothing is signed");
+    assert!(
+        workflow.contains("--rebuild"),
+        "the release does not prove its own build is reproducible"
+    );
+
+    // Keyless signing: there is no private key anywhere, which is the only way
+    // to sign from CI without the artifact SEC-013 (#205) says does not exist.
+    assert!(
+        !workflow.contains("--key ") && !workflow.contains("COSIGN_PRIVATE_KEY"),
+        "the release signs with a key, and this project has no secrets"
+    );
+
+    // The gate runs on the exact revision being released. A tag pushed without
+    // its branch having been merged is a tag nothing has checked.
+    assert!(
+        workflow.contains("nix flake check"),
+        "the release does not re-run the gate"
+    );
+}
+
+/// `PKG-012` (#249): the release template exists, and its first section is the
+/// one nothing else in this ecosystem has.
+///
+/// The Organization fork changed a flag's arity, a path's meaning, its schema
+/// keys and its default bind address in one release with no note, and three
+/// downstream forks each rediscovered a different subset by running into it.
+/// A template whose protocol-visible section is optional would not have helped
+/// any of them.
+#[test]
+fn the_release_notes_template_leads_with_protocol_visible_changes() {
+    let root = workspace_root();
+    let releasing = read(&root, "docs/releasing.md");
+
+    assert!(
+        releasing.contains("## Protocol-visible changes"),
+        "the template has no protocol-visible section"
+    );
+    assert!(
+        releasing.contains("never omitted"),
+        "the protocol-visible section is not stated to be mandatory"
+    );
+    // It comes first, because a section at the bottom is a section nobody
+    // fills in.
+    let protocol = releasing
+        .find("## Protocol-visible changes")
+        .expect("the section exists");
+    for later in ["## Operator-visible changes", "## Build-time settings"] {
+        let at = releasing.find(later).unwrap_or(usize::MAX);
+        assert!(at > protocol, "{later} comes before the protocol section");
+    }
+}
+
+/// The OS packages carry the unit and the guide, not just a binary.
+///
+/// Both audited projects ship a documentation snippet for systemd and nothing
+/// else, and py-kms's is `User=root` with no hardening whatever. A package that
+/// installed a binary and left the operator to write their own unit would be
+/// the same gap with extra steps.
+#[test]
+fn the_os_packages_carry_the_unit_and_the_guide() {
+    let root = workspace_root();
+    let full = read(&root, "flake.nix");
+    // Comments stripped for the "must not appear" checks below: the payload's
+    // own comment explains at length why there is no postinst.
+    let flake: String = full
+        .lines()
+        .map(|line| match line.find('#') {
+            Some(at) => line.split_at(at).0,
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for path in ["deploy/systemd/kmsrsos.service", "docs/deployment.md"] {
+        assert!(
+            flake.contains(path),
+            "the OS packages do not install {path} (PKG-009, #246)"
+        );
+    }
+
+    // One payload for both, so `.deb` and `.rpm` cannot disagree about what
+    // "installed" means.
+    assert_eq!(
+        flake.matches("packagePayload {").count(),
+        2,
+        "the two packages no longer share one payload definition"
+    );
+
+    // No postinst, no service-user creation, no `systemctl enable`. DynamicUser
+    // means there is no account to create, and a package that enabled a service
+    // nobody asked for would be making a decision that is the operator's.
+    for script in ["postinst", "%post", "systemctl enable", "useradd"] {
+        assert!(
+            !flake.contains(script),
+            "the packages run {script}, which they have nothing to do"
+        );
+    }
+}
+
+/// `PKG-007` (#244): the unit is hardened, and there is no socket unit
+/// (declined item D40).
+#[test]
+fn the_systemd_unit_is_hardened_and_stands_alone() {
+    let root = workspace_root();
+    let full = read(&root, "deploy/systemd/kmsrsos.service");
+    // Comments stripped for the "must not appear" checks: the header explains
+    // why CAP_NET_BIND_SERVICE is not needed, and a test that matched its own
+    // rationale would be unwritable.
+    let unit: String = full
+        .lines()
+        .map(|line| match line.find('#') {
+            Some(at) => line.split_at(at).0,
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Every one of these is free rather than aspirational: it forbids something
+    // the program genuinely does not do.
+    for setting in [
+        "DynamicUser=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "NoNewPrivileges=yes",
+        "SystemCallFilter=@system-service",
+        "RestrictAddressFamilies=AF_INET AF_INET6",
+        "MemoryDenyWriteExecute=yes",
+    ] {
+        assert!(unit.contains(setting), "the unit does not set {setting}");
+    }
+
+    // `SEC-007` (#199), declined as D41: no capabilities at all, rather than
+    // capabilities that are dropped. 1688 is unprivileged, so there is nothing
+    // to bind that would have needed one.
+    assert!(
+        unit.contains("CapabilityBoundingSet=\n") || unit.contains("CapabilityBoundingSet=\r\n"),
+        "the capability bounding set is not empty"
+    );
+    assert!(
+        unit.contains("AmbientCapabilities=\n") || unit.contains("AmbientCapabilities=\r\n"),
+        "ambient capabilities are not empty"
+    );
+    assert!(
+        !unit.contains("CAP_NET_BIND_SERVICE"),
+        "the unit grants a capability for a port that does not need one"
+    );
+
+    // `NET-016` (#165), declined as D40.
+    assert!(
+        !root.join("deploy/systemd/kmsrsos.socket").exists(),
+        "a .socket unit exists, and this build refuses to start with LISTEN_FDS \
+         set (declined item D40)"
+    );
+}
+
 /// `CFG-003` (#168): the rebuild path is a function, and it takes exactly the
 /// settings that cannot be changed at runtime.
 ///

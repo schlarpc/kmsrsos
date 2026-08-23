@@ -84,7 +84,10 @@
             || (builtins.match ".*/docs(/.*)?" path != null)
             || (builtins.match ".*/ci(/.*)?" path != null)
             # nextest's profile, which decides the timeouts a test run uses.
-            || (builtins.match ".*/\\.config(/.*)?" path != null);
+            || (builtins.match ".*/\\.config(/.*)?" path != null)
+            # The workflows, because `packaging_invariants.rs` asserts that a
+            # release builds what the gate checks (PKG-003, #240).
+            || (builtins.match ".*/\\.github(/.*)?" path != null);
         };
 
       commonArgsFor = system:
@@ -336,6 +339,37 @@
           # not exist.
         };
 
+      # The Debian and RPM architecture names, which are neither Nix's nor
+      # Rust's.
+      osPackageArch = system: {
+        "x86_64-linux" = { deb = "amd64"; rpm = "x86_64"; };
+        "aarch64-linux" = { deb = "arm64"; rpm = "aarch64"; };
+      }.${system} or null;
+
+      # The tree both OS packages install (PKG-009, #246).
+      #
+      # Two binaries, the hardened service unit, and the deployment guide. No
+      # postinst, no service-user creation, no `systemctl enable` — `DynamicUser`
+      # means systemd creates and destroys the account per start, so there is no
+      # account for a package to leave behind, and a package that enabled a
+      # service the operator had not asked for would be making a decision that
+      # is theirs.
+      #
+      # No `.socket` unit either; see declined item D40.
+      packagePayload = { server, client }: ''
+        mkdir -p payload/usr/bin
+        mkdir -p payload/usr/lib/systemd/system
+        mkdir -p payload/usr/share/doc/kmsrsos
+
+        install -m 0755 ${server}/bin/kmsrsos payload/usr/bin/kmsrsos
+        install -m 0755 ${client}/bin/kmsrs-client payload/usr/bin/kmsrs-client
+        install -m 0644 ${./deploy/systemd/kmsrsos.service} \
+          payload/usr/lib/systemd/system/kmsrsos.service
+        install -m 0644 ${./docs/deployment.md} \
+          payload/usr/share/doc/kmsrsos/deployment.md
+        install -m 0644 ${./LICENSE} payload/usr/share/doc/kmsrsos/LICENSE
+      '';
+
       # --- The container image (PKG-004, #241; PKG-005, #242; SEC-008, #200) ---
       #
       # `dockerTools` rather than a Dockerfile, and that settles three issues at
@@ -410,6 +444,7 @@
     {
       packages = eachSystem (system:
         let
+          pkgs = pkgsFor system;
           craneLib = cranelibFor system;
           commonArgs = commonArgsFor system;
           cargoArtifacts = cargoArtifactsFor system;
@@ -438,6 +473,103 @@
             cargoArtifacts = windowsCargoArtifactsFor system;
           });
 
+          # --- OS packages (PKG-009, #246) ---
+          #
+          # `.deb` and `.rpm` as artifacts, not a repository. A repository is
+          # ongoing infrastructure with signing keys that have to be rotated,
+          # and a downloadable package captures most of the value (decision 26).
+          # No Homebrew: macOS is not a target.
+          #
+          # Both are built from the same payload as each other and from the same
+          # store paths as the container, so there is one definition of what
+          # "installed" means rather than three that drift.
+          deb = pkgs.stdenvNoCC.mkDerivation {
+            pname = "kmsrsos-deb";
+            version = "0.1.0";
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.dpkg ];
+            buildPhase = (packagePayload {
+              inherit (configured) server client;
+            }) + ''
+              mkdir -p payload/DEBIAN
+              cat > payload/DEBIAN/control <<CONTROL
+              Package: kmsrsos
+              Version: 0.1.0
+              Section: net
+              Priority: optional
+              Architecture: ${(osPackageArch system).deb}
+              Maintainer: Chaz Schlarp <schlarpc@gmail.com>
+              Homepage: https://github.com/schlarpc/kmsrsos
+              Description: A KMS host emulator in pure safe Rust
+               Serves KMS activations on 1688 and an operator web UI on 8080.
+               Statically linked, no runtime dependencies, no configuration
+               file and no command line: what a build does is decided when it
+               is built.
+              CONTROL
+              dpkg-deb --build --root-owner-group payload kmsrsos.deb
+            '';
+            installPhase = ''
+              mkdir -p "$out"
+              cp kmsrsos.deb "$out/kmsrsos_0.1.0_${(osPackageArch system).deb}.deb"
+            '';
+          };
+
+          rpm = pkgs.stdenvNoCC.mkDerivation {
+            pname = "kmsrsos-rpm";
+            version = "0.1.0";
+            dontUnpack = true;
+            nativeBuildInputs = [ pkgs.rpm ];
+            buildPhase = (packagePayload {
+              inherit (configured) server client;
+            }) + ''
+              export HOME="$PWD"
+              mkdir -p rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SOURCES rpmbuild/SPECS rpms rpmdb rpmtmp
+
+              cat > kmsrsos.spec <<SPEC
+              # The binaries are already stripped by the release profile and
+              # there are no sources to package, so rpm's debuginfo machinery
+              # has nothing to do and fails trying.
+              %global debug_package %{nil}
+              %global __os_install_post %{nil}
+              %global _build_id_links none
+
+              Name:      kmsrsos
+              Version:   0.1.0
+              Release:   1
+              Summary:   A KMS host emulator in pure safe Rust
+              License:   MIT
+              URL:       https://github.com/schlarpc/kmsrsos
+              BuildArch: ${(osPackageArch system).rpm}
+
+              %description
+              Serves KMS activations on 1688 and an operator web UI on 8080.
+              Statically linked, no runtime dependencies, no configuration file
+              and no command line: what a build does is decided when it is
+              built.
+
+              %files
+              /usr/bin/kmsrsos
+              /usr/bin/kmsrs-client
+              /usr/lib/systemd/system/kmsrsos.service
+              /usr/share/doc/kmsrsos/deployment.md
+              /usr/share/doc/kmsrsos/LICENSE
+              SPEC
+              # Every path rpm would otherwise take from the system: it wants a
+              # package database in /var/lib/rpm and a temp directory in
+              # /var/tmp, neither of which exists in a build sandbox.
+              rpmbuild -bb kmsrsos.spec \
+                --define "_topdir $PWD/rpmbuild" \
+                --define "_rpmdir $PWD/rpms" \
+                --define "_dbpath $PWD/rpmdb" \
+                --define "_tmppath $PWD/rpmtmp" \
+                --define "_builddir $PWD/rpmbuild/BUILD" \
+                --buildroot "$PWD/payload"
+            '';
+            installPhase = ''
+              mkdir -p "$out"
+              find rpms -name '*.rpm' -exec cp {} "$out/" ';'
+            '';
+          };
         });
 
       checks = eachSystem (system:

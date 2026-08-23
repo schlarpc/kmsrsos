@@ -71,6 +71,35 @@ fn main() {
 fn run(operational: Operational) -> Result<(), i32> {
     let discovered = Discovered::observe();
     let compiled = Compiled::BUILD;
+
+    // `NET-016` (#165), declined as D40: this build does not adopt inherited
+    // sockets, and refuses to start rather than binding its own alongside a
+    // manager's.
+    //
+    // Silently ignoring `LISTEN_FDS` is the failure this exists to prevent. A
+    // `.socket` unit holds 1688; this process would then try to bind it too and
+    // fail with EADDRINUSE — or worse, succeed on a different address and serve
+    // nothing anybody reaches. Under `Accept=yes` it would be worse still: one
+    // process per connection, which destroys both the stable ePID
+    // (`ID-001`, #106) and the CMID table (`POL-001`, #89) while continuing to
+    // answer, which is exactly how vlmcsd-under-systemd degrades without
+    // telling anyone (declined item D20).
+    //
+    // Written before the logger exists, because the logger is built from
+    // configuration and this is a fact about how the process was started.
+    if discovered.listen_fds > 0 {
+        eprintln!(
+            "{PRODUCT_NAME}: started with LISTEN_FDS={}, but this build does \
+             not adopt inherited sockets.",
+            discovered.listen_fds
+        );
+        eprintln!(
+            "Remove the .socket unit and let the service bind 1688 itself: it \
+             is an unprivileged port, so nothing is gained by having systemd \
+             open it. See deploy/systemd/kmsrsos.service."
+        );
+        return Err(EXIT_BAD_USAGE);
+    }
     // Everything from here on goes through the logger, so it is shaped and
     // filtered the same way a request is (`OBS-001`, #177). The two failures
     // above happen before a logger can exist, since the logger is built from

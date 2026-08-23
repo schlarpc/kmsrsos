@@ -24,6 +24,8 @@ Two documents hold what a tracker holds badly:
 - **[`docs/deployment.md`](docs/deployment.md)** — the operator-facing half: the loopback constraint,
   the `_vlmcs._tcp` SRV record shape, the Hermit/Proxmox requirements (serial console, `host` CPU
   type, the boot-args configuration channel) and the argument that nothing secret ships.
+- **[`docs/releasing.md`](docs/releasing.md)** — what a tag produces, how to verify a signature, and
+  the release-notes template whose first section is always *protocol-visible changes*.
 - **[`docs/research-findings.md`](docs/research-findings.md)** — Microsoft-sourced CSVLK, counted-ID,
   GVLK and host-build tables; the Hermit/Proxmox platform constraints; and a coverage map from the
   audits' findings onto issue numbers.

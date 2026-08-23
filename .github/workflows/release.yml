@@ -1,0 +1,194 @@
+# Everything a tag produces (PKG-003, #240; PKG-009, #246; SEC-010, #202).
+#
+# Every artifact here is built by `nix build`, which is the same command a
+# developer runs and the same one `nix flake check` gates on. There is no
+# release-only build path, and that is the point: a release built differently
+# from the thing that was tested is a release nobody tested.
+#
+# What a tag produces:
+#
+#   * Linux binaries for x86_64 and aarch64, statically linked against musl
+#   * `.deb` and `.rpm` for both, carrying the hardened systemd unit
+#   * the container image, to GHCR, multi-arch
+#   * Windows `.exe`s, cross-compiled
+#   * an SBOM per artifact, checksums, and a cosign signature over the lot
+#
+# The Hermit OS image joins this list when PKG-013 (#250) can build one.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # For rehearsing the workflow without cutting a release. Nothing is published
+  # on a manual run — see the `publish` job's condition.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            runner: ubuntu-latest
+          - name: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      # The gate, again, on the exact revision being released. A tag that was
+      # pushed without its branch having been merged is a tag nothing has
+      # checked, and that is the case worth catching.
+      - run: nix flake check --print-build-logs
+
+      - name: Build the artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          nix build .#server    --print-build-logs --out-link result-server
+          nix build .#client    --print-build-logs --out-link result-client
+          nix build .#deb       --print-build-logs --out-link result-deb
+          nix build .#rpm       --print-build-logs --out-link result-rpm
+          nix build .#container --print-build-logs --out-link result-container
+
+          cp result-server/bin/kmsrsos     "out/kmsrsos-${{ matrix.name }}"
+          cp result-client/bin/kmsrs-client "out/kmsrs-client-${{ matrix.name }}"
+          cp result-deb/*.deb out/
+          cp result-rpm/*.rpm out/
+          cp result-container "out/kmsrsos-container-${{ matrix.name }}.tar.gz"
+
+      # `SEC-010` (#202): the binaries are static, so "what is in this" is a
+      # question the file itself has to answer. An SBOM derived from the
+      # lockfile is that answer, and it is exact rather than inferred — every
+      # version in it is pinned with `=` (PKG-006, #243).
+      - name: Software bill of materials
+        run: |
+          set -euo pipefail
+          nix run nixpkgs#cargo-cyclonedx -- --format json --all
+          find . -name '*.cdx.json' -not -path './out/*' \
+            -exec cp {} "out/sbom-${{ matrix.name }}.cdx.json" ';'
+          test -s "out/sbom-${{ matrix.name }}.cdx.json"
+
+      # Two builds of one revision are the same bytes. Checked on every pull
+      # request too (SEC-010, #202; CFG-008, #173), and again here because a
+      # release is the artifact the claim is actually about.
+      - name: Prove the build is reproducible
+        run: nix build .#server --rebuild --print-build-logs
+
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum * > "SHA256SUMS-${{ matrix.name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.name }}
+          path: out/
+          if-no-files-found: error
+
+  windows:
+    name: windows-x86_64
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      # Cross-compiled from Linux, against a pinned MSVC CRT and SDK in a
+      # fixed-output derivation. That is why there is no Windows runner here:
+      # the artifact is a pure function of the flake inputs, and building it on
+      # Windows would make it a function of the runner image as well.
+      - run: nix build .#windows --print-build-logs --out-link result-windows
+      - run: |
+          set -euo pipefail
+          mkdir -p out
+          cp result-windows/bin/*.exe out/
+          cd out && sha256sum * > SHA256SUMS-windows-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-windows-x86_64
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    needs: [artifacts, windows]
+    # Never on a manual run: `workflow_dispatch` exists to rehearse the build,
+    # and a rehearsal that published would not be one.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      # Keyless signing: the token *is* the identity, and there is no private
+      # key anywhere — which is the only way to sign from CI without the
+      # artifact this project claims to have none of (SEC-013, #205).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      - name: Gather
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find downloaded -type f -exec cp {} release/ ';'
+          cd release && sha256sum -c SHA256SUMS-* && sha256sum * > SHA256SUMS
+
+      - uses: sigstore/cosign-installer@v3.7.0
+
+      # `SEC-010` (#202): one signature over the checksum file rather than one
+      # per artifact. Verifying the file then verifies everything in it, which
+      # is a smaller thing for somebody to get right — and the checksums were
+      # produced on the machine that built each artifact rather than here.
+      - name: Sign the checksums
+        run: |
+          cd release
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Push the container images
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tag="${GITHUB_REF_NAME#v}"
+          for image in release/kmsrsos-container-*.tar.gz; do
+            arch="$(basename "$image" .tar.gz)"
+            arch="${arch#kmsrsos-container-}"
+            docker load < "$image"
+            docker tag kmsrsos:latest "ghcr.io/${{ github.repository }}:${tag}-${arch}"
+            docker push "ghcr.io/${{ github.repository }}:${tag}-${arch}"
+          done
+          docker manifest create "ghcr.io/${{ github.repository }}:${tag}" \
+            "ghcr.io/${{ github.repository }}:${tag}-x86_64-linux" \
+            "ghcr.io/${{ github.repository }}:${tag}-aarch64-linux"
+          docker manifest push "ghcr.io/${{ github.repository }}:${tag}"
+
+      # `PKG-012` (#249): the notes say what changed **on the wire**, in their
+      # own section, because that is the half a downstream reader cannot
+      # discover any other way. See docs/releasing.md.
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: true
