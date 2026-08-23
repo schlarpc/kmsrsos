@@ -299,8 +299,12 @@ impl ClientAssociation {
 
     /// Read a reply, checking the properties a genuine exchange has.
     ///
+    /// `syntax` is the transfer syntax the association settled on, which
+    /// decides how wide the NDR length fields are. For a `bind_ack` it is
+    /// unused; pass [`TransferSyntax::Ndr32`].
+    ///
     /// `warnings` receives anything worth telling an operator; the return value
-    /// is the stub, if the reply carried one.
+    /// is the payload, if the reply carried one.
     ///
     /// # Errors
     ///
@@ -310,6 +314,7 @@ impl ClientAssociation {
         &mut self,
         reply: &'a [u8],
         sent_call_id: u32,
+        syntax: TransferSyntax,
         warnings: &mut dyn FnMut(Warning),
     ) -> Result<Reply<'a>, ClientError> {
         let (header, body) =
@@ -351,20 +356,34 @@ impl ClientAssociation {
                 Err(ClientError::Faulted { status })
             }
             Some(PacketType::Response) => {
-                // `CLI-002` (#208): the allocation hint must match the stub.
-                let alloc_hint = body
-                    .get(..4)
-                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                    .map_or(0, u32::from_le_bytes);
-                let stub = body.get(8..).unwrap_or(&[]);
-                let actual = u32::try_from(stub.len()).unwrap_or(u32::MAX);
-                if alloc_hint != actual {
+                let parsed = crate::wire::stub::parse_response(body, syntax).map_err(|_| {
+                    ClientError::TooShort {
+                        available: body.len(),
+                    }
+                })?;
+
+                // `CLI-002` (#208): the allocation hint counts from the NDR
+                // fields onwards, matching what the peer measures
+                // (`WIRE-020`, #78).
+                let measured = u32::try_from(body.len().saturating_sub(8)).unwrap_or(u32::MAX);
+                if parsed.alloc_hint != measured {
                     warnings(Warning::AllocHintMismatch {
-                        declared: alloc_hint,
-                        actual,
+                        declared: parsed.alloc_hint,
+                        actual: measured,
                     });
                 }
-                Ok(Reply::Response { stub })
+
+                // `CLI-002` (#208): a real host zeroes its NDR padding.
+                // Non-zero padding is uninitialised memory — a leak, and a way
+                // to identify the sender.
+                if parsed.padding.iter().any(|byte| *byte != 0) {
+                    warnings(Warning::NonZeroPadding);
+                }
+
+                Ok(Reply::Response {
+                    stub: parsed.payload,
+                    result: parsed.result,
+                })
             }
             _ => Err(ClientError::UnexpectedPacketType {
                 raw: header.packet_type,
@@ -389,10 +408,12 @@ pub enum Reply<'a> {
         /// (`WIRE-005`, #63; `WIRE-029`, #87).
         accepted: Option<Accepted>,
     },
-    /// A call was answered; the body is the stub.
+    /// A call was answered.
     Response {
-        /// The stub, after the request-stub header.
+        /// The KMS payload, with the NDR framing stripped.
         stub: &'a [u8],
+        /// The HRESULT the call returned (`CLI-014`, #220).
+        result: u32,
     },
 }
 
@@ -602,6 +623,8 @@ mod tests {
 
     use super::{ClientAssociation, FIRST_CALL_ID, HEADER_LEN, Reply, Warning};
     use crate::wire::header::PacketFlags;
+    use crate::wire::syntax::TransferSyntax;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     /// `WIRE-027` (#85): Microsoft's client starts at 2, so this does.
@@ -657,7 +680,10 @@ mod tests {
                 .unwrap();
             // A reply that always says call ID 1, as Wine does.
             let reply = wine_response(1);
-            let outcome = association.read_reply(&reply, sent, &mut |warning| seen.push(warning));
+            let outcome =
+                association.read_reply(&reply, sent, TransferSyntax::Ndr32, &mut |warning| {
+                    seen.push(warning);
+                });
             assert!(outcome.is_ok(), "a Wine reply must not be fatal");
         }
 
@@ -691,29 +717,42 @@ mod tests {
                 .unwrap();
             let reply = wine_response(sent);
             association
-                .read_reply(&reply, sent, &mut |warning| seen.push(warning))
+                .read_reply(&reply, sent, TransferSyntax::Ndr32, &mut |warning| {
+                    seen.push(warning);
+                })
                 .unwrap();
         }
         assert!(seen.is_empty(), "{seen:?}");
     }
 
-    /// A response PDU with the given call ID and a stub whose allocation hint
-    /// agrees with its length.
+    /// A response PDU with the given call ID, framed by the **server's own**
+    /// writer.
+    ///
+    /// Built with `stub::write_response` rather than by hand, so the test
+    /// cannot drift from the layout the server actually emits — which is
+    /// exactly how the client's first response parser came to read from the
+    /// wrong offset and go unnoticed.
     fn wine_response(call_id: u32) -> Vec<u8> {
         use crate::wire::header::{PacketFlags, PacketType, RpcHeader};
+        use crate::wire::stub;
         use zerocopy::IntoBytes;
 
-        let stub = [0_u8; 8];
-        let body_len = 8 + stub.len();
-        let frag = u16::try_from(super::HEADER_LEN + body_len).unwrap();
+        let payload = [0_u8; 8];
+        let stub_len = stub::response_stub_len(TransferSyntax::Ndr32, payload.len());
+        let frag = u16::try_from(super::HEADER_LEN + stub_len).unwrap();
         let header =
             RpcHeader::for_reply(PacketType::Response, PacketFlags::COMPLETE, call_id, frag);
 
-        let mut out = header.as_bytes().to_vec();
-        out.extend_from_slice(&u32::try_from(stub.len()).unwrap().to_le_bytes());
-        out.extend_from_slice(&0_u16.to_le_bytes());
-        out.extend_from_slice(&0_u16.to_le_bytes());
-        out.extend_from_slice(&stub);
+        let mut out = vec![0_u8; super::HEADER_LEN + stub_len];
+        out[..super::HEADER_LEN].copy_from_slice(header.as_bytes());
+        stub::write_response(
+            &mut out[super::HEADER_LEN..],
+            TransferSyntax::Ndr32,
+            0,
+            0,
+            &payload,
+        )
+        .unwrap();
         out
     }
 
@@ -722,12 +761,15 @@ mod tests {
     fn a_mismatched_alloc_hint_warns() {
         let mut association = ClientAssociation::new();
         let mut reply = wine_response(2);
-        // Claim a longer stub than was sent.
+        // Claim a longer stub than was sent. The hint is the first field of
+        // the stub, immediately after the RPC header.
         reply[super::HEADER_LEN..super::HEADER_LEN + 4].copy_from_slice(&999_u32.to_le_bytes());
 
         let mut seen: Vec<Warning> = Vec::new();
         association
-            .read_reply(&reply, 2, &mut |warning| seen.push(warning))
+            .read_reply(&reply, 2, TransferSyntax::Ndr32, &mut |warning| {
+                seen.push(warning);
+            })
             .unwrap();
         assert!(
             seen.iter()
@@ -743,7 +785,7 @@ mod tests {
         let mut association = ClientAssociation::new();
         let mut reply = wine_response(2);
         reply.push(0);
-        let outcome = association.read_reply(&reply, 2, &mut |_| {});
+        let outcome = association.read_reply(&reply, 2, TransferSyntax::Ndr32, &mut |_| {});
         assert!(matches!(
             outcome,
             Err(super::ClientError::LengthMismatch { .. })
@@ -801,7 +843,12 @@ mod tests {
 
         let mut seen: Vec<Warning> = Vec::new();
         let reply = association
-            .read_reply(&ack[..ack_len], call_id, &mut |warning| seen.push(warning))
+            .read_reply(
+                &ack[..ack_len],
+                call_id,
+                TransferSyntax::Ndr32,
+                &mut |warning| seen.push(warning),
+            )
             .unwrap();
         let Reply::BindAck { accepted, .. } = reply else {
             panic!("expected a bind_ack, got {reply:?}");
@@ -859,7 +906,12 @@ mod tests {
 
         let mut seen: Vec<Warning> = Vec::new();
         association
-            .read_reply(&ack[..ack_len], call_id, &mut |warning| seen.push(warning))
+            .read_reply(
+                &ack[..ack_len],
+                call_id,
+                TransferSyntax::Ndr32,
+                &mut |warning| seen.push(warning),
+            )
             .unwrap();
         assert!(
             seen.contains(&Warning::Ndr64WithoutFeatureNegotiation),

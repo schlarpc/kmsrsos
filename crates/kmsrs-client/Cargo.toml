@@ -16,9 +16,18 @@ path = "src/main.rs"
 kmsrs-proto.workspace = true
 kmsrs-db.workspace = true
 kmsrs-crypto.workspace = true
+# The client shares the server's logger, so debug output includes protocol-layer
+# detail rather than being a second namespace that captures nothing
+# (CLI-015, #221).
+kmsrs-server.workspace = true
 getrandom = { workspace = true, features = ["std"] }
+zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# The probe's headline test runs against our own server, which is the point of
+# CLI-002 (#208): the suite is only meaningful if it is pointed at the thing
+# this repository builds.
+kmsrs-proto = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

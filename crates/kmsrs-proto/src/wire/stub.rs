@@ -221,6 +221,96 @@ pub fn error_stub_len(syntax: TransferSyntax) -> usize {
 /// # Errors
 ///
 /// Returns `None` if `out` is too small.
+/// A response stub, as a client reads it (`CLI-001`, #207).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseStub<'a> {
+    /// The allocation hint the stub declared.
+    pub alloc_hint: u32,
+    /// The context the response was sent on.
+    pub context_id: u16,
+    /// The KMS payload.
+    pub payload: &'a [u8],
+    /// The HRESULT the call returned.
+    pub result: u32,
+    /// The NDR padding between the payload and the result, if any.
+    ///
+    /// A real host zeroes it. Non-zero padding is uninitialised memory, which
+    /// is both a leak and a way to identify the sender (`CLI-002`, #208).
+    pub padding: &'a [u8],
+}
+
+/// Parse a response stub, as a client does.
+///
+/// Here rather than in `kmsrs-client` for the same reason [`parse_request`] is
+/// here: a client with its own copy of the layout would be testing itself. The
+/// three NDR length fields and the trailing result code are exactly what a
+/// naive `&body[8..]` gets wrong — the KMS payload is neither at the start of
+/// the stub nor at its end.
+///
+/// # Errors
+///
+/// Returns [`StubError`] if the stub is shorter than its own fields require or
+/// declares a payload that runs past the end.
+pub fn parse_response(body: &[u8], syntax: TransferSyntax) -> Result<ResponseStub<'_>, StubError> {
+    let width = length_field_width(syntax);
+    let too_short = |needed: usize| StubError::Truncated {
+        needed,
+        actual: body.len(),
+    };
+
+    let alloc_hint = read_u32(body, 0).ok_or_else(|| too_short(4))?;
+    let context_id = read_u16(body, 4).ok_or_else(|| too_short(6))?;
+
+    let mut cursor = RESPONSE_PREFIX_LEN;
+    let size_is =
+        read_len(body, cursor, width).ok_or_else(|| too_short(cursor.saturating_add(width)))?;
+    cursor = cursor
+        .checked_add(width)
+        .ok_or_else(|| too_short(usize::MAX))?;
+    // The referent is not a length; skip it.
+    cursor = cursor
+        .checked_add(width)
+        .ok_or_else(|| too_short(usize::MAX))?;
+    let length_is =
+        read_len(body, cursor, width).ok_or_else(|| too_short(cursor.saturating_add(width)))?;
+    cursor = cursor
+        .checked_add(width)
+        .ok_or_else(|| too_short(usize::MAX))?;
+
+    // An error response carries zeroed length fields and no payload.
+    let declared = usize::try_from(length_is.min(size_is)).map_err(|_| StubError::Truncated {
+        needed: usize::MAX,
+        actual: body.len(),
+    })?;
+    let payload_end = cursor
+        .checked_add(declared)
+        .ok_or_else(|| too_short(usize::MAX))?;
+    let payload = body
+        .get(cursor..payload_end)
+        .ok_or_else(|| too_short(payload_end))?;
+
+    // The result is the last four bytes; anything between it and the payload is
+    // NDR padding.
+    let result_at = body.len().checked_sub(4).ok_or_else(|| too_short(4))?;
+    if result_at < payload_end {
+        return Err(too_short(payload_end.saturating_add(4)));
+    }
+    let padding = body.get(payload_end..result_at).unwrap_or(&[]);
+    let result = read_u32(body, result_at).ok_or_else(|| too_short(body.len()))?;
+
+    Ok(ResponseStub {
+        alloc_hint,
+        context_id,
+        payload,
+        result,
+        padding,
+    })
+}
+
+/// Build a response stub: the NDR prefix, the three length fields, the payload
+/// and the trailing result code.
+///
+/// Returns the number of bytes written, or `None` if `out` is too small.
 #[must_use]
 pub fn write_response(
     out: &mut [u8],
