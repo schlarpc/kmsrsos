@@ -147,6 +147,8 @@ const FIRST_LISTENER_TOKEN: usize = 1;
 pub struct ShutdownHandle {
     requested: Arc<AtomicBool>,
     waker: Arc<Waker>,
+    /// Whether the last shutdown request reached the poller (`SEC-012`, #204).
+    woke: Arc<AtomicBool>,
 }
 
 impl ShutdownHandle {
@@ -157,8 +159,22 @@ impl ShutdownHandle {
     pub fn request(&self) {
         self.requested.store(true, Ordering::Release);
         // A failed wake means the poller is already gone, which is the outcome
-        // being asked for.
-        let _ = self.waker.wake();
+        // being asked for — so it is reported rather than discarded, and the
+        // caller decides whether it matters (`SEC-012`, #204). `ShutdownHandle`
+        // has no logger of its own by design: it is called from a signal
+        // handler, where allocating to format a message is not allowed.
+        self.woke
+            .store(self.waker.wake().is_ok(), Ordering::Release);
+    }
+
+    /// Whether the last [`Self::request`] managed to wake the poller.
+    ///
+    /// `false` means the loop was already gone. That is normal on a second
+    /// shutdown request and abnormal on the first, and only the caller has the
+    /// context to tell those apart.
+    #[must_use]
+    pub fn woke(&self) -> bool {
+        self.woke.load(Ordering::Acquire)
     }
 
     /// Whether shutdown has been asked for.
@@ -288,6 +304,7 @@ impl Driver {
         ShutdownHandle {
             requested: Arc::clone(&self.requested),
             waker: Arc::clone(&self.waker),
+            woke: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -416,9 +433,18 @@ impl Driver {
                 continue;
             }
 
-            // A registration failure drops the connection and moves on; the
-            // listener is still fine.
-            let _ = self.register(stream, peer, now, accepting_port);
+            // A registration failure drops the connection and moves on — the
+            // listener is still fine — but it is said out loud. An accept that
+            // silently goes nowhere is indistinguishable from a client that
+            // never connected, which is the class of invisibility `SEC-012`
+            // (#204) exists to prevent.
+            if let Err(error) = self.register(stream, peer, now, accepting_port) {
+                self.server.logger().message(
+                    crate::log::Severity::Warn,
+                    "register",
+                    &format!("{peer}: {error}"),
+                );
+            }
         }
     }
 
@@ -662,7 +688,18 @@ impl Driver {
     /// Close and forget one connection.
     fn close(&mut self, token: Token) {
         if let Some(mut conn) = self.connections.remove(&token) {
-            let _ = self.poll.registry().deregister(&mut conn.stream);
+            // Deregistration failing means the poller has already forgotten
+            // this socket, which is the state being asked for; dropping the
+            // stream below closes it either way. Reported at debug because it
+            // is expected on a peer that reset, and unexplained silence is
+            // what `SEC-012` (#204) forbids — not noise.
+            if let Err(error) = self.poll.registry().deregister(&mut conn.stream) {
+                self.server.logger().message(
+                    crate::log::Severity::Debug,
+                    "deregister",
+                    &format!("{}: {error}", conn.peer),
+                );
+            }
         }
     }
 

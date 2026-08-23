@@ -123,6 +123,16 @@ impl Server {
             }
         }
 
+        // `SEC-012` (#204): everything the protocol layer refused, faulted or
+        // negotiated. Drained here rather than left in the ring, because a
+        // sans-io core that reports and a driver that never listens is the same
+        // silence as not reporting — and the ring evicts, so an undrained one
+        // eventually loses what it was holding. Draining to `None` is also what
+        // collects the `Lost` count, which is emitted last.
+        while let Some(event) = connection.next_event() {
+            self.logger.connection_event(&event);
+        }
+
         // `OBS-003` (#179): one line per handled request, written after the
         // state machine has finished with the input so that a request split
         // across reads produces one line rather than several.

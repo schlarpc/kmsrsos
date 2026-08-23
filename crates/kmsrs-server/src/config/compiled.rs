@@ -97,7 +97,9 @@ const fn checked_interval(minutes: u32, name: &str) -> u32 {
     if minutes > MAX_INTERVAL_MINUTES {
         panic!("an interval longer than a year is not a value a genuine host sends");
     }
-    let _ = name;
+    // Named only so a failure message can say which interval was wrong; the
+    // value itself is unused in the success path.
+    let _: &str = name;
     minutes
 }
 
