@@ -96,7 +96,64 @@ pub fn to_toml(database: &Database, generator_version: &str) -> String {
         write_product(&mut out, product);
     }
 
+    write_host_builds(&mut out, database);
+    write_lcids(&mut out, database);
+
     out
+}
+
+/// Render the host-build table.
+fn write_host_builds(out: &mut String, database: &Database) {
+    let _ = writeln!(
+        out,
+        "\n# Windows builds a generated ePID may claim (`DB-011`, #135).\n\
+         #\n\
+         # `platform_id` appears in no published Microsoft document and is not\n\
+         # in pkeyconfig; this table is the one curated input in the pipeline,\n\
+         # and its source row says so. `release_date` is the lower bound for\n\
+         # the randomised activation date, so it is present exactly where\n\
+         # `use_for_epid` is set.\n\
+         #\n\
+         # `ndr64` is not independent of the build number — 9200 was the first\n\
+         # — but it is carried as data so the coupling can be checked against\n\
+         # the research (`ID-010`, #115)."
+    );
+    for entry in &database.host_builds {
+        let _ = writeln!(out, "\n[[host_build]]");
+        let _ = writeln!(out, "build = {}", entry.build);
+        let _ = writeln!(out, "platform_id = {}", entry.platform_id);
+        if let Some(date) = &entry.release_date {
+            let _ = writeln!(out, "release_date = {}", quote(date));
+        }
+        let _ = writeln!(out, "use_for_epid = {}", entry.use_for_epid);
+        let _ = writeln!(out, "ndr64 = {}", entry.ndr64);
+        let _ = writeln!(out, "description = {}", quote(&entry.description));
+        let _ = writeln!(out, "source = \"research\"");
+    }
+}
+
+/// Render the locale table.
+fn write_lcids(out: &mut String, database: &Database) {
+    let _ = writeln!(
+        out,
+        "\n# Locale identifiers a generated ePID may carry (`ID-008`, #113),\n\
+         # from [MS-LCID]. Specific cultures only: the entries below 0x0400 are\n\
+         # primary language identifiers rather than locales, and 0x1000 is the\n\
+         # placeholder every unassigned locale shares.\n\
+         #\n\
+         # One is drawn per process and shared across host-key groups, which is\n\
+         # what makes a set of ePIDs from one host look self-consistent."
+    );
+    for entry in &database.lcids {
+        let _ = writeln!(
+            out,
+            "[[lcid]]\nvalue = {}\ntag = {}\nlanguage = {}\nlocation = {}\nsource = \"ms-lcid\"",
+            entry.value,
+            quote(&entry.tag),
+            quote(&entry.language),
+            quote(&entry.location)
+        );
+    }
 }
 
 /// Render one product row.
@@ -179,7 +236,7 @@ mod tests {
 
     use super::{quote, to_toml};
     use crate::guid::Guid;
-    use crate::model::{Application, Database, KeyBlock, Product, Source};
+    use crate::model::{Application, Database, HostBuild, KeyBlock, Lcid, Product, Source};
 
     fn sample() -> Database {
         Database {
@@ -218,6 +275,20 @@ mod tests {
                 cmid_expiration_minutes: Some(43200),
                 source: "windows-server-2025".to_owned(),
                 licence_source: Some("windows-server-2025".to_owned()),
+            }],
+            host_builds: vec![HostBuild {
+                build: 26100,
+                platform_id: 3612,
+                release_date: Some("2024-10-01".to_owned()),
+                use_for_epid: true,
+                ndr64: true,
+                description: "Windows 11 24H2".to_owned(),
+            }],
+            lcids: vec![Lcid {
+                value: 1033,
+                tag: "en-US".to_owned(),
+                language: "English".to_owned(),
+                location: "United States".to_owned(),
             }],
         }
     }

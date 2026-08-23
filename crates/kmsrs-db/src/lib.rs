@@ -32,13 +32,18 @@
 #[cfg(test)]
 extern crate alloc;
 
+pub mod date;
 pub mod guid;
 pub mod query;
 pub mod tables;
 
+pub use date::Date;
 pub use guid::Guid;
-pub use query::{application, csvlk, csvlk_at, csvlks_counting, is_known_counted_id, product};
+pub use query::{
+    application, csvlk, csvlk_at, csvlks_counting, epid_host_build_at, epid_host_build_count,
+    epid_host_builds, is_known_counted_id, lcid_at, lcid_count, product,
+};
 pub use tables::{
-    APPLICATIONS, Application, COUNTED_IDS, CSVLKS, CountedId, Csvlk, KeyBlock, KeyKind, PRODUCTS,
-    Product,
+    APPLICATIONS, Application, COUNTED_IDS, CSVLKS, CountedId, Csvlk, EPID_HOST_BUILDS,
+    HOST_BUILDS, HostBuild, KeyBlock, KeyKind, LCIDS, Lcid, PRODUCTS, Product,
 };

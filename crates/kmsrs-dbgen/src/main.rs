@@ -16,7 +16,8 @@
 //! is about a service whose configuration must be decided when it is built.
 
 use kmsrs_dbgen::error::{Context, Error, Result};
-use kmsrs_dbgen::{GENERATOR_VERSION, Origin, SOURCES, emit, extract, fetch};
+use kmsrs_dbgen::{GENERATOR_VERSION, Origin, SOURCES, emit, extract, fetch, hostbuild, lcid};
+use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 
 /// Where artifacts are cached, relative to the workspace root.
@@ -82,6 +83,12 @@ fn fetch_all(into: &Path) -> Result<()> {
                 fetch::fetch_windows_image(reference, &directory)?
             }
             Origin::Download { url } => fetch::fetch_office_pack(url, &directory)?.0,
+            // Fetched during extraction rather than here: neither produces
+            // `.xrm-ms` artifacts, so there is nothing to cache in a directory.
+            Origin::Specification { .. } | Origin::Curated { .. } => {
+                let _ = std::fs::remove_dir(&directory);
+                continue;
+            }
         };
         if kept == 0 {
             return Err(Error::new(format!(
@@ -122,8 +129,47 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
     let borrowed: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
     let mut database = extract::extract(&borrowed)?;
 
+    // The two sources that are not artifact directories. Both are recorded as
+    // sources so every row they produce is stamped (`DB-002`, #126).
+    for source in SOURCES {
+        match source.origin {
+            Origin::Specification { url } => {
+                eprintln!("fetching {}", source.id);
+                database.lcids = lcid::fetch(url)?;
+                database.sources.push(kmsrs_dbgen::model::Source {
+                    id: source.id.to_owned(),
+                    description: source.description.to_owned(),
+                    origin: url.to_owned(),
+                    sha256: String::new(),
+                    application: None,
+                });
+            }
+            Origin::Curated { path } => {
+                let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+                database.host_builds = hostbuild::load(&path)?;
+                database.sources.push(kmsrs_dbgen::model::Source {
+                    id: source.id.to_owned(),
+                    description: source.description.to_owned(),
+                    origin: format!(
+                        "committed at crates/kmsrs-dbgen/{}",
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
+                    sha256: hex::encode(sha2::Sha256::digest(
+                        std::fs::read(&path).context("reading the curated table")?,
+                    )),
+                    application: None,
+                });
+            }
+            Origin::ContainerImage { .. } | Origin::Download { .. } => {}
+        }
+    }
+
     for source in &mut database.sources {
-        source.sha256 = fetch::directory_digest(&from.join(&source.id))?;
+        if source.sha256.is_empty() && from.join(&source.id).is_dir() {
+            source.sha256 = fetch::directory_digest(&from.join(&source.id))?;
+        }
     }
     database.sort();
 
@@ -134,7 +180,8 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
     std::fs::write(output, &rendered).context(format!("writing {}", output.display()))?;
 
     eprintln!(
-        "wrote {} ({} sources, {} applications, {} products, {} counted IDs)",
+        "wrote {} ({} sources, {} applications, {} products, {} counted IDs, \
+         {} host builds, {} locales)",
         output.display(),
         database.sources.len(),
         database.applications.len(),
@@ -143,7 +190,9 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
             .products
             .iter()
             .map(|product| product.counted_ids.len())
-            .sum::<usize>()
+            .sum::<usize>(),
+        database.host_builds.len(),
+        database.lcids.len()
     );
     Ok(())
 }

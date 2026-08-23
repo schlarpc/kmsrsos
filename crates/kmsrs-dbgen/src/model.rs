@@ -115,6 +115,41 @@ pub struct Product {
     pub licence_source: Option<String>,
 }
 
+/// A Windows build a generated ePID may claim (`DB-011`, #135).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBuild {
+    /// The build number, as it appears in an ePID.
+    pub build: u32,
+    /// The platform identifier this build reports (`ID-009`, #114).
+    pub platform_id: u32,
+    /// Release date, `YYYY-MM-DD`. Required only where [`Self::use_for_epid`]
+    /// is set, because that is the only place it is read.
+    pub release_date: Option<String>,
+    /// Whether an ePID may claim this build.
+    pub use_for_epid: bool,
+    /// Whether this build speaks NDR64 (`ID-010`, #115).
+    ///
+    /// Not independent of the build number — 9200 was the first — but carried
+    /// as data so the coupling is reviewable against the research rather than
+    /// hidden in a predicate.
+    pub ndr64: bool,
+    /// What the build is, for the log and the web UI.
+    pub description: String,
+}
+
+/// A locale identifier a generated ePID may carry (`ID-008`, #113).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lcid {
+    /// The numeric identifier.
+    pub value: u32,
+    /// The BCP 47 language tag, e.g. `en-US`.
+    pub tag: String,
+    /// The language name.
+    pub language: String,
+    /// The region name.
+    pub location: String,
+}
+
 /// The whole extracted database.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Database {
@@ -124,6 +159,10 @@ pub struct Database {
     pub applications: Vec<Application>,
     /// Product key configurations.
     pub products: Vec<Product>,
+    /// Windows builds an ePID may claim.
+    pub host_builds: Vec<HostBuild>,
+    /// Locale identifiers an ePID may carry.
+    pub lcids: Vec<Lcid>,
 }
 
 impl Database {
@@ -142,6 +181,8 @@ impl Database {
                 .cmp(&b.group_id)
                 .then_with(|| a.activation_id.cmp(&b.activation_id))
         });
+        self.host_builds.sort_by_key(|entry| entry.build);
+        self.lcids.sort_by_key(|entry| entry.value);
         for product in &mut self.products {
             // A Windows image carries the same pkeyconfig document in three
             // places — System32, SysWOW64 and a WinSxS component directory — so

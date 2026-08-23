@@ -29,6 +29,8 @@ pub mod error;
 pub mod extract;
 pub mod fetch;
 pub mod guid;
+pub mod hostbuild;
+pub mod lcid;
 pub mod model;
 pub mod xrm;
 
@@ -51,6 +53,20 @@ pub enum Origin {
         /// The direct URL.
         url: &'static str,
     },
+    /// A published specification page whose reference table is scraped.
+    Specification {
+        /// The page URL.
+        url: &'static str,
+    },
+    /// A table committed to this repository because no artifact carries it.
+    ///
+    /// The only one is the host-build table (`DB-011`, #135): `PlatformId` is
+    /// in no published document. It goes through the pipeline anyway so that it
+    /// arrives stamped with that provenance rather than appearing from nowhere.
+    Curated {
+        /// Path relative to the `kmsrs-dbgen` crate root.
+        path: &'static str,
+    },
 }
 
 impl Origin {
@@ -59,7 +75,8 @@ impl Origin {
     pub fn as_text(self) -> &'static str {
         match self {
             Self::ContainerImage { reference } => reference,
-            Self::Download { url } => url,
+            Self::Download { url } | Self::Specification { url } => url,
+            Self::Curated { path } => path,
         }
     }
 }
@@ -92,6 +109,20 @@ pub const SOURCES: &[ArtifactSource] = &[
         description: "Microsoft Office LTSC 2024 Volume License Pack (16.0.17830.20004)",
         origin: Origin::Download {
             url: "https://download.microsoft.com/download/1/4/0/140c97ae-7360-4dfc-9ba0-5f509600a06e/Office2024VolumeLicensePack_x64.exe",
+        },
+    },
+    ArtifactSource {
+        id: "ms-lcid",
+        description: "[MS-LCID] Windows Language Code Identifier reference",
+        origin: Origin::Specification {
+            url: "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/a9eac961-e77d-41a6-90a5-ce1a8b0cdb9c",
+        },
+    },
+    ArtifactSource {
+        id: "research",
+        description: "Host build table established in docs/research-findings.md",
+        origin: Origin::Curated {
+            path: "data/host-builds.toml",
         },
     },
 ];

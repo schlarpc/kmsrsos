@@ -92,8 +92,212 @@ fn generate(document: &toml::Table) -> String {
     write_products(&mut out, &products);
     write_csvlks(&mut out, &products);
     write_counted_ids(&mut out, &products);
+    write_host_builds(&mut out, document);
+    write_lcids(&mut out, document);
     write_assertions(&mut out);
     out
+}
+
+/// One parsed host-build row.
+struct HostBuildRow {
+    build: u32,
+    platform_id: u32,
+    release_date: Option<(i32, u8, u8)>,
+    use_for_epid: bool,
+    ndr64: bool,
+    description: String,
+}
+
+/// Emit the host-build table and the index of builds an ePID may claim.
+fn write_host_builds(out: &mut String, document: &toml::Table) {
+    let rows = document
+        .get("host_build")
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{DATA} has no [[host_build]] rows"));
+
+    let mut builds: Vec<HostBuildRow> = rows
+        .iter()
+        .map(|row| {
+            let build = integer(row, "build", "host_build");
+            let platform_id = integer(row, "platform_id", "host_build");
+            let release_date = row
+                .get("release_date")
+                .and_then(toml::Value::as_str)
+                .map(|text| parse_date(text, build));
+            let use_for_epid = row
+                .get("use_for_epid")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false);
+            let ndr64 = row
+                .get("ndr64")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or_else(|| panic!("host build {build} has no ndr64 column"));
+
+            // `ID-007` (#112): the release date is the lower bound for a
+            // randomised activation date, so a build that can produce an ePID
+            // must have one. Checking here means the failure names the build.
+            assert!(
+                !(use_for_epid && release_date.is_none()),
+                "host build {build} is marked use_for_epid but has no release_date"
+            );
+
+            HostBuildRow {
+                build,
+                platform_id,
+                release_date,
+                use_for_epid,
+                ndr64,
+                description: field(row, "description", "host_build").to_owned(),
+            }
+        })
+        .collect();
+    builds.sort_by_key(|entry| entry.build);
+
+    let mut seen = BTreeSet::new();
+    for entry in &builds {
+        assert!(
+            seen.insert(entry.build),
+            "host build {} appears twice",
+            entry.build
+        );
+    }
+
+    // `ID-011` (#116): the set an ePID draws from must be non-empty by
+    // construction. vlmcsd achieves the same coupling with a `while (TRUE)`
+    // loop that hangs at start-up when nothing matches.
+    let epid_indices: Vec<usize> = builds
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.use_for_epid)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        !epid_indices.is_empty(),
+        "no host build is marked use_for_epid, so no ePID could be generated"
+    );
+
+    let _ = writeln!(
+        out,
+        "/// Windows builds a generated ePID may claim, sorted by build number.\n\
+         pub static HOST_BUILDS: [HostBuild; {}] = [",
+        builds.len()
+    );
+    for entry in &builds {
+        let date = entry.release_date.map_or_else(
+            || "None".to_owned(),
+            |(year, month, day)| {
+                // `Date::new` returns an `Option`, and a date that failed to
+                // validate here would already have panicked above.
+                format!("Date::new({year}, {month}, {day})")
+            },
+        );
+        let _ = writeln!(
+            out,
+            "    HostBuild {{ build: {}, platform_id: {}, release_date: {date}, \
+             use_for_epid: {}, ndr64: {}, description: {:?} }},",
+            number_literal(entry.build),
+            number_literal(entry.platform_id),
+            entry.use_for_epid,
+            entry.ndr64,
+            entry.description
+        );
+    }
+    out.push_str("];\n\n");
+
+    let list = epid_indices.iter().fold(String::new(), |mut acc, index| {
+        let _ = write!(acc, "{index}, ");
+        acc
+    });
+    let _ = writeln!(
+        out,
+        "/// Indices into [`HOST_BUILDS`] of the builds an ePID may claim.\n\
+         ///\n\
+         /// Non-empty by construction: the build fails if it would be empty.\n\
+         pub static EPID_HOST_BUILDS: [u16; {}] = [{list}];\n",
+        epid_indices.len()
+    );
+}
+
+/// Emit the locale table.
+fn write_lcids(out: &mut String, document: &toml::Table) {
+    let rows = document
+        .get("lcid")
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{DATA} has no [[lcid]] rows"));
+
+    let mut locales: Vec<(u32, String, String, String)> = rows
+        .iter()
+        .map(|row| {
+            let value = integer(row, "value", "lcid");
+            // The research note that every LCID a real host reports is at least
+            // 1025 is the same statement as the specific-culture filter in
+            // `kmsrs-dbgen`; asserting it here catches a filter that regressed.
+            assert!(value >= 1025, "LCID {value} is a primary language id");
+            (
+                value,
+                field(row, "tag", "lcid").to_owned(),
+                field(row, "language", "lcid").to_owned(),
+                field(row, "location", "lcid").to_owned(),
+            )
+        })
+        .collect();
+    locales.sort_by_key(|entry| entry.0);
+
+    let mut seen = BTreeSet::new();
+    for entry in &locales {
+        assert!(seen.insert(entry.0), "LCID {} appears twice", entry.0);
+    }
+    assert!(!locales.is_empty(), "{DATA} defines no locales");
+
+    let _ = writeln!(
+        out,
+        "/// Locale identifiers a generated ePID may carry, sorted.\n\
+         pub static LCIDS: [Lcid; {}] = [",
+        locales.len()
+    );
+    for (value, tag, language, location) in &locales {
+        let _ = writeln!(
+            out,
+            "    Lcid {{ value: {}, tag: {tag:?}, language: {language:?}, location: {location:?} }},",
+            number_literal(*value)
+        );
+    }
+    out.push_str("];\n\n");
+}
+
+/// A required integer field.
+fn integer(row: &toml::Value, name: &str, table: &str) -> u32 {
+    row.get(name)
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or_else(|| panic!("a [[{table}]] row has no usable {name}"))
+}
+
+/// Parse a `YYYY-MM-DD` date.
+///
+/// Upstream shipped one with a colon where the `T` belongs, which is the class
+/// of defect a shape check catches for nothing.
+fn parse_date(text: &str, build: u32) -> (i32, u8, u8) {
+    let parts: Vec<&str> = text.split('-').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "host build {build} has release_date {text:?}, which is not YYYY-MM-DD"
+    );
+    let year: i32 = parts[0]
+        .parse()
+        .unwrap_or_else(|_| panic!("host build {build}: bad year in {text:?}"));
+    let month: u8 = parts[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("host build {build}: bad month in {text:?}"));
+    let day: u8 = parts[2]
+        .parse()
+        .unwrap_or_else(|_| panic!("host build {build}: bad day in {text:?}"));
+    assert!(
+        (1..=12).contains(&month) && (1..=31).contains(&day),
+        "host build {build} has an impossible release_date {text:?}"
+    );
+    (year, month, day)
 }
 
 /// Read and validate the application table.
@@ -553,6 +757,20 @@ const _: () = {
         }
         index += 1;
     }
+
+    // `ID-011` (#116) and `ID-010` (#115), asserted where they cannot be
+    // edited out: there is always a build to draw from, every drawable build
+    // has a release date, and no build claims a transfer syntax its era did
+    // not have.
+    assert!(!EPID_HOST_BUILDS.is_empty(), "no host build can produce an ePID");
+    let mut index = 0;
+    while index < EPID_HOST_BUILDS.len() {
+        let build = &HOST_BUILDS[EPID_HOST_BUILDS[index] as usize];
+        assert!(build.use_for_epid, "EPID_HOST_BUILDS names a build that is not one");
+        assert!(build.release_date.is_some(), "a drawable build has no release date");
+        index += 1;
+    }
+    assert!(!LCIDS.is_empty(), "no locale to draw from");
 
     // Every CSVLK must be able to produce an ePID.
     let mut index = 0;

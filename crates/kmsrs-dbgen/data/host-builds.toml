@@ -1,0 +1,202 @@
+# Windows host builds a generated ePID may claim (`DB-011`, #135).
+#
+# CURATED INPUT — not extracted. This is the one table in the database that no
+# Microsoft artifact carries: `PlatformId` appears in no published document and
+# is not in `pkeyconfig`. It was established by the research in
+# `docs/research-findings.md`, corroborated against two genuine ePIDs captured
+# from real machines, and it is committed here so that `kmsrs-dbgen` stamps it
+# with that provenance rather than it appearing in the generated file from
+# nowhere.
+#
+# `release_date` is the lower bound for the randomised activation date in an
+# ePID (`ID-007`, #112), so it is required for every build that may be used for
+# one and omitted where the research did not establish it. `kmsrs-db`'s build
+# asserts that pairing rather than trusting it.
+#
+# `ndr64` is not independent: build 9200 was the first to speak NDR64. It is a
+# column rather than a computed predicate so that the coupling is data a
+# reviewer can check against the research, and `ID-010` (#115) makes an
+# inconsistent pairing unrepresentable in the type system.
+
+[[host_build]]
+build = 6002
+platform_id = 55041
+release_date = "2009-05-26"
+use_for_epid = true
+ndr64 = false
+description = "Windows Vista SP2 / Server 2008 SP2"
+
+[[host_build]]
+build = 7601
+platform_id = 55041
+release_date = "2011-02-22"
+use_for_epid = true
+ndr64 = false
+description = "Windows 7 SP1 / Server 2008 R2 SP1"
+
+[[host_build]]
+build = 9200
+platform_id = 5426
+release_date = "2012-10-26"
+use_for_epid = true
+ndr64 = true
+description = "Windows 8 / Server 2012"
+
+[[host_build]]
+build = 9600
+platform_id = 6401
+release_date = "2013-10-18"
+use_for_epid = true
+ndr64 = true
+description = "Windows 8.1 / Server 2012 R2"
+
+[[host_build]]
+build = 10240
+platform_id = 3612
+release_date = "2015-07-29"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1507"
+
+[[host_build]]
+build = 14393
+platform_id = 3612
+release_date = "2016-08-02"
+use_for_epid = true
+ndr64 = true
+description = "Windows 10 1607 / Server 2016"
+
+[[host_build]]
+build = 15063
+platform_id = 3612
+release_date = "2017-04-05"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1703"
+
+[[host_build]]
+build = 16299
+platform_id = 3612
+release_date = "2017-10-17"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1709"
+
+[[host_build]]
+build = 17134
+platform_id = 3612
+release_date = "2018-04-30"
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1803"
+
+[[host_build]]
+build = 17763
+platform_id = 3612
+release_date = "2018-10-02"
+use_for_epid = true
+ndr64 = true
+description = "Windows 10 1809 / Server 2019"
+
+# The 1903-to-21H2 feature updates. The research did not establish release
+# dates for these, and none is invented here: they are not usable for an ePID,
+# so no date is needed and none is given.
+[[host_build]]
+build = 18362
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1903"
+
+[[host_build]]
+build = 18363
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 1909"
+
+[[host_build]]
+build = 19041
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 2004"
+
+[[host_build]]
+build = 19042
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 20H2"
+
+[[host_build]]
+build = 19043
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 21H1"
+
+[[host_build]]
+build = 19044
+platform_id = 3612
+use_for_epid = false
+ndr64 = true
+description = "Windows 10 21H2"
+
+[[host_build]]
+build = 20348
+platform_id = 3612
+release_date = "2021-08-18"
+use_for_epid = true
+ndr64 = true
+description = "Windows Server 2022"
+
+[[host_build]]
+build = 22000
+platform_id = 3612
+release_date = "2021-10-04"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 21H2"
+
+[[host_build]]
+build = 22621
+platform_id = 3612
+release_date = "2022-09-20"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 22H2"
+
+[[host_build]]
+build = 22631
+platform_id = 3612
+release_date = "2023-10-31"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 23H2"
+
+[[host_build]]
+build = 26100
+platform_id = 3612
+release_date = "2024-10-01"
+use_for_epid = true
+ndr64 = true
+description = "Windows 11 24H2 / Server 2025"
+
+[[host_build]]
+build = 26200
+platform_id = 3612
+release_date = "2025-09-30"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 25H2"
+
+# Real, not speculation: KB5077179, OS Build 28000.1575, 2026-02-10 — a scoped
+# 26H1 release for Snapdragon X2 and NVIDIA N1X devices, still being serviced.
+[[host_build]]
+build = 28000
+platform_id = 3612
+release_date = "2026-02-10"
+use_for_epid = false
+ndr64 = true
+description = "Windows 11 26H1"
