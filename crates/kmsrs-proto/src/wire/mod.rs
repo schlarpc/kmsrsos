@@ -11,11 +11,13 @@
 //! than duplicated.
 
 pub mod bind;
+pub mod connection;
 pub mod fault;
 pub mod header;
 pub mod stub;
 pub mod syntax;
 
+pub use connection::{Association, Connection, Decision, Grant, Step};
 pub use fault::NcaStatus;
 pub use header::{HEADER_LEN, PacketFlags, PacketType, RpcHeader};
 pub use stub::{RequestStub, StubError};
