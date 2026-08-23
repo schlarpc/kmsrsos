@@ -53,6 +53,18 @@
         "type": "github"
       }
     },
+    "hermit-loader-efi": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-4+hd56ATSsLMSGkMVBqdBhgNkZwpUu102dune/m8NE4=",
+        "type": "file",
+        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64.efi"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64.efi"
+      }
+    },
     "hermit-loader-multiboot": {
       "flake": false,
       "locked": {
@@ -107,6 +119,7 @@
       "inputs": {
         "crane": "crane",
         "hermit-kernel": "hermit-kernel",
+        "hermit-loader-efi": "hermit-loader-efi",
         "hermit-loader-multiboot": "hermit-loader-multiboot",
         "nix-direnv": "nix-direnv",
         "nixpkgs": "nixpkgs",

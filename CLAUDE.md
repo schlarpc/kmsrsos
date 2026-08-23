@@ -122,6 +122,7 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 - `nix build` — build the package
 - `nix build .#windows` — cross-compile for Windows (x86_64-pc-windows-msvc)
 - `nix build .#hermit` — the Hermit unikernel application; `.#hermit-kernel` for `libhermit.a` alone
+- `nix build .#osImage` — a bootable GPT/UEFI disk image of that unikernel
 - `nix flake check` — run all checks (build, clippy, fmt, test, coverage)
 - `nix flake update` — update flake inputs
 

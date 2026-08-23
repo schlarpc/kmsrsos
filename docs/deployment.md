@@ -314,6 +314,43 @@ The findings this section rests on are in
 [`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
 kernel and `qemu-server` sources rather than from documentation.
 
+### The disk image (`OS-002`, #253)
+
+`nix build .#osImage` produces `kmsrsos-hermit.img`: a 128 MiB GPT disk with one partition, an EFI
+system partition holding three files.
+
+| Path on the ESP | What it is |
+|---|---|
+| `\EFI\BOOT\BOOTX64.EFI` | the hermit loader — the path firmware starts by default |
+| `\EFI\hermit\hermit-app` | this program |
+| `\EFI\hermit\hermit-bootargs` | optional; the only runtime channel, see below |
+
+That is the whole deployment. The loader reads all three itself, so there is no `-kernel`, no
+`-initrd` and nothing on the command line — which is what makes it deployable on Proxmox at all,
+since the web UI exposes no `args` field (`OS-008`, #259). Because the loader lives at the default
+boot path, nothing has to be registered in UEFI NVRAM and a fresh VM works on its first boot.
+
+To run it locally:
+
+```shell
+$ cp result/kmsrsos-hermit.img disk.img && chmod +w disk.img
+$ cp /path/to/OVMF_VARS.fd vars.fd && chmod +w vars.fd
+$ qemu-system-x86_64 -machine q35 \
+    -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+    -smp 1 -m 512M -display none -serial stdio -no-reboot \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file=/path/to/OVMF_CODE.fd \
+    -drive if=pflash,format=raw,unit=1,file=vars.fd \
+    -drive format=raw,file=disk.img \
+    -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+    -device virtio-net-pci,netdev=u1,disable-legacy=on
+```
+
+Both the image and the UEFI variable store are written to, so neither can be read-only.
+
+On Proxmox: `qm importdisk <vmid> kmsrsos-hermit.img <storage>`, attach the result, set the boot
+order to it, and set the machine type to `q35` with OVMF (UEFI) firmware. Then read the rest of this
+section, because the serial port and the CPU type are not optional.
+
 ### Running it under plain QEMU (`OS-001`, #252)
 
 `nix build .#hermit` produces `bin/kmsrsos-hermit`. That file is an application, not a bootable
@@ -387,8 +424,14 @@ Worked example — serve the web UI on 8081 instead of 8080:
 
 ```
 # \EFI\hermit\hermit-bootargs on the image's ESP
-env=KMSRSOS_CONFIG=web_ui_port = 8081
+env=KMSRSOS_CONFIG="web-ui-port = 8081"
 ```
+
+**The quotes are not optional.** The kernel splits boot args with shlex, and a `KMSRSOS_CONFIG` value
+is a TOML document, which contains spaces. Unquoted, the line above becomes three words: the kernel
+takes the first as the setting, logs `could not parse bootarg` twice for the rest, and boots with the
+default port — a failure whose only symptom is that nothing changed. The `hermit-image-boot` check
+passes a quoted value and asserts the web UI moved, rather than asserting the file was read.
 
 Editing that file is the entire in-place reconfiguration story, and it is deliberately small: the
 doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch

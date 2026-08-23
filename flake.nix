@@ -65,6 +65,15 @@
       flake = false;
       type = "file";
     };
+
+    # The same loader as a UEFI application, which is what the bootable disk
+    # image starts from (`OS-002`, #253). Same release as the multiboot build
+    # above; they are two artefacts of one program and are bumped together.
+    hermit-loader-efi = {
+      url = "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64.efi";
+      flake = false;
+      type = "file";
+    };
   };
 
   outputs =
@@ -77,6 +86,7 @@
     , hermit-kernel
     , rust-std-hermit
     , hermit-loader-multiboot
+    , hermit-loader-efi
     , ...
     }:
     let
@@ -137,7 +147,6 @@
             # What `packaging_invariants.rs` and `platform_invariants.rs` read.
             || (builtins.match ".*/flake\\.(nix|lock)" path != null)
             || (builtins.match ".*/rust-toolchain\\.toml" path != null)
-            || (builtins.match ".*/hermit-pins\\.toml" path != null)
             || (builtins.match ".*/deny\\.toml" path != null)
             || (builtins.match ".*/deploy(/.*)?" path != null)
             || (builtins.match ".*/docs(/.*)?" path != null)
@@ -467,6 +476,81 @@
           dontPatchELF = true;
         };
 
+      # --- The bootable disk image (OS-002, #253) ---
+      #
+      # A GPT disk with one partition: an EFI system partition holding three
+      # files, which is the whole of what a Hermit deployment is.
+      #
+      #   \EFI\BOOT\BOOTX64.EFI    the loader — the path OVMF starts by default,
+      #                            so nothing has to be registered in NVRAM and
+      #                            the first boot of a fresh VM works
+      #   \EFI\hermit\hermit-app   this program
+      #   \EFI\hermit\hermit-bootargs   optional, and the only runtime channel
+      #
+      # The loader reads all three itself. That is what makes this the *whole*
+      # deployment: no `-kernel`, no `-initrd`, and — the reason it matters on
+      # Proxmox — no `qm set --args`, which the web UI does not expose at all
+      # (`OS-008`, #259).
+      #
+      # Boot args are shlex-parsed by the kernel, and a `KMSRSOS_CONFIG` value
+      # is TOML, which contains spaces. So the value has to be quoted:
+      #
+      #     env=KMSRSOS_CONFIG="web-ui-port = 8081"
+      #
+      # Unquoted, shlex splits it into three words and the kernel logs two
+      # "could not parse bootarg" lines and carries on with the default. The
+      # `hermit-image-boot` check passes a quoted one and asserts the override
+      # took effect, because "the file was read" and "the setting applied" are
+      # different claims.
+      #
+      # Every identifier that would otherwise be random is fixed: the disk GUID,
+      # the partition GUID and the FAT volume ID. Two builds of one revision are
+      # the same bytes (`SEC-010`, #202), and a disk image is exactly the kind
+      # of artefact where that silently stops being true.
+      hermitDiskImageFor = { system, app, bootargs ? null }:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.runCommand "kmsrsos-hermit-image"
+          {
+            nativeBuildInputs = [ pkgs.gptfdisk pkgs.dosfstools pkgs.mtools ];
+          } ''
+          set -euo pipefail
+
+          # 128 MiB, in 512-byte sectors. The ESP runs from sector 2048 (1 MiB,
+          # the conventional alignment) to sector 262110, leaving the last 33
+          # sectors for the backup GPT header and table.
+          sectors=262144
+          first=2048
+          last=262110
+
+          truncate -s $((sectors * 512)) disk.img
+          sgdisk \
+            --clear \
+            --disk-guid=6b8a1f2c-9d34-4e5a-8c71-0f2d3e4b5a60 \
+            --new=1:$first:$last \
+            --typecode=1:ef00 \
+            --partition-guid=1:1c4e5f60-7a8b-49cd-9e0f-1a2b3c4d5e6f \
+            --change-name=1:"EFI system partition" \
+            disk.img
+
+          truncate -s $(((last - first + 1) * 512)) esp.img
+          mkfs.vfat -F 32 -n HERMIT -i DEADBEEF esp.img
+
+          mmd -i esp.img ::/EFI ::/EFI/BOOT ::/EFI/hermit
+          mcopy -i esp.img ${hermit-loader-efi} ::/EFI/BOOT/BOOTX64.EFI
+          mcopy -i esp.img ${app}/bin/kmsrsos-hermit ::/EFI/hermit/hermit-app
+          ${pkgs.lib.optionalString (bootargs != null) ''
+            printf '%s' ${pkgs.lib.escapeShellArg bootargs} > bootargs
+            mcopy -i esp.img bootargs ::/EFI/hermit/hermit-bootargs
+          ''}
+
+          dd if=esp.img of=disk.img bs=512 seek=$first conv=notrunc status=none
+
+          mkdir -p $out
+          cp disk.img $out/kmsrsos-hermit.img
+        '';
+
       # --- Booting it (OS-001, #252) ---
       #
       # The one test in this repository that runs the shipped program on the
@@ -562,6 +646,119 @@
 
           mkdir -p $out
           cp "$serial" $out/serial.log
+        '';
+
+      # --- Booting the disk image (OS-002, #253) ---
+      #
+      # `hermit-boot` proves the program runs on Hermit. This proves the
+      # *artefact* runs: a GPT disk handed to firmware, with no `-kernel`, no
+      # `-initrd` and nothing on the command line — which is the only shape
+      # Proxmox can start, since its web UI exposes no `args` field at all
+      # (`OS-008`, #259).
+      #
+      # Two boots, because there are two claims:
+      #
+      #   1. The shipped image boots unattended and activates. Unattended is
+      #      part of the claim: OVMF starts `\EFI\BOOT\BOOTX64.EFI` by itself,
+      #      so nothing has to be registered in NVRAM and a fresh VM works on
+      #      its first boot.
+      #   2. A `hermit-bootargs` file on the ESP is honoured. Not "is read" —
+      #      honoured. The value moves the web UI to a port it is not on by
+      #      default, and the check fails if the default port is still the one
+      #      answering. Reading a file and applying what is in it are different
+      #      claims, and the difference is where a quoting mistake lives.
+      hermitImageBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          withBootargs = hermitDiskImageFor {
+            inherit system;
+            app = configured.hermit;
+            bootargs = ''env=KMSRSOS_CONFIG="web-ui-port = 8081"'';
+          };
+        in
+        pkgs.runCommand "hermit-image-boot"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm pkgs.curl ];
+            meta.timeout = 900;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          boot() {
+            local image="$1" name="$2"
+            local serial="$PWD/$name.log"
+
+            # Both the image and the UEFI variable store are written to, so
+            # neither can be the read-only store path.
+            cp "$image" "$PWD/$name.img"
+            cp ${pkgs.OVMF.variables} "$PWD/$name-vars.fd"
+            chmod +w "$PWD/$name.img" "$PWD/$name-vars.fd"
+
+            qemu-system-x86_64 \
+              -machine q35 \
+              -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              -drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware} \
+              -drive if=pflash,format=raw,unit=1,file="$PWD/$name-vars.fd" \
+              -drive format=raw,file="$PWD/$name.img" \
+              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688,hostfwd=tcp:127.0.0.1:8080-:8080,hostfwd=tcp:127.0.0.1:8081-:8081 \
+              -device virtio-net-pci,netdev=u1,disable-legacy=on &
+            qemu=$!
+
+            # Firmware adds a few seconds over a direct kernel boot, and a
+            # loaded builder adds more.
+            local attempt
+            for attempt in $(seq 1 120); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:1688; then
+                return 0
+              fi
+              if ! kill -0 $qemu 2>/dev/null; then
+                echo "qemu exited before the guest answered ($name)" >&2
+                cat "$serial" >&2 || true
+                return 1
+              fi
+              sleep 1
+            done
+
+            echo "the image never answered on 1688 ($name)" >&2
+            cat "$serial" >&2 || true
+            return 1
+          }
+
+          fail() {
+            echo "$1" >&2
+            cat "$PWD/$2.log" >&2 || true
+            kill $qemu 2>/dev/null || true
+            exit 1
+          }
+
+          # --- 1. The shipped image, exactly as released ---
+          boot ${configured.osImage}/kmsrsos-hermit.img plain
+
+          ${configured.client}/bin/kmsrs-client --timeout 30 127.0.0.1:1688 \
+            || fail "the image booted but does not activate" plain
+          curl -fsS --max-time 10 http://127.0.0.1:8080/ > /dev/null \
+            || fail "the web UI is not on its default port" plain
+
+          cp "$PWD/plain.log" $out/plain.log
+          kill $qemu 2>/dev/null || true
+          wait $qemu 2>/dev/null || true
+
+          # --- 2. The same image plus one file on the ESP ---
+          boot ${withBootargs}/kmsrsos-hermit.img bootargs
+
+          curl -fsS --max-time 10 http://127.0.0.1:8081/ > /dev/null \
+            || fail "hermit-bootargs did not move the web UI to 8081" bootargs
+          if curl -fsS --max-time 5 http://127.0.0.1:8080/ > /dev/null; then
+            fail "the web UI is still on 8080, so the override did not apply" \
+              bootargs
+          fi
+
+          cp "$PWD/bootargs.log" $out/bootargs.log
+          kill $qemu 2>/dev/null || true
         '';
 
       # --- The build-time settings a deployment might genuinely need changed ---
@@ -724,7 +921,11 @@
             cargoArtifacts = craneLib.buildDepsOnly hermitArgs;
             cargoExtraArgs = hermitArgs.cargoExtraArgs + features;
           });
-          # `osImage` joins this set once OS-002 (#253) can build one.
+          # `OS-002` (#253): the artefact an operator actually deploys. The
+          # image ships without a bootargs file — a deployment that needs one
+          # writes it onto the ESP, which is the entire in-place
+          # reconfiguration story (`OS-008`, #259).
+          osImage = hermitDiskImageFor { inherit system; app = hermit; };
         };
 
       # The Debian and RPM architecture names, which are neither Nix's nor
@@ -869,6 +1070,11 @@
           # `libhermit.a` on its own, so that a kernel-side change can be built
           # and diffed without rebuilding the application (`PKG-013`, #250).
           hermit-kernel = hermitKernelFor { inherit system; };
+
+          # `nix build .#osImage` — the bootable GPT disk (`OS-002`, #253).
+          # This is what an operator uploads to a hypervisor; everything else
+          # in this set is a component of it.
+          osImage = configured.osImage;
 
           # --- OS packages (PKG-009, #246) ---
           #
@@ -1072,6 +1278,10 @@
           # `OS-001` (#252): the unikernel boots and activates. The only check
           # here that runs the program on the platform it was built for.
           hermit-boot = hermitBootCheckFor system;
+
+          # `OS-002` (#253): and the *image* boots, from firmware, with nothing
+          # on the command line — plus the bootargs file on its ESP is honoured.
+          hermit-image-boot = hermitImageBootCheckFor system;
 
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;

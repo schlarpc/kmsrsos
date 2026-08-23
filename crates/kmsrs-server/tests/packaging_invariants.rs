@@ -313,6 +313,9 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         ".#rpm",
         ".#container",
         ".#windows",
+        // The bootable unikernel image (OS-002, #253). x86_64 only, and built
+        // on the leg that is already x86_64 rather than in a job of its own.
+        ".#osImage",
     ] {
         assert!(
             workflow.contains(output),

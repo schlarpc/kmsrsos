@@ -111,11 +111,12 @@ jobs:
   # a platform difference that appears at compile time — `socket2` not existing
   # on Hermit was found exactly this way.
   #
-  # Nothing here runs the image: it is an `ELFOSABI_STANDALONE` file for a
-  # machine with no operating system under it, so a runner cannot execute it and
-  # `doCheck` is off. Booting it is the `hermit-boot` check (`OS-001`, #252),
-  # which `nix flake check` runs in the matrix leg above — this job is the
-  # faster signal, and the one that would still fail if QEMU were unavailable.
+  # Nothing here runs anything: the application is an `ELFOSABI_STANDALONE` file
+  # for a machine with no operating system under it, and the disk image is a
+  # GPT disk. Booting them is the `hermit-boot` (`OS-001`, #252) and
+  # `hermit-image-boot` (`OS-002`, #253) checks, which `nix flake check` runs in
+  # the leg above — this job is the faster signal, and the one that would still
+  # fail if QEMU were unavailable.
   hermit:
     runs-on: ubuntu-latest
     permissions:
@@ -131,6 +132,9 @@ jobs:
 
       - name: Build the unikernel application
         run: nix build .#hermit --print-build-logs --out-link result-hermit
+
+      - name: Build the bootable disk image
+        run: nix build .#osImage --print-build-logs --out-link result-osimage
 
       # The loader identifies a Hermit application by its OS/ABI byte, and a
       # fixup phase that "helpfully" rewrote the ELF would produce something
