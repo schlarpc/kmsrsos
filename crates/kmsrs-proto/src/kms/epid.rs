@@ -15,16 +15,46 @@
 
 use crate::kms::layout::PID_BUFFER_UNITS;
 use crate::types::PidSize;
-use arrayvec::ArrayVec;
 
 /// The most UCS-2 code units an ePID can hold, excluding its NUL.
 pub const MAX_EPID_UNITS: usize = PID_BUFFER_UNITS - 1;
 
 /// A host identity, as UCS-2 code units without a terminating NUL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Why a fixed array and a length, and not an `ArrayVec`
+///
+/// `ArrayVec` is the obvious choice and was the first one. Its `Clone` is
+/// implemented by collecting through `Extend`, which panics on overflow — so
+/// cloning an ePID left a reachable `core::panicking` reference in the binary
+/// even though the source and destination have identical capacity and overflow
+/// is impossible. `ARCH-009` (#9) is the check that found it.
+///
+/// An array plus a length makes `Clone` and `Copy` a memcpy with no branch at
+/// all, which is what an ePID is: a bounded name, never grown after
+/// construction. `len` is private, set only by [`EPid::parse`], and never
+/// exceeds [`MAX_EPID_UNITS`].
+#[derive(Debug, Clone, Copy)]
 pub struct EPid {
-    units: ArrayVec<u16, MAX_EPID_UNITS>,
+    /// The name, of which the first `len` units are meaningful. The remainder
+    /// is zero and is never read.
+    units: [u16; MAX_EPID_UNITS],
+    /// How many of `units` are the name.
+    len: usize,
 }
+
+/// Compares the name, not the buffer behind it.
+///
+/// Derived equality would compare all [`MAX_EPID_UNITS`] units. That happens to
+/// give the same answer today, because the unused tail is always zero — but it
+/// would stop doing so the moment anything wrote past `len` and did not clear
+/// up, and a type whose equality depends on invisible padding is a trap.
+impl PartialEq for EPid {
+    fn eq(&self, other: &Self) -> bool {
+        self.units() == other.units()
+    }
+}
+
+impl Eq for EPid {}
 
 /// Why an ePID could not be constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,30 +106,43 @@ impl EPid {
     /// interior NUL, or contains a character outside the basic multilingual
     /// plane.
     pub fn parse(text: &str) -> Result<Self, EPidError> {
-        let mut units = ArrayVec::new();
+        let mut units = [0_u16; MAX_EPID_UNITS];
+        let mut len = 0_usize;
+
         for character in text.chars() {
             if character == '\0' {
                 return Err(EPidError::InteriorNul);
             }
             let mut encoded = [0_u16; 2];
             let encoded = character.encode_utf16(&mut encoded);
-            if encoded.len() != 1 {
+            // Two units means a surrogate pair, which the field cannot hold: it
+            // is UCS-2, not UTF-16, and half a character on the wire is worse
+            // than a refusal.
+            let [unit] = encoded else {
                 return Err(EPidError::NotBasicMultilingualPlane);
-            }
-            for unit in encoded.iter() {
-                units.try_push(*unit).map_err(|_| EPidError::TooLong {
+            };
+            let Some(slot) = units.get_mut(len) else {
+                return Err(EPidError::TooLong {
                     units: text.chars().count(),
                     limit: MAX_EPID_UNITS,
-                })?;
-            }
+                });
+            };
+            *slot = *unit;
+            len = len.saturating_add(1);
         }
-        Ok(Self { units })
+
+        Ok(Self { units, len })
     }
 
     /// The code units, without the terminating NUL.
     #[must_use]
     pub fn units(&self) -> &[u16] {
-        &self.units
+        // `len` never exceeds the array, because only `parse` sets it and only
+        // through a successful `get_mut`. The fallback is unreachable and is
+        // here because "cannot happen" is not something this codebase asserts
+        // at runtime — and because an unreachable `unwrap` would be exactly the
+        // panic `ARCH-009` (#9) exists to keep out of the binary.
+        self.units.get(..self.len).unwrap_or(&[])
     }
 
     /// The value the response's `PIDSize` field declares, including the NUL.
@@ -108,13 +151,13 @@ impl EPid {
         // The constructor cannot build a name longer than the field, so this is
         // total; the fallback is unreachable and exists because "cannot happen"
         // is not something this codebase asserts at runtime.
-        PidSize::for_units(self.units.len()).unwrap_or(PidSize::MAX)
+        PidSize::for_units(self.units().len()).unwrap_or(PidSize::MAX)
     }
 
     /// Bytes this ePID occupies on the wire, including the terminating NUL.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        self.units.len().saturating_add(1).saturating_mul(2)
+        self.units().len().saturating_add(1).saturating_mul(2)
     }
 
     /// Write the ePID to `out` as little-endian UCS-2 with a terminating NUL.
@@ -126,7 +169,7 @@ impl EPid {
         let region = out.get_mut(..needed)?;
         for (slot, unit) in region
             .chunks_exact_mut(2)
-            .zip(self.units.iter().copied().chain(core::iter::once(0_u16)))
+            .zip(self.units().iter().copied().chain(core::iter::once(0_u16)))
         {
             if let Some(pair) = slot.first_chunk_mut::<2>() {
                 *pair = unit.to_le_bytes();
@@ -141,7 +184,7 @@ impl core::fmt::Display for EPid {
     /// lossy path is unreachable for one we produced — but one read back from
     /// another host is not ours to trust.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for character in char::decode_utf16(self.units.iter().copied()) {
+        for character in char::decode_utf16(self.units().iter().copied()) {
             f.write_fmt(format_args!(
                 "{}",
                 character.unwrap_or(char::REPLACEMENT_CHARACTER)

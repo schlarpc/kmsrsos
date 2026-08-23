@@ -22,6 +22,22 @@ jobs:
       - run: nix build
       - run: nix flake check
 
+  # Proof that the sans-io core cannot panic (ARCH-009, #9).
+  #
+  # Its own job for the same reason as `fuzz`: it needs the nightly that
+  # -Zbuild-std requires, which nothing that ships is built with. It is fast —
+  # one bare-metal build of two crates — so it is not matrixed.
+  panic-freedom:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - run: nix develop .#fuzz -c ./panic-audit/audit.sh
+
   # A short fuzzing run on every PR (SEC-004, #196).
   #
   # Separate from `tests` for two reasons. It needs the nightly toolchain that

@@ -23,8 +23,9 @@ members = [
     "crates/kmsrs-os",
     "crates/kmsrs-vectors",
 ]
-# cargo-fuzz keeps its own nightly-only workspace (SEC-004, #196).
-exclude = ["fuzz"]
+# Both need a nightly toolchain the workspace is deliberately not pinned to, so
+# each keeps its own (SEC-004, #196; ARCH-009, #9).
+exclude = ["fuzz", "panic-audit"]
 
 [workspace.package]
 version = "0.1.0"
