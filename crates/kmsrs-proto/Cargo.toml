@@ -8,6 +8,12 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Deterministic entropy sources for tests, fuzzing and differential runs
+# (ARCH-003, #3). Never enabled by a shipped binary: under resolver 3 a
+# dev-dependency turning this on does not turn it on for the binary's build.
+testing = []
+
 [dependencies]
 kmsrs-crypto.workspace = true
 kmsrs-db.workspace = true
