@@ -240,3 +240,14 @@ two numbers are exactly the saturation values the client-count model computes fr
 concept is subsumed rather than dropped: `POL-001` (#89) produces them from observed clients instead
 of from a constant nobody populated. Carrying a dead column would invite someone to populate it later
 with a value that fights the model.
+
+**D35 — A build-time flag reproducing a genuine host's `0xC004D104` client-table refusal
+(`POL-007`, #95).** The issue proposed keeping the refuse path behind a strict flag. Its own reasoning
+rules it out: with per-client views (`POL-001`, #89) the 671-entry cap is never reached in a way that
+matters, and evicting the oldest entry is strictly more compatible than refusing. A flag whose only
+effect is to make the server refuse a request it could have answered is a fingerprint, not a
+hardening measure — the same shape of mistake as `POL-011`'s clock-skew tolerance, which is itself a
+detection oracle. `HResult::InvalidActivationData` remains in the vocabulary so `kmsrs-client` can
+name the code when a *real* host sends one. The neighbouring question for `N_Policy` is left open as
+#283 rather than declined, because a differential test against a genuine host could still turn up a
+divergence there.
