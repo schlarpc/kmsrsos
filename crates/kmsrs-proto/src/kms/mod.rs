@@ -9,7 +9,9 @@ pub mod framing;
 pub mod hresult;
 pub mod layout;
 pub mod request;
+pub mod response;
 pub mod status;
+pub mod validate;
 pub mod version;
 
 pub use epid::EPid;
