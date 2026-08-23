@@ -39,6 +39,11 @@ jobs:
   platforms:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # A ceiling on the whole job, because a hung one costs a runner for six
+    # hours and reports nothing. `.config/nextest.toml` terminates an individual
+    # hung *test* long before this, and names it; this is the backstop for
+    # everything that is not a test.
+    timeout-minutes: 45
     permissions:
       id-token: write
       contents: read
@@ -48,35 +53,44 @@ jobs:
         include:
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
-            build: nix build --print-build-logs
-            test: nix flake check --print-build-logs
-          # Windows has no Nix, so this is rustup and the pinned toolchain from
-          # rust-toolchain.toml — the same version, arrived at differently.
           - name: windows-x86_64
             runner: windows-latest
-            build: cargo build --workspace --all-targets --locked
-            test: cargo test --workspace --locked
     steps:
       - uses: actions/checkout@v7.0.0
 
+      # --- Linux: the whole gate, through the same command a developer runs ---
       - if: runner.os == 'Linux'
         uses: DeterminateSystems/nix-installer-action@v22
       - if: runner.os == 'Linux'
         uses: DeterminateSystems/magic-nix-cache-action@v14
+      - if: runner.os == 'Linux'
+        run: nix build --print-build-logs
+      - if: runner.os == 'Linux'
+        run: nix flake check --print-build-logs
 
-      # `kmsrs-os` is a Hermit binary and does not build for Windows; the
-      # workspace excludes nothing, so the two shipped crates are named.
+      # --- Windows: rustup and the toolchain rust-toolchain.toml pins ---
+      #
+      # No Nix here, so this is the same *version* arrived at differently. What
+      # it catches is a platform difference, and a platform difference shows up
+      # at compile time or in a socket rather than in clippy — which is why this
+      # is a build and a test run rather than the whole gate.
+      #
+      # `kmsrs-os` is a Hermit binary and does not build for Windows, so the two
+      # shipped crates are named rather than `--workspace`.
       - if: runner.os == 'Windows'
         run: rustup show active-toolchain || rustup toolchain install
+      # nextest rather than `cargo test`, for one reason: it has a per-test
+      # timeout and `cargo test` has none. The first Windows run of this matrix
+      # sat in `cargo test` for the better part of an hour, and a job that never
+      # finishes says nothing about which test is wrong.
+      - if: runner.os == 'Windows'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - if: runner.os == 'Windows'
         run: cargo build --locked --package kmsrs-server --package kmsrs-client --all-targets
       - if: runner.os == 'Windows'
-        run: cargo test --locked --package kmsrs-server --package kmsrs-client
-
-      - if: runner.os == 'Linux'
-        run: ${{ matrix.build }}
-      - if: runner.os == 'Linux'
-        run: ${{ matrix.test }}
+        run: cargo nextest run --profile ci --locked --package kmsrs-server --package kmsrs-client
 
   # Hermit (TEST-012, #233) is deliberately absent from that matrix until
   # PKG-013 (#250) has a hermetic Nix build for it. A job that cannot run is

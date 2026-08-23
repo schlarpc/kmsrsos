@@ -1,0 +1,29 @@
+# A hung test must fail, not hang (TEST-012, #233).
+#
+# The failure this exists for is real and was found by it: the platform matrix's
+# first Windows run sat in `cargo test` for the better part of an hour, and a
+# job that never finishes says nothing about which test is wrong. `cargo test`
+# has no per-test timeout at all; nextest does, and it reports the *name* of
+# what it terminated.
+#
+# The window is deliberately generous. The slowest honest test in this workspace
+# is a proptest over the response decoder at about thirteen seconds, so a
+# five-minute ceiling cannot fire on a slow machine and can only fire on
+# something that is not going to finish.
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Every test gets its own process, which is what makes the terminate above
+# surgical: a hung test is killed without taking the rest of the run with it,
+# and a test that touches process-global state cannot reach another.
+test-threads = "num-cpus"
+
+[profile.ci]
+# In CI a flake is worse than a slow run: a failure that nobody can reproduce
+# gets re-run until it passes, which is how a real intermittent bug becomes
+# folklore. One retry, and the report says it was retried.
+retries = 1
+slow-timeout = { period = "60s", terminate-after = 5 }
+failure-output = "immediate-final"
+fail-fast = false

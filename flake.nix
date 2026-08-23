@@ -80,7 +80,9 @@
             || (builtins.match ".*/deny\\.toml" path != null)
             || (builtins.match ".*/deploy(/.*)?" path != null)
             || (builtins.match ".*/docs(/.*)?" path != null)
-            || (builtins.match ".*/ci(/.*)?" path != null);
+            || (builtins.match ".*/ci(/.*)?" path != null)
+            # nextest's profile, which decides the timeouts a test run uses.
+            || (builtins.match ".*/\\.config(/.*)?" path != null);
         };
 
       commonArgsFor = system:
