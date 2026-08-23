@@ -345,7 +345,7 @@ mod tests {
         // the caller's intent rather than a panic or a wrapped span.
         assert_eq!(source.uniform_in_inclusive_range(7, 3).unwrap(), 7);
         // Full u32 width: `span + 1` overflows, and the fallback must not.
-        let _ = source.uniform_in_inclusive_range(0, u32::MAX).unwrap();
+        let _: u32 = source.uniform_in_inclusive_range(0, u32::MAX).unwrap();
     }
 
     #[test]

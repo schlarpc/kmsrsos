@@ -205,7 +205,7 @@ mod tests {
         // Every u32 must produce an answer rather than a panic: the field is
         // attacker-controlled and unvalidated until here (`SEC-003`, #195).
         for raw in [0_u32, u32::MAX, 0x0007_0000, 0xFFFF_0000] {
-            let _ = ProtocolVersion::from_wire(raw).supported();
+            let _: Option<Version> = ProtocolVersion::from_wire(raw).supported();
         }
     }
 

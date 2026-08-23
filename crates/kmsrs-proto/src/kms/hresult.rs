@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn every_wire_value_decodes() {
         for raw in [0_u32, 1, u32::MAX, 0x8000_0000, 0xC004_0000] {
-            let _ = HResult::from_wire(raw).description();
+            let _: &str = HResult::from_wire(raw).description();
         }
     }
 }

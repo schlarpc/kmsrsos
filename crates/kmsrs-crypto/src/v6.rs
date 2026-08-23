@@ -365,9 +365,12 @@ mod tests {
     fn extreme_timestamps_do_not_panic() {
         for ticks in [0_u64, 1, u64::MAX, u64::MAX - 1, TIME_C1, TIME_C1 - 1] {
             for offset in SlotOffset::ALL {
-                let _ = time_slot(ticks, offset);
-                let _ = time_slot_key(ticks, offset);
-                let _ = tag(ticks, offset, b"message");
+                // Typed, because the point is that these return at all: an
+                // untyped `let _` is what `SEC-012` (#204) forbids, and saying
+                // what is being discarded is the whole of the difference.
+                let _: u64 = time_slot(ticks, offset);
+                let _: [u8; 16] = time_slot_key(ticks, offset);
+                let _: [u8; 16] = tag(ticks, offset, b"message");
             }
         }
     }

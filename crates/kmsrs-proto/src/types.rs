@@ -236,8 +236,12 @@ impl WorkstationName {
         for character in char::decode_utf16(terminated.iter().copied()) {
             let character = character.unwrap_or(char::REPLACEMENT_CHARACTER);
             // The capacity is computed to fit the worst case, so this cannot
-            // fail; ignoring the error keeps the function total either way.
-            let _ = decoded.try_push(character);
+            // fail. Stopping keeps the function total if it ever does, and is
+            // written out rather than discarded so the discarded form can be
+            // forbidden outright (`SEC-012`, #204).
+            if decoded.try_push(character).is_err() {
+                break;
+            }
         }
         Self(decoded)
     }
