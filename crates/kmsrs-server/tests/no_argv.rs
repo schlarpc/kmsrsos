@@ -14,21 +14,96 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    clippy::arithmetic_side_effects,
     reason = "test code: a failed expectation should abort loudly"
 )]
 
-use std::process::{Command, Output};
+use core::time::Duration;
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
 
-/// Run the binary with the given arguments and environment.
-fn run(args: &[&str], config: Option<&str>) -> Output {
+/// Exit code for arguments that should not have been passed.
+const EXIT_BAD_USAGE: i32 = 64;
+/// Exit code for a configuration the binary could not understand.
+const EXIT_BAD_CONFIG: i32 = 78;
+
+/// What the binary did when it was started.
+#[derive(Debug)]
+struct Started {
+    /// Its exit code, or `None` if it was still running when we gave up
+    /// waiting — which for this binary means it got as far as serving.
+    code: Option<i32>,
+    /// Everything it wrote to stderr before then.
+    stderr: String,
+}
+
+impl Started {
+    /// Whether it rejected its input rather than starting up.
+    fn rejected(&self) -> bool {
+        matches!(self.code, Some(EXIT_BAD_USAGE | EXIT_BAD_CONFIG))
+    }
+}
+
+/// Start the binary and see what it does.
+///
+/// The binary **serves until signalled**, so waiting for it to exit is not an
+/// option: a successful start-up never returns. Instead it is given a short
+/// window to reject its input, and killed if it does not — reaching the point
+/// of serving *is* the success condition.
+///
+/// Note what is deliberately not asserted: that it bound a port. Several of
+/// these tests run in parallel and would contend for 1688, and binding is not
+/// what `CFG-002` (#167) or `CFG-007` (#172) are about. A bind failure exits
+/// with a third code, which `rejected` does not count.
+fn start(args: &[&str], config: Option<&str>) -> Started {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kmsrsos"));
     command.args(args);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
     // Never inherit the caller's setting, so the test says what it means.
     command.env_remove("KMSRSOS_CONFIG");
     if let Some(document) = config {
         command.env("KMSRSOS_CONFIG", document);
     }
-    command.output().expect("the binary runs")
+
+    let mut child = command.spawn().expect("the binary runs");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
+    // Drain stderr on another thread: a binary that keeps running would
+    // otherwise be able to fill the pipe buffer and block.
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+
+    let code = wait_briefly(&mut child);
+    if code.is_none() {
+        // Still running, which means it got past configuration and is serving.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let stderr = reader.join().unwrap_or_default();
+    Started { code, stderr }
+}
+
+/// Wait a short while for the process to exit.
+///
+/// Three seconds, because the two outcomes are not symmetric: configuration is
+/// parsed before anything slow happens, so a rejection is immediate, while
+/// "still running" is the success condition and waiting longer cannot change
+/// it. A short window can only ever cost a false *success*, and there is no
+/// path on which rejection takes seconds.
+fn wait_briefly(child: &mut Child) -> Option<i32> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.code().unwrap_or(-1)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// `CFG-007` (#172): any argument at all is an error, and the error names what
@@ -45,41 +120,39 @@ fn any_argument_is_refused_and_named() {
         vec!["--log-level", "debug"],
         vec![""],
     ] {
-        let output = run(&args, None);
-        assert!(
-            !output.status.success(),
-            "{args:?} was accepted, which means it was silently ignored"
+        let started = start(&args, None);
+        assert_eq!(
+            started.code,
+            Some(EXIT_BAD_USAGE),
+            "{args:?} was not refused as a usage error: {}",
+            started.stderr
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("takes no arguments"),
-            "{args:?} produced an unhelpful message: {stderr}"
+            started.stderr.contains("takes no arguments"),
+            "{args:?} produced an unhelpful message: {}",
+            started.stderr
         );
         // The message points at the one thing that *is* settable, so the
         // operator is not left guessing.
         assert!(
-            stderr.contains("KMSRSOS_CONFIG"),
-            "{args:?} did not say what is settable: {stderr}"
+            started.stderr.contains("KMSRSOS_CONFIG"),
+            "{args:?} did not say what is settable: {}",
+            started.stderr
         );
     }
 }
 
-/// No arguments is the supported invocation.
+/// No arguments is the supported invocation, and `CFG-002` (#167): an unset
+/// variable means the compiled-in defaults rather than an error.
 #[test]
-fn no_arguments_is_accepted() {
-    let output = run(&[], None);
+fn no_arguments_and_no_configuration_is_the_supported_invocation() {
+    let started = start(&[], None);
     assert!(
-        output.status.success(),
-        "the supported invocation failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !started.rejected(),
+        "the supported invocation was refused ({:?}): {}",
+        started.code,
+        started.stderr
     );
-}
-
-/// `CFG-002` (#167): unset means compiled-in defaults.
-#[test]
-fn an_unset_config_variable_is_not_an_error() {
-    let output = run(&[], None);
-    assert!(output.status.success());
 }
 
 /// `CFG-002` (#167) and `CFG-005` (#170): malformed or unknown is fatal,
@@ -95,15 +168,17 @@ fn a_bad_configuration_exits_non_zero_and_says_why() {
         ("event-log-capacity = 0", "event-log-capacity"),
         ("event-retention-days = 4000", "event-retention-days"),
     ] {
-        let output = run(&[], Some(document));
-        assert!(
-            !output.status.success(),
-            "{document:?} started the server anyway"
+        let started = start(&[], Some(document));
+        assert_eq!(
+            started.code,
+            Some(EXIT_BAD_CONFIG),
+            "{document:?} did not exit as a configuration error: {}",
+            started.stderr
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains(expected),
-            "{document:?} produced {stderr}, which does not mention {expected}"
+            started.stderr.contains(expected),
+            "{document:?} produced {}, which does not mention {expected}",
+            started.stderr
         );
     }
 }
@@ -112,7 +187,7 @@ fn a_bad_configuration_exits_non_zero_and_says_why() {
 /// everything.
 #[test]
 fn a_good_configuration_is_accepted() {
-    let output = run(
+    let started = start(
         &[],
         Some(
             r#"
@@ -124,14 +199,10 @@ fn a_good_configuration_is_accepted() {
         ),
     );
     assert!(
-        output.status.success(),
-        "a valid document was refused: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Debug"),
-        "the setting took effect: {stderr}"
+        !started.rejected(),
+        "a valid document was refused ({:?}): {}",
+        started.code,
+        started.stderr
     );
 }
 
@@ -139,9 +210,9 @@ fn a_good_configuration_is_accepted() {
 /// "you told me something wrong" from "something went wrong".
 #[test]
 fn usage_and_configuration_failures_are_distinguishable() {
-    let usage = run(&["--help"], None).status.code();
-    let config = run(&[], Some("nonsense")).status.code();
-    assert_eq!(usage, Some(64));
-    assert_eq!(config, Some(78));
+    let usage = start(&["--help"], None).code;
+    let config = start(&[], Some("nonsense")).code;
+    assert_eq!(usage, Some(EXIT_BAD_USAGE));
+    assert_eq!(config, Some(EXIT_BAD_CONFIG));
     assert_ne!(usage, config);
 }

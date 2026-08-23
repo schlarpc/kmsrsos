@@ -20,6 +20,8 @@ kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 serde.workspace = true
 toml.workspace = true
+ctrlc.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
 # Deterministic entropy for the host-state tests. Enabling `testing` here does
