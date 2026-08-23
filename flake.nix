@@ -181,6 +181,29 @@
         strictClockSkew = false;
       };
 
+      # --- The build stamp (CFG-008, #173) ---
+      #
+      # Which build this is: the version, the source revision, and the source
+      # date. All three reach the binary through `option_env!`, so they are
+      # compile-time constants and there is no build script shelling out to
+      # `git` — which would make the build depend on the machine that ran it.
+      #
+      # `self.rev` is the flake's own locked revision, and `self.lastModified`
+      # is the source date rather than the build date. That distinction is the
+      # whole issue: vlmcsd bakes `date +%s` into every build, so two builds of
+      # one revision differ — and there the value is load-bearing, being the
+      # upper bound of its randomised ePID activation date.
+      #
+      # A dirty tree has no revision, so `dirtyRev` is used and Nix suffixes it
+      # `-dirty`. A checkout with no git metadata at all reports "unknown",
+      # which is a value rather than a failure: the stamp is diagnostic, and a
+      # binary that refused to start over it would be a worse failure than an
+      # unlabelled one.
+      stampEnv = {
+        KMSRSOS_GIT_COMMIT = self.rev or self.dirtyRev or "unknown";
+        SOURCE_DATE_EPOCH = toString (self.lastModified or 0);
+      };
+
       settingsEnvFor = settings:
         (if settings.activationInterval == null then { } else {
           KMSRSOS_ACTIVATION_INTERVAL = toString settings.activationInterval;
@@ -270,7 +293,7 @@
             pname = "kmsrsos-static";
           });
 
-          buildOne = { pname, package }: craneLib.buildPackage (commonArgs // settingsEnv // static // {
+          buildOne = { pname, package }: craneLib.buildPackage (commonArgs // stampEnv // settingsEnv // static // {
             inherit pname;
             cargoArtifacts = if static == { } then cargoArtifacts else staticArtifacts;
             doCheck = false;
@@ -370,7 +393,7 @@
         in
         {
           # The whole workspace, which is what a developer means by `nix build`.
-          default = craneLib.buildPackage (commonArgs // {
+          default = craneLib.buildPackage (commonArgs // stampEnv // {
             inherit cargoArtifacts;
             doCheck = false;
           });
@@ -387,9 +410,10 @@
           container = configured.container;
 
           # Cross-compiled Windows binaries: `nix build .#windows`
-          windows = craneLib.buildPackage ((windowsArgsFor system) // {
+          windows = craneLib.buildPackage ((windowsArgsFor system) // stampEnv // {
             cargoArtifacts = windowsCargoArtifactsFor system;
           });
+
         });
 
       checks = eachSystem (system:
@@ -418,8 +442,33 @@
             partitionType = "count";
           });
 
+          # `TEST-015` (#236): a floor under the crates where a gap is a
+          # protocol bug nobody sees.
+          #
+          # The gate is on `kmsrs-proto`, `kmsrs-policy` and `kmsrs-crypto`
+          # only, and that is the point rather than a convenience. Those three
+          # are sans-io: every one of their branches is reachable from a byte
+          # array, so an uncovered line there is a line no test ever asked
+          # about — unlike `kmsrs-server`, where the uncovered lines are error
+          # paths that need a socket to fail in a particular way.
+          #
+          # 90 %, against roughly 94 % today. A threshold set at the current
+          # number is a threshold that fails on the next honest refactor and
+          # then gets lowered; this one has room to move and still catches a
+          # feature that arrived without tests.
           coverage = craneLib.cargoLlvmCov (commonArgs // {
             inherit cargoArtifacts;
+            cargoLlvmCovExtraArgs = builtins.concatStringsSep " " [
+              # crane's default, restated because setting this attribute
+              # replaces it rather than adding to it — and without it the
+              # derivation produces no output and fails after the gate has
+              # already passed, which is a confusing way to be broken.
+              "--lcov --output-path $out"
+              "--package kmsrs-proto"
+              "--package kmsrs-policy"
+              "--package kmsrs-crypto"
+              "--fail-under-lines 90"
+            ];
           });
 
           # The build-time policy flags (POL-010, #98; POL-011, #99). They
@@ -498,7 +547,12 @@
               pkgs.cargo-expand
               pkgs.cargo-xwin
               nix-direnv.packages.${system}.default
-            ];
+            ]
+            # `SEC-006` (#198): `ci/no-file-access.sh` runs the real binary
+            # under `strace` and fails on any successful open outside the
+            # loader. Linux only, because that is the only place strace exists
+            # and the only place the check runs.
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.strace;
 
             RUST_BACKTRACE = "1";
             RUST_LOG = "debug";
