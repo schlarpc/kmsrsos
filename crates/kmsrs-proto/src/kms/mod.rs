@@ -5,9 +5,12 @@
 //! is about what is inside the stub.
 
 pub mod hresult;
+pub mod layout;
+pub mod request;
 pub mod status;
 pub mod version;
 
 pub use hresult::HResult;
+pub use request::{Request, RequestError};
 pub use status::LicenseStatus;
 pub use version::{ProtocolVersion, Version};
