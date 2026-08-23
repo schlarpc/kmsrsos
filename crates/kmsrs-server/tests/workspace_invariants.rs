@@ -334,6 +334,66 @@ fn every_declared_feature_is_referenced_in_source() {
     );
 }
 
+/// `SEC-011` (#203): exactly one type in the shipped tree can be built from a
+/// serialised document, and it is the one the escape hatch names.
+///
+/// py-kms unpickles a configuration from a world-writable temp directory on
+/// `stop` and `status`. That is local arbitrary code execution as whoever runs
+/// the command, and it is not a bug in the pickle call — it is the consequence
+/// of there being *any* deserialisation of *anything* that did not come off the
+/// wire. The defence is structural: if `Deserialize` appears on one type in one
+/// file, there is nowhere else for such a path to hide.
+///
+/// Checked by reading the source rather than by reflection, because the
+/// property is "no such code exists" and only the source can answer that. Its
+/// other half — that there is nothing to deserialise *from* — is
+/// `no_shipped_crate_touches_the_filesystem` below: a deserialiser with no
+/// input is inert, so the two together leave the escape hatch's environment
+/// variable as the only way in, and a local attacker who can set that can
+/// already do worse than change a log format.
+#[test]
+fn only_the_operational_config_can_be_deserialised() {
+    let root = workspace_root();
+    let mut offenders: Vec<String> = Vec::new();
+
+    for (name, manifest) in crate_manifests(&root) {
+        if name == QUARANTINED_CRATE {
+            continue;
+        }
+        let Some(source) = manifest.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        for (path, text) in rust_sources_with_paths(&source) {
+            // The doc comments in `config/` discuss `Deserialize` at length,
+            // which is the point of them; what matters is the derive.
+            let derives_it = text.lines().any(|line| {
+                let line = line.trim();
+                !line.starts_with("//")
+                    && (line.contains("derive(") && line.contains("Deserialize")
+                        || line.contains("impl") && line.contains("Deserialize for"))
+            });
+            if derives_it {
+                offenders.push(path.display().to_string());
+            }
+        }
+    }
+
+    let expected = ["operational.rs"];
+    let unexpected: Vec<&String> = offenders
+        .iter()
+        .filter(|path| !expected.iter().any(|allowed| path.ends_with(allowed)))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "these files derive `Deserialize` outside the one type the escape hatch          names (`CFG-002`, #167). Every one is a path from a document to a          program state, which is the shape of the py-kms unpickle: {unexpected:?}"
+    );
+    assert!(
+        !offenders.is_empty(),
+        "no file derives `Deserialize` at all, so this test is not looking at          the right tree and would pass if one were added"
+    );
+}
+
 /// Every `.rs` file under a directory, read into memory.
 fn rust_sources(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
