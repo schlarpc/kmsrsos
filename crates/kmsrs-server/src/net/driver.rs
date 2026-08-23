@@ -43,6 +43,7 @@ use crate::server::Server;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
+use kmsrs_policy::access::{Admission, RateLimiter};
 use kmsrs_policy::events::Peer;
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::time::Instant;
@@ -246,7 +247,7 @@ impl Shutdown {
 /// truncates a response — the client then sees a malformed PDU and blames the
 /// protocol.
 fn serve_connection(
-    server: &Mutex<Server>,
+    runtime: &Runtime,
     stream: &mut TcpStream,
     peer: SocketAddr,
     strategy: ReadStrategy,
@@ -254,6 +255,7 @@ fn serve_connection(
     started: Instant,
     clock: &dyn Fn() -> Instant,
 ) -> io::Result<()> {
+    let server = &runtime.server;
     let mut connection = {
         let guard = server.lock().map_err(poisoned)?;
         guard.connection(0x1234_5678)
@@ -262,6 +264,9 @@ fn serve_connection(
     let mut buffer = [0_u8; 8192];
     let mut consumed = 0_usize;
     let mut last_progress = clock();
+    // The application this connection last asked about, for the rate-limit
+    // key. Zero until the first request has been decoded.
+    let mut last_application = kmsrs_db::Guid::ZERO;
 
     loop {
         let now = clock();
@@ -300,6 +305,32 @@ fn serve_connection(
             return Ok(());
         }
 
+        // `POL-014` (#102): one token per read that carries work, keyed on
+        // (source, application). Checked here rather than at accept because a
+        // connection is not the unit of abuse — a single connection can carry
+        // any number of requests.
+        //
+        // The application is not known until the request is decoded, so the
+        // bucket is keyed on the *previous* request's application on this
+        // connection, or the zero GUID for the first. That is deliberate: a
+        // client cannot game it by varying the field, because the key it lands
+        // in was fixed before it chose.
+        {
+            let mut limiter = runtime.limiter.lock().map_err(poisoned)?;
+            if let Admission::Limited { retry_after } =
+                limiter.admit(peer.ip(), last_application, now)
+            {
+                if let Ok(guard) = server.lock() {
+                    guard.logger().message(
+                        crate::log::Severity::Warn,
+                        "rate-limited",
+                        &format!("{}: retry in {}s", peer.ip(), retry_after.as_secs()),
+                    );
+                }
+                return Ok(());
+            }
+        }
+
         let handled = {
             let mut guard = server.lock().map_err(poisoned)?;
             let mut entropy = entropy.lock().map_err(poisoned)?;
@@ -322,6 +353,14 @@ fn serve_connection(
         if !handled.response.is_empty() {
             write_all(stream, &handled.response, strategy, clock, started)?;
         }
+        // Remember what this connection is about, for the next request's
+        // rate-limit key.
+        if let Ok(guard) = server.lock()
+            && let Some(event) = guard.host().events().iter().next_back()
+        {
+            last_application = event.application.0;
+        }
+
         if handled.close {
             return Ok(());
         }
@@ -381,6 +420,8 @@ pub struct Runtime {
     pub capacity: Capacity,
     /// The stop signal (`NET-007`, #157).
     pub shutdown: Shutdown,
+    /// Per-source token buckets (`POL-014`, #102).
+    pub limiter: Mutex<RateLimiter>,
 }
 
 impl Runtime {
@@ -391,6 +432,22 @@ impl Runtime {
             server: Mutex::new(server),
             capacity: Capacity::new(limit),
             shutdown: Shutdown::new(),
+            limiter: Mutex::new(RateLimiter::new()),
+        }
+    }
+
+    /// The same, with an explicit rate limiter.
+    ///
+    /// For tests, which need a burst small enough to reach in a few requests —
+    /// the shipped burst is deliberately large enough that a NAT-ted site does
+    /// not trip it (`POL-014`, #102).
+    #[must_use]
+    pub fn with_limiter(server: Server, limit: usize, limiter: RateLimiter) -> Self {
+        Self {
+            server: Mutex::new(server),
+            capacity: Capacity::new(limit),
+            shutdown: Shutdown::new(),
+            limiter: Mutex::new(limiter),
         }
     }
 }
@@ -469,6 +526,33 @@ fn accept_loop(
             // `NET-012` (#161): one client, one identity, from the moment it
             // arrives.
             let peer = normalise_socket(peer);
+
+            // `POL-013` (#101): the access list is checked here, before any RPC
+            // state exists — so a refused peer never reaches the parser, and
+            // the gate cannot be bypassed by anything in the protocol.
+            //
+            // A blocked attempt is an event, not a silent drop (`POL-014`,
+            // #102): the connection is closed and the reason is logged, so an
+            // operator debugging "why can this client not activate" has an
+            // answer.
+            {
+                let access = runtime
+                    .server
+                    .lock()
+                    .map(|server| server.compiled().access)
+                    .unwrap_or_default();
+                if let Err(denial) = access.check(peer.ip()) {
+                    if let Ok(server) = runtime.server.lock() {
+                        server.logger().message(
+                            crate::log::Severity::Warn,
+                            "blocked",
+                            &format!("{}: {denial:?}", peer.ip()),
+                        );
+                    }
+                    drop(stream);
+                    continue;
+                }
+            }
             scope.spawn(move || {
                 let _permit = permit;
                 let mut stream = stream;
@@ -477,7 +561,7 @@ fn accept_loop(
                 };
                 let started = clock();
                 let _ = serve_connection(
-                    &runtime.server,
+                    runtime,
                     &mut stream,
                     peer,
                     strategy,
