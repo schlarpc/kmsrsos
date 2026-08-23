@@ -58,11 +58,27 @@ const STATE_WORDS: usize = BLOCK_LEN / 4;
 /// `Nr = Nk + 6 = 11`.
 const MAX_ROUNDS: usize = 11;
 
+/// The fewest key words any constructor here uses: `Nk = 4`, AES-128.
+const MIN_KEY_WORDS: usize = 4;
+
+/// The most: `Nk = 5`, Rijndael-160.
+const MAX_KEY_WORDS: usize = 5;
+
 /// Round constants, `x^(i-1)` in GF(2^8), indexed from 1.
 ///
-/// Index 0 is never used; it is present so the array is indexed by the round
-/// number rather than by the round number minus one.
-const ROUND_CONSTANTS: [u32; MAX_ROUNDS] = [
+/// Two entries are never read, and both exist to make an index provably in
+/// range rather than merely in range.
+///
+/// * **Index 0** so the array is indexed by the round number itself rather than
+///   by the round number minus one.
+/// * **Index 11** because the expansion indexes this by `i / Nk`, and the
+///   largest `i` the loop reaches is `Nb * (Nr + 1) - 1`. With `Nk = 4` that is
+///   43, giving 10; with `Nk = 5` it is 47, giving 9. But the optimiser cannot
+///   see that `i` and `Nk` are correlated, so from its side the quotient is
+///   bounded only by `47 / 4 = 11` — and one unread entry is a better way to
+///   discharge that than a `min` that never binds or an `unwrap_or` that would
+///   return a wrong key. See `ARCH-009` (#9).
+const ROUND_CONSTANTS: [u32; MAX_ROUNDS + 1] = [
     0x0000_0000,
     0x0100_0000,
     0x0200_0000,
@@ -74,6 +90,7 @@ const ROUND_CONSTANTS: [u32; MAX_ROUNDS] = [
     0x8000_0000,
     0x1B00_0000,
     0x3600_0000,
+    0x0000_0000,
 ];
 
 /// Multiply by `x` in GF(2^8) modulo the AES polynomial `x^8 + x^4 + x^3 + x + 1`.
@@ -238,12 +255,25 @@ impl KeySchedule {
     /// key length Rijndael does not define is unrepresentable rather than
     /// rejected at runtime (axiom A2).
     fn expand(key: &[u8], key_words: usize) -> Self {
+        // Only 4 and 5 are constructible — `expand` is private and the three
+        // constructors above pass literals — but the optimiser cannot see that
+        // from inside this function. Saying it here is what makes every index
+        // below provably in range rather than merely in range, which is the
+        // difference between a bounds check the compiler removes and one that
+        // survives into the binary as a panic (`ARCH-009`, #9). The clamp never
+        // binds; a debug build with a fourth constructor passing 6 would still
+        // produce a wrong schedule, and that is a compile-time-visible mistake
+        // in a private function rather than a runtime one.
+        let key_words = key_words.clamp(MIN_KEY_WORDS, MAX_KEY_WORDS);
         let rounds = key_words + 6;
-        let total_words = STATE_WORDS * (rounds + 1);
 
         let mut words = [0_u32; STATE_WORDS * (MAX_ROUNDS + 1)];
-        for (index, chunk) in key.chunks_exact(4).enumerate() {
-            words[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let total_words = (STATE_WORDS * (rounds + 1)).min(words.len());
+
+        // `zip` rather than an index, so the first `Nk` words carry no bounds
+        // check at all: the shorter of the two iterators ends the loop.
+        for (slot, chunk) in words.iter_mut().zip(key.chunks_exact(4)) {
+            *slot = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
 
         for index in key_words..total_words {
@@ -255,10 +285,9 @@ impl KeySchedule {
         }
 
         let mut round_keys = [[0_u8; BLOCK_LEN]; MAX_ROUNDS + 1];
-        for round in 0..=rounds {
-            for column in 0..STATE_WORDS {
-                let bytes = words[round * STATE_WORDS + column].to_be_bytes();
-                round_keys[round][column * 4..column * 4 + 4].copy_from_slice(&bytes);
+        for (round, round_key) in round_keys.iter_mut().enumerate().take(rounds + 1) {
+            for (column, slot) in round_key.chunks_exact_mut(4).enumerate() {
+                slot.copy_from_slice(&words[round * STATE_WORDS + column].to_be_bytes());
             }
         }
 
@@ -267,9 +296,16 @@ impl KeySchedule {
 
     /// Encrypt one block in place.
     pub fn encrypt_block(&self, block: &mut [u8; BLOCK_LEN]) {
+        // `self.rounds` is 10 or 11 by construction, but it is a plain `usize`
+        // field and the optimiser has no way to know its range at a call site
+        // that only has a `&KeySchedule`. Restating the bound costs one
+        // comparison the branch predictor never sees again, and removes the
+        // bounds check that would otherwise survive as a panic (`ARCH-009`, #9)
+        // — which on Hermit means a panic that kills the VM (`OS-013`, #264).
+        let rounds = self.rounds.min(MAX_ROUNDS);
         add_round_key(block, &self.round_keys[0]);
 
-        for round in 1..self.rounds {
+        for round in 1..rounds {
             substitute(block, &SBOX);
             shift_rows(block);
             mix_columns(block);
@@ -278,14 +314,16 @@ impl KeySchedule {
 
         substitute(block, &SBOX);
         shift_rows(block);
-        add_round_key(block, &self.round_keys[self.rounds]);
+        add_round_key(block, &self.round_keys[rounds]);
     }
 
     /// Decrypt one block in place.
     pub fn decrypt_block(&self, block: &mut [u8; BLOCK_LEN]) {
-        add_round_key(block, &self.round_keys[self.rounds]);
+        // As in `encrypt_block`.
+        let rounds = self.rounds.min(MAX_ROUNDS);
+        add_round_key(block, &self.round_keys[rounds]);
 
-        for round in (1..self.rounds).rev() {
+        for round in (1..rounds).rev() {
             inverse_shift_rows(block);
             substitute(block, &INVERSE_SBOX);
             add_round_key(block, &self.round_keys[round]);
