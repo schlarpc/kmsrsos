@@ -519,9 +519,48 @@ bridge even on q35 — and **never** emits `disable-legacy=on`; there are zero o
 `qemu-server`. QEMU therefore presents a *transitional* virtio-net device with PCI ID `0x1000`, and
 Hermit refuses anything below `0x1040`.
 
-That chain is solid link-by-link from the sources and has **never been observed**, which is what #255
-is for. If it does fail, the serial console will say so on the first boot — which is the other reason
-to attach one before that boot rather than after.
+That chain was solid link-by-link from the sources and had never been observed. It has now been
+observed — not on Proxmox, but on a QEMU given exactly the device topology `qemu-server` emits, which
+is what the `hermit-proxmox-topology` check in `nix flake check` runs on every change:
+
+```
+02:12 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1AF4:1000], IRQ 11, …
+Found virtio device with device id 0x1000
+Legacy/transitional Virtio device, with id: 0x1000 is NOT supported, skipping!
+Could not initialize virtio-pci device: Virtio driver failed: DevNotSupported(4096)
+…
+{"level":"error","event":"bind","detail":"no address could be bound:
+  0.0.0.0:1688: Network is down (os error 100)"}
+exit status 69
+```
+
+Two things are worth reading twice. The device ID really is `0x1000` rather than `0x1041`, which is
+the whole prediction. And **the guest exits 69 and says why** rather than sitting there having bound
+nothing — a VM that looks up and answers nothing is the failure that costs an afternoon, and this
+one does not happen.
+
+#255 stays open until the same log comes off real Proxmox hardware, because a reproduction of the
+topology is not a reproduction of the product.
+
+#### The workaround
+
+Proxmox has no GUI field for this, but `qm set` can append raw QEMU arguments:
+
+```shell
+$ qm set <vmid> --args '-set device.net0.disable-legacy=on'
+```
+
+That has been tested on the reproduced topology and it works: the device becomes `[1AF4:1041]`, the
+driver attaches, DHCP completes and the host serves. It is not pretty, and it is one line.
+
+`rtl8139` is the other documented fallback and this build **cannot** use it: the kernel's feature set
+is pinned and does not include that driver (`OS-006`, #257). Taking it would mean a second kernel
+build, and the argument against is that it trades a one-line VM setting for a second artefact that
+has to be tested separately. If Proxmox ever makes `disable-legacy` unavailable, that is the point at
+which to reconsider.
+
+Whichever route, the serial console says which one happened on the first boot — the other reason to
+attach one before that boot rather than after.
 
 ---
 

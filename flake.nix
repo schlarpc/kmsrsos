@@ -648,6 +648,124 @@
           cp "$serial" $out/serial.log
         '';
 
+      # --- The Proxmox PCI topology, reproduced (OS-004, #255) ---
+      #
+      # `OS-004` is a prediction: Proxmox always places NICs on a conventional
+      # PCI bus — `pci.0` is a `pci-bridge` behind an i82801b11 bridge even on
+      # q35 — and never emits `disable-legacy=on`, of which there are zero
+      # occurrences in `qemu-server`. QEMU therefore presents a *transitional*
+      # virtio-net device with PCI ID 0x1000, and Hermit refuses anything below
+      # 0x1040.
+      #
+      # The prediction was solid link-by-link from the sources and had never
+      # been observed. This check observes it, by giving QEMU exactly the device
+      # topology `qemu-server` emits. It is not a Proxmox boot and does not
+      # close #255, which wants a serial log from real hardware — but it does
+      # mean the deployment guide is describing something that has been seen.
+      #
+      # It asserts three things, and the middle one is the reason the whole
+      # section of the guide exists:
+      #
+      #   1. On the Proxmox topology the device is rejected, so the guest has no
+      #      network at all.
+      #   2. The program **refuses to start** and says why, with exit 69. It
+      #      does not sit there having bound nothing. That is `NET-001` (#150)
+      #      doing its job on the one platform where nobody would notice.
+      #   3. `disable-legacy=on` on the same topology fixes it, which is what
+      #      makes `qm set --args` a real workaround rather than a hope.
+      #
+      # If (1) starts passing — a kernel that grew transitional support, or a
+      # Proxmox that started emitting the flag — this check fails, and that is
+      # correct: the guide would then be wrong.
+      hermitProxmoxCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+
+          # Exactly what `qemu-server` emits for a q35 VM with one virtio NIC.
+          proxmoxTopology = builtins.concatStringsSep " " [
+            "-device i82801b11-bridge,id=pci.1,bus=pcie.0,addr=0x1e"
+            "-device pci-bridge,id=pci.0,chassis_nr=1,bus=pci.1,addr=0x1"
+            "-netdev user,id=u1"
+            "-device virtio-net-pci,netdev=u1,bus=pci.0,addr=0x12,id=net0"
+          ];
+        in
+        pkgs.runCommand "hermit-proxmox-topology"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 600;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          run() {
+            local name="$1"; shift
+            qemu-system-x86_64 \
+              -machine q35 \
+              -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$PWD/$name.log" \
+              -kernel ${hermit-loader-multiboot} \
+              -initrd ${configured.hermit}/bin/kmsrsos-hermit \
+              ${proxmoxTopology} "$@" &
+            local qemu=$!
+
+            # Both outcomes are quick: the guest either reaches its listener or
+            # exits. Waiting on the process is wrong for the success case — it
+            # serves forever — so this waits for the log to settle instead.
+            local attempt
+            for attempt in $(seq 1 60); do
+              if grep -qE 'event":"listening|event":"bind' "$PWD/$name.log" \
+                   2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$PWD/$name.log" $out/$name.log
+          }
+
+          # --- 1. As Proxmox would start it ---
+          run proxmox
+
+          grep -q "Legacy/transitional Virtio device" $out/proxmox.log || {
+            echo "Hermit accepted the transitional virtio-net device that \
+          Proxmox's topology produces. That is good news and it means \
+          docs/deployment.md is now wrong (OS-004, #255)." >&2
+            cat $out/proxmox.log >&2
+            exit 1
+          }
+
+          # 2. And the program says so rather than serving nothing.
+          grep -q '"event":"bind"' $out/proxmox.log || {
+            echo "the guest had no network but did not report a bind failure \
+          (NET-001, #150)" >&2
+            cat $out/proxmox.log >&2
+            exit 1
+          }
+          if grep -q '"event":"listening"' $out/proxmox.log; then
+            echo "the guest claims to be listening with no network device" >&2
+            cat $out/proxmox.log >&2
+            exit 1
+          fi
+
+          # --- 3. The documented workaround, on the same topology ---
+          run workaround -set device.net0.disable-legacy=on
+
+          grep -q '"event":"listening"' $out/workaround.log || {
+            echo "disable-legacy=on no longer rescues the Proxmox topology, so \
+          the workaround in docs/deployment.md is not one (OS-004, #255)" >&2
+            cat $out/workaround.log >&2
+            exit 1
+          }
+          grep -q "DHCP config acquired" $out/workaround.log || {
+            echo "the rescued device came up but acquired no lease" >&2
+            cat $out/workaround.log >&2
+            exit 1
+          }
+        '';
+
       # --- Booting the disk image (OS-002, #253) ---
       #
       # `hermit-boot` proves the program runs on Hermit. This proves the
@@ -1282,6 +1400,11 @@
           # `OS-002` (#253): and the *image* boots, from firmware, with nothing
           # on the command line — plus the bootargs file on its ESP is honoured.
           hermit-image-boot = hermitImageBootCheckFor system;
+
+          # `OS-004` (#255): on the device topology Proxmox emits, virtio-net
+          # is rejected, the program refuses to start rather than serving
+          # nothing, and `disable-legacy=on` rescues it.
+          hermit-proxmox-topology = hermitProxmoxCheckFor system;
 
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
