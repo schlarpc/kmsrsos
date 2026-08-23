@@ -74,6 +74,8 @@
             || (builtins.match ".*/crates/kmsrs-db/data(/.*)?" path != null)
             || (builtins.match ".*/crates/kmsrs-vectors/vectors(/.*)?" path != null)
             || (builtins.match ".*/fuzz/seeds(/.*)?" path != null)
+            # The committed web-UI and log-format snapshots (TEST-016, #237).
+            || (builtins.match ".*/crates/kmsrs-server/snapshots(/.*)?" path != null)
             # What `packaging_invariants.rs` and `platform_invariants.rs` read.
             || (builtins.match ".*/flake\\.(nix|lock)" path != null)
             || (builtins.match ".*/rust-toolchain\\.toml" path != null)

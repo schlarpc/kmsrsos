@@ -1,0 +1,24 @@
+post
+  HTTP/1.1 405 Method Not Allowed
+  Method Not Allowed
+unknown-method
+  HTTP/1.1 405 Method Not Allowed
+  Method Not Allowed
+http-2
+  HTTP/1.1 505 HTTP Version Not Supported
+  HTTP Version Not Supported
+no-colon
+  HTTP/1.1 400 Bad Request
+  Bad Request
+space-before-colon
+  HTTP/1.1 400 Bad Request
+  Bad Request
+declared-body
+  HTTP/1.1 413 Payload Too Large
+  Payload Too Large
+absolute-form
+  HTTP/1.1 400 Bad Request
+  Bad Request
+unknown-route
+  HTTP/1.1 404 Not Found
+  Not Found
