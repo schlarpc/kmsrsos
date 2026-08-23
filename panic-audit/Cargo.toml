@@ -1,0 +1,32 @@
+[package]
+name = "kmsrs-panic-audit"
+description = "A no_std binary that proves the sans-io core cannot panic (ARCH-009)"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: it is excluded from the root one, and a package excluded
+# from a workspace it sits inside must say so or cargo refuses to build it.
+[workspace]
+
+[features]
+# Calls one thing that genuinely panics, so the audit can prove its own
+# detector still works on the current toolchain (ARCH-009, #9).
+inject-panic = []
+
+[dependencies]
+kmsrs-proto = { path = "../crates/kmsrs-proto" }
+kmsrs-crypto = { path = "../crates/kmsrs-crypto" }
+
+# The whole point is what survives optimisation, so the audit must be built the
+# way the release binary is: full LTO, one codegen unit, aborting panics.
+# Anything weaker measures a different program.
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Line tables so `objdump -dl` names the source line a surviving panic came
+# from. Without them a failure reports an address inside a heavily inlined
+# function, which says only that something somewhere can panic.
+debug = "line-tables-only"
