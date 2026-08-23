@@ -210,6 +210,7 @@ fn status_page(snapshot: &Snapshot<'_>) -> String {
          <tr><th>NDR64</th><td>{}</td></tr>\
          <tr><th>Requests seen</th><td>{}</td></tr>\
          <tr><th>Events held</th><td>{}</td></tr>\
+         <tr><th>Build</th><td><code>{}</code></td></tr>\
          </table>",
         if snapshot.listening { "ok" } else { "no" },
         if snapshot.listening {
@@ -235,6 +236,11 @@ fn status_page(snapshot: &Snapshot<'_>) -> String {
         },
         snapshot.events.recorded(),
         snapshot.events.len(),
+        // `CFG-008` (#173): which binary this is, so a bug report and a running
+        // process can be matched up. There is no `--version` flag to ask —
+        // this program takes no arguments at all (`CFG-007`, #172) — so the
+        // answer has to be somewhere an operator already is.
+        escape(&crate::config::stamp::BUILD.to_string()),
     );
 
     // The ePIDs this host answers with, which is what an operator compares
@@ -576,7 +582,38 @@ fn metrics(snapshot: &Snapshot<'_>) -> String {
             "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
         );
     }
+
+    // `CFG-008` (#173). The conventional shape for build metadata in Prometheus
+    // is a constant-1 gauge carrying labels, because a version is not a number
+    // and pretending otherwise makes it unqueryable. Full revision here rather
+    // than the shortened one: this reader is a machine.
+    //
+    // The label values are compile-time constants from `option_env!`, so
+    // nothing a client sends can reach them — but they are escaped anyway,
+    // because the day one of them becomes dynamic is the day nobody remembers
+    // this sentence.
+    let stamp = crate::config::stamp::BUILD;
+    let _: core::fmt::Result = write!(
+        out,
+        "# HELP kmsrsos_build_info Which build this is; the value is always 1.\n\
+         # TYPE kmsrsos_build_info gauge\n\
+         kmsrsos_build_info{{version=\"{}\",revision=\"{}\",source_date_epoch=\"{}\"}} 1\n",
+        escape_label(stamp.version),
+        escape_label(stamp.revision),
+        escape_label(stamp.source_date_epoch),
+    );
     out
+}
+
+/// Escape a Prometheus label value.
+///
+/// Backslash, double quote and newline are the three characters the exposition
+/// format gives meaning to inside a label value.
+fn escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Whether a method reaches a route at all.
@@ -645,6 +682,15 @@ mod tests {
                 events: &self.events,
             }
         }
+    }
+
+    /// Render one page and hand back its body.
+    fn body_of(fixture: &Fixture, target: &str) -> String {
+        let raw = request(target);
+        let Parsed::Complete(parsed) = parse(&raw) else {
+            panic!("{target} did not parse");
+        };
+        route(&parsed, &fixture.snapshot()).body
     }
 
     fn request(target: &str) -> Vec<u8> {
@@ -991,8 +1037,11 @@ mod tests {
                 names.push(name.to_owned());
             } else if !line.starts_with('#') && !line.is_empty() {
                 let mut parts = line.split(' ');
-                let name = parts.next().expect("a sample names a metric");
+                let sample = parts.next().expect("a sample names a metric");
                 let value = parts.next().expect("a sample has a value");
+                // A sample may carry labels — `name{a="b"} 1` — and the metric
+                // is the part before the brace.
+                let name = sample.split_once('{').map_or(sample, |(name, _)| name);
                 assert!(
                     names.iter().any(|declared| declared == name),
                     "{name} has a sample with no TYPE"
@@ -1005,6 +1054,37 @@ mod tests {
         }
         assert!(names.len() >= 5, "only {} metrics", names.len());
         assert!(names.iter().all(|name| name.starts_with("kmsrsos_")));
+    }
+
+    /// `CFG-008` (#173): which build this is, in both places an operator looks.
+    ///
+    /// A constant-1 gauge with labels is the conventional shape for build
+    /// metadata, because a version is not a number and pretending otherwise
+    /// makes it unqueryable.
+    #[test]
+    fn the_build_stamp_appears_on_the_status_page_and_in_metrics() {
+        let fixture = Fixture::new();
+        let stamp = crate::config::stamp::BUILD;
+
+        let metrics = body_of(&fixture, "/metrics");
+        assert!(
+            metrics.contains(&format!("version=\"{}\"", stamp.version)),
+            "the build version is not in /metrics:\n{metrics}"
+        );
+        assert!(
+            metrics.contains(&format!("revision=\"{}\"", stamp.revision)),
+            "the full revision is not in /metrics — a machine reads this one"
+        );
+        assert!(metrics.contains("kmsrsos_build_info"));
+
+        // The status page carries the shortened form, because a person reads
+        // that one.
+        let status = body_of(&fixture, "/");
+        assert!(
+            status.contains(stamp.short_revision()),
+            "the build stamp is not on the status page:\n{status}"
+        );
+        assert!(status.contains(stamp.version));
     }
 
     #[test]

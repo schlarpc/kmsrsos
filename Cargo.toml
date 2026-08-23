@@ -39,14 +39,19 @@ readme = "README.md"
 
 # Every dependency is pinned to an exact version (PKG-006, #243). Ranges are
 # what let a rebuild of a tagged release produce different bytes.
+#
+# The workspace's own crates carry a version *and* a path. The path is what
+# cargo builds against; the version is what stops `cargo deny check bans`
+# reading a path dependency as a wildcard, and what would be required to
+# publish any of them (SEC-009, #201).
 [workspace.dependencies]
-kmsrs-proto = { path = "crates/kmsrs-proto" }
-kmsrs-crypto = { path = "crates/kmsrs-crypto" }
-kmsrs-db = { path = "crates/kmsrs-db" }
-kmsrs-dbgen = { path = "crates/kmsrs-dbgen" }
-kmsrs-policy = { path = "crates/kmsrs-policy" }
-kmsrs-server = { path = "crates/kmsrs-server" }
-kmsrs-vectors = { path = "crates/kmsrs-vectors" }
+kmsrs-proto = { version = "=0.1.0", path = "crates/kmsrs-proto" }
+kmsrs-crypto = { version = "=0.1.0", path = "crates/kmsrs-crypto" }
+kmsrs-db = { version = "=0.1.0", path = "crates/kmsrs-db" }
+kmsrs-dbgen = { version = "=0.1.0", path = "crates/kmsrs-dbgen" }
+kmsrs-policy = { version = "=0.1.0", path = "crates/kmsrs-policy" }
+kmsrs-server = { version = "=0.1.0", path = "crates/kmsrs-server" }
+kmsrs-vectors = { version = "=0.1.0", path = "crates/kmsrs-vectors" }
 
 zerocopy = { version = "=0.8.56", default-features = false }
 sha2 = { version = "=0.11.0", default-features = false }

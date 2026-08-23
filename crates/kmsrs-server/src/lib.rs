@@ -28,7 +28,7 @@ pub mod platform;
 pub mod server;
 pub mod web;
 
-pub use config::{Compiled, Discovered, Operational};
+pub use config::{BuildStamp, Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
 pub use host::{Host, RequestContext};
 pub use log::{Logger, Severity};

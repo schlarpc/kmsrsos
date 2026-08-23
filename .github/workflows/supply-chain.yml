@@ -1,0 +1,53 @@
+# Dependency policy and advisories (SEC-009, #201).
+#
+# Two tools that answer different questions, which is why both run:
+#
+#   * `cargo deny` answers "is this the dependency graph we decided on" — the
+#     licences, the sources, and the ban list in `deny.toml`. Its answer depends
+#     only on the lockfile, so it is deterministic and gates merges.
+#   * `cargo audit` answers "has anything in it been found vulnerable since" —
+#     which depends on an advisory database that changes without us, so a
+#     previously green commit can turn red without anybody touching it.
+#
+# The trajectory this exists to prevent is in the audits: vlmcsd needs libc and
+# nothing else, upstream py-kms is stdlib-only, and the *active* py-kms fork
+# added dnspython as a hard top-level import plus Flask and gunicorn. Nobody
+# decided to take on a web framework; it arrived one convenient import at a
+# time, and no build ever objected.
+name: Supply chain
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly. The advisory database moves without us, so a graph that was clean
+    # at merge time is not a graph that is clean now — and finding that out on
+    # the next unrelated pull request is finding it out late.
+    - cron: "23 5 * * 1"
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      # Deterministic given the lockfile, so this gates merges.
+      - run: nix develop -c cargo deny --all-features check
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - run: nix develop -c cargo audit --deny warnings

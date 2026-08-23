@@ -1,0 +1,152 @@
+# cargo-deny configuration (SEC-009, #201).
+#
+# The trajectory this exists to prevent is in the audits, and it is not
+# hypothetical: vlmcsd needs libc and nothing else, upstream py-kms is
+# stdlib-only, and the *active* py-kms fork added `dnspython` as a hard
+# top-level import plus Flask and gunicorn. Nobody decided to take on a web
+# framework; it arrived one convenient import at a time.
+#
+# So the interesting half of this file is `bans`, not `advisories`. A
+# vulnerability is somebody else's mistake and is fixed by a version bump; a
+# dependency is our mistake and is fixed by not making it.
+
+[graph]
+# `kmsrs-dbgen` is a host-only development tool whose whole job is parsing
+# Microsoft's artifacts, and `ARCH-001` (#1) keeps it out of every shipped
+# binary — `dbgen_is_unreachable_from_every_shipped_binary` is the test. Its
+# dependencies are still checked here: a tool that runs on a maintainer's
+# machine and downloads several hundred megabytes from the internet is not a
+# place to be relaxed about advisories.
+all-features = true
+
+[advisories]
+version = 2
+# An unmaintained crate is a finding worth seeing rather than a build failure:
+# it is a statement about the future, and the response is a plan rather than a
+# revert. `deny` is for what is exploitable now.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive only. This ships as a binary and as a container image, so a
+# copyleft dependency would be a licensing question for every user rather than
+# for us.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  # `webpki-roots`, reached only through `ureq` in `kmsrs-dbgen` — a host-only
+  # tool that fetches Microsoft's artifacts over HTTPS and is unreachable from
+  # every shipped binary (`ARCH-001`, #1). CDLA-Permissive-2.0 is a data
+  # licence with no copyleft and no attribution requirement, which is the right
+  # shape for what it covers: a list of certificate authorities.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate in the graph means two copies in the binary, and
+# usually means a dependency updated and something else did not.
+multiple-versions = "warn"
+wildcards = "deny"
+# A `path` dependency inside this workspace has no version to float, so cargo
+# resolves it as `*`. That is not the unpinned dependency `wildcards` is about
+# — it is this repository's own code, and `PKG-006` (#243) is checked against
+# the workspace dependency table by `every_dependency_is_pinned_to_an_exact_version`.
+allow-wildcard-paths = true
+
+# The dependency budget, enforced rather than described (axiom A8).
+#
+# Every name here is one this program has no business containing. They are not
+# bad crates — they are the crates a KMS host emulator acquires when somebody
+# reaches for the convenient thing, which is exactly how py-kms ended up with a
+# web framework inside an activation server.
+deny = [
+  # No async runtime. There is one mio event loop on all three targets, and
+  # tokio has zero upstream Hermit support (see the ARCH-005 superseding
+  # decision).
+  { name = "tokio" },
+  { name = "async-std" },
+  { name = "smol" },
+
+  # No HTTP framework. The web UI is a five-hundred-line parser and a router,
+  # because the alternative is a large parser with a large attack surface
+  # reachable by anything that can open a socket (`OBS-007`, #183).
+  { name = "hyper" },
+  { name = "axum" },
+  { name = "actix-web" },
+  { name = "warp" },
+  { name = "rocket" },
+  { name = "tiny_http" },
+
+  # No TLS in anything that ships. Nothing here is confidential — the KMS
+  # protocol's keys are published constants — and the web UI is an operator
+  # surface on a local network (declined item D33).
+  #
+  # `rustls` is permitted under `ureq`, and only under `ureq`, which is how
+  # `kmsrs-dbgen` fetches Microsoft's artifacts over HTTPS. That edge is
+  # exactly what the crate split exists to contain: nothing a shipped binary
+  # depends on names `kmsrs-dbgen`, and
+  # `dbgen_is_unreachable_from_every_shipped_binary` is what proves it.
+  { name = "openssl" },
+  { name = "native-tls" },
+  { name = "rustls", wrappers = ["ureq"] },
+
+  # No database and no ORM. Axiom A5: no disk I/O at all, which is what removes
+  # py-kms's whole SQL layer and its TOCTOU races.
+  { name = "rusqlite" },
+  { name = "sqlx" },
+  { name = "diesel" },
+
+  # No general-purpose serialisation formats beyond the one runtime config
+  # document. `serde_json` is a `kmsrs-dbgen` dependency and is not in this
+  # list for that reason, but it must never become reachable from a binary —
+  # `ARCH-001`'s test is what enforces that, not this file.
+  { name = "yaml-rust" },
+  { name = "serde_yaml" },
+
+  # No calendar library in anything that ships. The wall clock is read exactly
+  # once (`OS-007`, #258) and every deadline is measured against an injected
+  # monotonic reading, so one would exist only to be misused — vlmcsd's
+  # `date +%s` at build time is what happens when time is easy to reach for.
+  #
+  # `time` is permitted under `cab`, which `kmsrs-dbgen` uses to read the
+  # cabinet files Microsoft ships its licensing artifacts in. Timestamps inside
+  # a CAB are a fact about the archive; nothing on the wire is.
+  { name = "chrono" },
+  { name = "time", wrappers = ["cab"] },
+
+  # No logging framework *of ours*. The log is JSON Lines to stderr, shaped by
+  # one module (`OBS-001`, #177), because a facade with pluggable sinks is how
+  # a file sink gets added to a program that must not have one — and axiom A5
+  # forbids the file.
+  #
+  # `log` itself is permitted under the three dependencies that already carry
+  # it, and nowhere else. It is a facade with no sink installed, so those
+  # crates' log calls go nowhere; what the ban is really for is stopping a
+  # `log::info!` appearing in *our* code, at which point somebody installs a
+  # sink and the discipline is gone.
+  { name = "log", wrappers = ["mio", "rustls", "ureq", "ureq-proto"] },
+  { name = "tracing" },
+  { name = "env_logger" },
+
+  # No argument parser in the tree at all. The server takes no arguments
+  # (`CFG-007`, #172) and the client's parser is forty lines, because the
+  # moment a derive-based one exists somebody will point it at the server.
+  { name = "clap" },
+  { name = "structopt" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Everything comes from crates.io. A git dependency is a dependency on a branch
+# somebody can move, which is the property `PKG-006` (#243) is about.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

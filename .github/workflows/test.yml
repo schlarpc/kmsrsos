@@ -10,6 +10,11 @@ on:
     branches: [main]
 
 jobs:
+  # The whole gate in one command (PKG-002, #239): build, clippy, fmt, tests,
+  # coverage with a floor under the sans-io crates, the data-integrity check,
+  # the feature powerset, a configured build through `mkKmsrsos`, and the
+  # container image. `nix flake check` is the same command a developer runs, so
+  # "it passes locally" and "it passes in CI" are the same claim.
   tests:
     runs-on: ubuntu-latest
     permissions:
@@ -21,6 +26,127 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v14
       - run: nix build
       - run: nix flake check
+
+  # Every target this project claims to support (TEST-012, #233).
+  #
+  # Nobody in either ecosystem tests on Windows at all, which is why vlmcsd has
+  # `SO_REUSEADDR` and `SO_EXCLUSIVEADDRUSE` confused in its own diagnostics and
+  # py-kms sets `SO_REUSEPORT` — a constant Windows does not have — at start-up.
+  #
+  # The Linux job above is the full gate; these are builds and tests only. What
+  # they catch is a platform difference, and a platform difference shows up at
+  # compile time or in a socket, not in clippy.
+  platforms:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    # A ceiling on the whole job, because a hung one costs a runner for six
+    # hours and reports nothing. `.config/nextest.toml` terminates an individual
+    # hung *test* long before this, and names it; this is the backstop for
+    # everything that is not a test.
+    timeout-minutes: 45
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      # --- Linux: the whole gate, through the same command a developer runs ---
+      - if: runner.os == 'Linux'
+        uses: DeterminateSystems/nix-installer-action@v22
+      - if: runner.os == 'Linux'
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - if: runner.os == 'Linux'
+        run: nix build --print-build-logs
+      - if: runner.os == 'Linux'
+        run: nix flake check --print-build-logs
+
+      # --- Windows: rustup and the toolchain rust-toolchain.toml pins ---
+      #
+      # No Nix here, so this is the same *version* arrived at differently. What
+      # it catches is a platform difference, and a platform difference shows up
+      # at compile time or in a socket rather than in clippy — which is why this
+      # is a build and a test run rather than the whole gate.
+      #
+      # `kmsrs-os` is a Hermit binary and does not build for Windows, so the two
+      # shipped crates are named rather than `--workspace`.
+      - if: runner.os == 'Windows'
+        run: rustup show active-toolchain || rustup toolchain install
+      # nextest rather than `cargo test`, for one reason: it has a per-test
+      # timeout and `cargo test` has none. The first Windows run of this matrix
+      # sat in `cargo test` for the better part of an hour, and a job that never
+      # finishes says nothing about which test is wrong.
+      - if: runner.os == 'Windows'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - if: runner.os == 'Windows'
+        run: cargo build --locked --package kmsrs-server --package kmsrs-client --all-targets
+      - if: runner.os == 'Windows'
+        run: cargo nextest run --profile ci --locked --package kmsrs-server --package kmsrs-client
+
+  # Hermit (TEST-012, #233) is deliberately absent from that matrix until
+  # PKG-013 (#250) has a hermetic Nix build for it. A job that cannot run is
+  # worse than a missing one: it is a green tick that means nothing.
+
+  # Axiom A5, asserted against the binary rather than against the source
+  # (SEC-006, #198).
+  #
+  # `no_shipped_crate_touches_the_filesystem` checks that no source names an
+  # API that opens a file. This checks the other end: run the real binary and
+  # watch every syscall it makes. A dependency that opens something, or a libc
+  # that reads a configuration file behind our back, is invisible to a grep and
+  # obvious here.
+  no-file-access:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build the release binaries
+        run: nix build .#default --print-build-logs --out-link result
+
+      - name: Watch every file the server opens
+        run: nix develop -c ci/no-file-access.sh ./result
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strace-log
+          path: strace.log
+          if-no-files-found: ignore
+
+  # Two builds of one revision are the same bytes (SEC-010, #202;
+  # CFG-008, #173).
+  #
+  # vlmcsd bakes `date +%s` into every build, so this is not hypothetical — and
+  # there the timestamp is load-bearing, being the upper bound of its randomised
+  # ePID activation date, so its identity depends on when it was compiled.
+  #
+  # `nix build --rebuild` builds the derivation again and compares the result
+  # against what is already in the store, which is the whole check in one flag.
+  reproducible:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - run: nix build .#server --print-build-logs
+      - run: nix build .#server --rebuild --print-build-logs
 
   # Proof that the sans-io core cannot panic (ARCH-009, #9).
   #

@@ -504,6 +504,60 @@ impl Probe {
         })
     }
 
+    /// One activation, for a container HEALTHCHECK (`SEC-008`, #200;
+    /// `PKG-004`, #241).
+    ///
+    /// Deliberately **not** the full probe. A health check answers one
+    /// question — is the KMS port serving activations — and it answers it by
+    /// doing the thing a client does: connect, bind, activate, decode. A host
+    /// that is merely *distinguishable* is healthy, which is why this returns
+    /// the exchange rather than a report.
+    ///
+    /// The Organization fork's `readyz` is the counter-example (`OBS-008`,
+    /// #184): it proves its own HTTP handler is alive, which is the one fact a
+    /// caller already had by getting a reply, so it reports healthy while the
+    /// service it fronts is down.
+    ///
+    /// It also exists because a scratch container has no shell, no `curl` and
+    /// no `nc`. The check has to be a binary, and the smallest honest one is a
+    /// KMS client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProbeError`] if the host could not be reached, refused the
+    /// bind, or answered with something that did not decode.
+    pub fn health_check(&self, entropy: &mut dyn Entropy) -> Result<Exchange, ProbeError> {
+        let mut stream = self.connect()?;
+        let mut association = ClientAssociation::new();
+        let mut out = vec![0_u8; 4096];
+
+        let (len, call_id) = association.bind(&mut out, true)?;
+        stream.write_all(out.get(..len).unwrap_or(&[]))?;
+        let reply = read_pdu(&mut stream)?;
+
+        let accepted =
+            match association.read_reply(&reply, call_id, TransferSyntax::Ndr32, &mut |_| {})? {
+                Reply::BindAck { accepted, .. } => accepted,
+                Reply::Response { .. } => None,
+            };
+        let Some(accepted) = accepted else {
+            return Err(ProbeError::Protocol(ClientError::BindRejected));
+        };
+
+        // Findings are collected and discarded: this is a liveness question,
+        // not a detection one. The report is not shared with the caller
+        // precisely so nobody wires a health check up to fail on one.
+        let mut report = Report::default();
+        Self::activate(
+            &mut stream,
+            &mut association,
+            accepted,
+            &self.fields,
+            entropy,
+            &mut report,
+        )
+    }
+
     /// Whether the host reflects an absurd `N_Policy` back (`POL-019`, #313).
     ///
     /// A genuine KMS host caches `2N` client machine IDs and reports how many

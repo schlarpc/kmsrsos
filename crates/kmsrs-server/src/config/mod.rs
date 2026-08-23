@@ -104,7 +104,9 @@
 pub mod compiled;
 pub mod discovered;
 pub mod operational;
+pub mod stamp;
 
 pub use compiled::Compiled;
 pub use discovered::Discovered;
 pub use operational::{ConfigError, LogFormat, LogLevel, Operational};
+pub use stamp::BuildStamp;

@@ -40,7 +40,7 @@ Design goals, in the order that shapes the code:
 | Document | Contents |
 |---|---|
 | [`docs/decisions.md`](docs/decisions.md) | Axioms, the 35 decisions taken, and 33 things deliberately not built |
-| [`docs/deployment.md`](docs/deployment.md) | Where the host has to live, the SRV record, Hermit on Proxmox, and what is not in the artifact |
+| [`docs/deployment.md`](docs/deployment.md) | Where the host has to live, the SRV record, the container and Kubernetes manifests, Hermit on Proxmox, and what is not in the artifact |
 | [`docs/research-findings.md`](docs/research-findings.md) | Microsoft-sourced product data, Hermit/Proxmox constraints, coverage map |
 | [`docs/kms-emulator-feature-matrix.md`](docs/kms-emulator-feature-matrix.md) | Cross-implementation synthesis and the 24 behavioural mismatches |
 | [`docs/vlmcsd-features.md`](docs/vlmcsd-features.md) | Complete vlmcsd audit |
