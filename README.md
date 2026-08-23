@@ -1,6 +1,51 @@
 # kmsrsos
 
-A Rust application with a reproducible [Nix]-based development environment.
+A KMS host emulator in pure safe Rust — correct by construction, zero runtime configuration, no
+disk I/O. Targets Linux, Windows, and bare metal ([Hermit] unikernel with virtio-net).
+
+> **Status: design complete, implementation not started.** The plan of record is the
+> [issue tracker](https://github.com/schlarpc/kmsrsos/issues) — 264 items across 11 milestones,
+> each with a definition of done and explicit dependency links.
+
+## What and why
+
+Microsoft's Key Management Service is a volume-activation mechanism: a licensed KMS host answers
+DCE/RPC requests on TCP 1688, and volume-licensed Windows and Office clients activate against it.
+Two open-source emulator families exist — [vlmcsd] (C, archived 2023) and [py-kms] (Python) — and
+between them they cover most of the problem, but the union is not available in any single program
+and the intersection of what both miss is large.
+
+`docs/` contains an exhaustive audit of both families: 119 features compared, 23 that **nobody**
+implements, and 24 situations where the two disagree about what a KMS host should do. Planning
+turned that into 264 issues, 35 recorded design decisions and 33 explicitly declined ones.
+
+Design goals, in the order that shapes the code:
+
+- **Pure safe Rust.** `#![forbid(unsafe_code)]` throughout. The audited C implementation has a
+  remote out-of-bounds read and an indirect call through a wild function pointer in its
+  pre-authentication request path.
+- **Correct by construction.** Illegal protocol states are unrepresentable, not merely checked.
+- **Zero runtime configuration.** Everything is decided at build time; the single runtime escape
+  hatch cannot change a byte on the wire.
+- **No disk I/O.** No database, no log files, no config files. State is a bounded in-memory ring
+  buffer; logs go to stderr; the event log is served over HTTP by the same process.
+- **Sans-io core.** The protocol crates take bytes and return events, which is what makes fuzzing,
+  differential testing against both other implementations, and the bare-metal target tractable.
+- **Anti-fingerprinting.** The ways existing emulators are detectable are treated as a test suite.
+  Per the audit, none of the three existing implementations survives an adversarial detection probe
+  without being reconfigured.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/decisions.md`](docs/decisions.md) | Axioms, the 35 decisions taken, and 33 things deliberately not built |
+| [`docs/research-findings.md`](docs/research-findings.md) | Microsoft-sourced product data, Hermit/Proxmox constraints, coverage map |
+| [`docs/kms-emulator-feature-matrix.md`](docs/kms-emulator-feature-matrix.md) | Cross-implementation synthesis and the 24 behavioural mismatches |
+| [`docs/vlmcsd-features.md`](docs/vlmcsd-features.md) | Complete vlmcsd audit |
+| [`docs/py-kms-features.md`](docs/py-kms-features.md) | Complete py-kms audit |
+| [`docs/vlmcsd-forks.md`](docs/vlmcsd-forks.md) | vlmcsd fork survey (2,523 forks; 16 touch code) |
+| [`docs/py-kms-forks.md`](docs/py-kms-forks.md) | py-kms fork survey (32 code-touching forks) |
 
 ## Development
 
@@ -69,8 +114,15 @@ template using [cruft]:
 $ cruft update --checkout template
 ```
 
+## Licence
+
+MIT.
+
 [Crane]: https://crane.dev/
 [cruft]: https://cruft.github.io/cruft/
 [direnv]: https://direnv.net/
+[Hermit]: https://github.com/hermit-os
 [Nix]: https://nixos.org/
+[py-kms]: https://github.com/Py-KMS-Organization/py-kms
 [rust-flake]: https://github.com/schlarpc/rust-flake
+[vlmcsd]: https://github.com/Wind4/vlmcsd
