@@ -17,6 +17,11 @@
 // and `as` is the operator that produces it (`ARCH-007`, #7; `SEC-003`, #195).
 #![deny(clippy::as_conversions)]
 
+#[cfg(test)]
+extern crate alloc;
+
 pub mod entropy;
+pub mod kms;
 pub mod sansio;
 pub mod time;
+pub mod types;
