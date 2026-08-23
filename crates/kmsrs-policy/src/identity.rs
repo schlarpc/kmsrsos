@@ -132,7 +132,9 @@ impl HostIdentity {
     ///
     /// py-kms instead appends a Server 2019 fallback for every **non**-matching
     /// entry and then `random.choice`s over the whole list. Measured at
-    /// 4887/5000 wrong for Office 2010, and it can emit impossible combinations
+    /// 4887/5000 wrong for Office 2010 — a rate only counting can find, which
+    /// is why `TEST-008` (#229) asserts it statistically rather than by
+    /// example, and it can emit impossible combinations
     /// such as group 00096 with build 17763. The audit calls fixing this the
     /// highest-value single finding in the fork network, and it is still
     /// unfixed upstream.
@@ -231,6 +233,12 @@ fn draw_lcid(entropy: &mut dyn Entropy) -> Result<&'static Lcid, EntropyUnavaila
 /// would be empty — which is why this cannot loop. vlmcsd's equivalent is a
 /// `while (TRUE)` that hangs at start-up when no build matches its
 /// configuration.
+/// Draw the build this host claims to be running.
+///
+/// Uniform over the whole table, which is the property `TEST-008` (#229)
+/// counts: the Organization fork emits 17763 in 2000 of 2000 generations, and
+/// every ePID it produces is individually well-formed. What gives it away is
+/// the distribution, which no single sample can show.
 fn draw_host_build(entropy: &mut dyn Entropy) -> Result<&'static HostBuild, EntropyUnavailable> {
     let count = u32::try_from(kmsrs_db::epid_host_build_count()).unwrap_or(1);
     let bound = NonZeroU32::new(count).ok_or(EntropyUnavailable)?;
