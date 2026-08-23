@@ -107,7 +107,7 @@ impl Host {
                 self.events
                     .record_grant(request, context.peer, context.now, &grant, observations);
                 Decision::Grant(Grant {
-                    epid: grant.identity.epid.clone(),
+                    epid: grant.identity.epid,
                     count: grant.counts.reported,
                     intervals: self.intervals,
                     hardware_id: grant.identity.hardware_id,

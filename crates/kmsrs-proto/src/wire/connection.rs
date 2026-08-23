@@ -464,12 +464,14 @@ impl Connection {
     }
 
     /// Take the next event this connection produced.
+    ///
+    /// `pop_at` rather than a guarded `remove`: `remove` panics when the index
+    /// is out of range, and although the `is_empty` check in front of it made
+    /// that unreachable, the optimiser could not see the two facts together and
+    /// the panic survived into the binary (`ARCH-009`, #9). `pop_at` answers
+    /// with an `Option`, which is the same check said once.
     pub fn next_event(&mut self) -> Option<ConnectionEvent> {
-        if self.events.is_empty() {
-            None
-        } else {
-            Some(self.events.remove(0))
-        }
+        self.events.pop_at(0)
     }
 
     /// When the driver should stop waiting for more input.
@@ -528,7 +530,36 @@ impl Connection {
         // `WIRE-024` (#82): exactly `FragLength - 16` bytes are the body.
         // Consuming more or fewer is how a stream gets out of frame and stays
         // there.
-        let pdu: ArrayVec<u8, MAX_PDU_LEN> = self.inbound.drain(..declared).collect();
+        //
+        // Written as two copies rather than `self.inbound.drain(..declared)
+        // .collect()`, which is what this was. `drain` panics on a range past
+        // the end and `ArrayVec`'s `Extend` panics on overflow; neither can
+        // happen — `declared` has just been checked against `MAX_PDU_LEN` and
+        // against `self.inbound.len()` — but the optimiser cannot see either
+        // fact, so the pair left two reachable panics in the shipped binary.
+        // `ARCH-009` (#9) is the check that found them, and `try_*` is how the
+        // same impossibility is stated without one.
+        let mut pdu: ArrayVec<u8, MAX_PDU_LEN> = ArrayVec::new();
+        if pdu
+            .try_extend_from_slice(self.inbound.get(..declared).unwrap_or(&[]))
+            .is_err()
+        {
+            return self.reject(RejectReason::FragmentTooLong { declared });
+        }
+
+        // Consume it, keeping whatever arrived behind it. Both buffers have
+        // capacity `MAX_PDU_LEN` and the tail is shorter than what it came
+        // from, so the failure branch is unreachable — and is still a reported
+        // rejection rather than a silent truncation (`SEC-012`, #204).
+        let mut rest: ArrayVec<u8, MAX_PDU_LEN> = ArrayVec::new();
+        if rest
+            .try_extend_from_slice(self.inbound.get(declared..).unwrap_or(&[]))
+            .is_err()
+        {
+            return self.reject(RejectReason::FragmentTooLong { declared });
+        }
+        self.inbound = rest;
+
         let body = pdu.get(HEADER_LEN..declared).unwrap_or(&[]);
 
         if !header.version_is_supported() {
@@ -738,7 +769,26 @@ impl Connection {
             return Step::NeedMore;
         }
 
-        let assembled: ArrayVec<u8, MAX_STUB_LEN> = self.reassembly.drain(..).collect();
+        // Copied out so the borrow of `self.reassembly` ends before `answer`
+        // takes `&mut self`. `try_extend_from_slice` rather than
+        // `drain(..).collect()`: `ArrayVec`'s `Extend` panics on overflow, and
+        // although both buffers have capacity `MAX_STUB_LEN` and overflow is
+        // impossible, the optimiser cannot see that — so `collect` left a
+        // reachable `core::panicking` reference in the binary. `ARCH-009` (#9)
+        // is the check that found it.
+        let mut assembled: ArrayVec<u8, MAX_STUB_LEN> = ArrayVec::new();
+        if assembled.try_extend_from_slice(&self.reassembly).is_err() {
+            // Unreachable by construction, and still reported rather than
+            // ignored (`SEC-012`, #204): a fault is a well-formed answer, and a
+            // truncated stub would be a wrong one.
+            self.reassembly.clear();
+            self.reassembling_context = None;
+            let _ = self.events.try_push(ConnectionEvent::Rejected {
+                reason: RejectReason::ReassemblyOverflow,
+            });
+            return self.fault(out, call_id, context_id, NcaStatus::ProtocolError);
+        }
+        self.reassembly.clear();
         self.reassembling_context = None;
 
         let parsed = match stub::parse_request(&assembled, syntax) {
