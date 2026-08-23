@@ -282,3 +282,80 @@ fn every_crate_directory_is_a_workspace_member() {
         );
     }
 }
+
+/// `CFG-009` (#174): every feature a crate declares must be referenced by some
+/// source file, or it is a knob that does nothing.
+///
+/// vlmcsd is the cautionary example, and the list is long: make variables that
+/// emit macros no source file reads; a `CAT=1` flag adding `-DONE_FILE` that
+/// nothing tests; an `INCLUDE_BETAS` flag that `-V` *prints* but that changes
+/// no behaviour; and `_CRYPTO_INTERNAL`, defined but never tested. Each is a
+/// configuration surface an operator can set, reason about, and be wrong about.
+///
+/// Checked as a property of the tree rather than trusted, because the compiler
+/// has no opinion: an unused feature is not a warning in Cargo, only a lie in
+/// the manifest.
+#[test]
+fn every_declared_feature_is_referenced_in_source() {
+    let root = workspace_root();
+    let mut unreferenced = Vec::new();
+
+    for (name, manifest_path) in crate_manifests(&root) {
+        let manifest = read_toml(&manifest_path);
+        let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        let Some(crate_dir) = manifest_path.parent() else {
+            continue;
+        };
+        let sources = rust_sources(crate_dir);
+
+        for feature in features.keys() {
+            // `default` is Cargo's own, and is referenced by Cargo rather than
+            // by any source file.
+            if feature == "default" {
+                continue;
+            }
+            let needle_a = format!("feature = \"{feature}\"");
+            let needle_b = format!("feature=\"{feature}\"");
+            let referenced = sources
+                .iter()
+                .any(|text| text.contains(&needle_a) || text.contains(&needle_b));
+            if !referenced {
+                unreferenced.push(format!("{name}/{feature}"));
+            }
+        }
+    }
+
+    assert!(
+        unreferenced.is_empty(),
+        "these features are declared but referenced by no source file, so \
+         setting them does nothing: {unreferenced:?}"
+    );
+}
+
+/// Every `.rs` file under a directory, read into memory.
+fn rust_sources(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // `target` is build output, not source.
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
