@@ -201,7 +201,8 @@ SMP scheduler on an APIC timer, `smp` on by default.
   with no defined dispatch. Hence one socket on Hermit (#260).
 - **`setsockopt` is a stub.** Only `TCP_NODELAY` works; `SO_REUSEADDR` is a silent no-op;
   `SO_RCVTIMEO`, `SO_SNDTIMEO`, `IPV6_V6ONLY`, `SO_KEEPALIVE` and `SO_LINGER` all return `EINVAL`.
-  These succeed on Linux and Windows and fail only here — the worst failure shape.
+  These succeed on Linux and Windows and fail only here — the worst failure shape. The audit of what
+  we actually depend on is [below](#the-os-010-socket-option-audit-261).
 - **No block device driver of any kind**, and no SMBIOS/DMI code. Zero-disk-I/O is enforced by the
   absence of drivers rather than by our policy.
 - **No signals.** Shutdown is normal control flow.
@@ -211,6 +212,31 @@ SMP scheduler on an APIC timer, `smp` on by default.
   plus local ticks — 1-second granularity, no pvclock, no NTP, no slew, and it drifts.
 - **Console** is the 16550 UART at 0x3F8, and nothing else.
 - **DHCPv4 is on by default**; the `HERMIT_IP` family is only a pre-DHCP fallback.
+
+## The `OS-010` socket-option audit (#261)
+
+Seven options behave differently on Hermit. The question the issue asks is not "which ones are
+broken" — that is settled above — but **which ones we depend on**, and the answer has to be *none*,
+because a stub `setsockopt` fails on the one target with no debugger attached.
+
+| Option | Set by the server | Hermit | Depended on |
+|---|---|---|:---:|
+| `SO_REUSEADDR` | yes, `set_reuse_address`, Unix only | silent no-op | no — a unikernel guest has no restart to rebind through |
+| `IPV6_V6ONLY` | yes, `set_only_v6`, IPv6 sockets only | unreachable | no — Hermit's bind list has no IPv6 entry (#260) |
+| `TCP_NODELAY` | no | honoured | no — one write per response, so Nagle never engages (#164) |
+| `SO_RCVTIMEO` | no | `EINVAL` | no — a deadline is the poll timeout (#297) |
+| `SO_SNDTIMEO` | no | `EINVAL` | no — bounded by `MAX_OUTBOUND` and the connection deadline |
+| `SO_KEEPALIVE` | no | `EINVAL` | no — the conversation is seconds long and already bounded |
+| `SO_LINGER` | no | `EINVAL` | no — the default graceful close is what a genuine host does |
+
+Two of these *used* to be load-bearing, and both were removed by the one-mio-loop decision rather
+than by being noticed: the read timeout became a poll timeout computed from the injected clock, and
+`IPV6_V6ONLY` stopped deciding the socket count by way of its own error path.
+
+The table lives in `crates/kmsrs-server/src/platform.rs` as `SOCKET_OPTIONS`, not only here.
+`tests/platform_invariants.rs` fails if a `set_*` call appears in `net/` without a row, if a row
+names a setter that no longer exists, or if any row is marked load-bearing — which is what stops the
+audit degrading into a comment that used to be true.
 
 ## Entropy — the most dangerous finding
 
