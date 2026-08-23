@@ -18,9 +18,52 @@
       url = "github:nix-community/nix-direnv";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # --- The two Hermit inputs (PKG-013, #250; PKG-014, #251) ---
+    #
+    # Inputs rather than fetchers in the build, so `flake.lock` pins them the
+    # way it pins everything else (`PKG-006`, #243) and
+    # `packaging_invariants.rs` does not have to grow an exception.
+    #
+    # The kernel is a whole separate program — its own lockfile, its own pinned
+    # nightly, its own `xtask` — so it is `flake = false` source that
+    # `packages.hermit-kernel` builds. The revision is not an arbitrary commit
+    # on `main`: it is the one `hermit-os/hermit-rs` pins as its `kernel`
+    # submodule, which is the pairing upstream CI runs in QEMU. Tags exist in
+    # that repository but stopped tracking releases at 0.8.0, so a tag would be
+    # the *less* specific choice.
+    hermit-kernel = {
+      url = "github:hermit-os/kernel/906ea2aae194d52af338e0be22812f90f791f927";
+      flake = false;
+    };
+
+    # Every Hermit target is Tier 3, so rustup ships no `rust-std` for it and
+    # this component supplies one. It is rebuilt per **exact** stable release:
+    # the 1.96.1 artifact works with 1.96.1 and with nothing else, so the
+    # version in this URL must equal `channel` in `rust-toolchain.toml`.
+    # `tests/hermit_toolchain.rs` is what fails when they diverge, because what
+    # rustc says instead is `can't find crate for core`.
+    #
+    # The alternative — `-Z build-std=std,panic_abort` — would put every crate
+    # that ships on nightly to gain nothing this gives (`PKG-014`, #251).
+    rust-std-hermit = {
+      url = "https://github.com/hermit-os/rust-std-hermit/releases/download/1.96.1/rust-std-1.96.1-x86_64-unknown-hermit.tar.gz";
+      flake = false;
+      type = "tarball";
+    };
   };
 
-  outputs = { self, nixpkgs, systems, rust-overlay, crane, nix-direnv, ... }:
+  outputs =
+    { self
+    , nixpkgs
+    , systems
+    , rust-overlay
+    , crane
+    , nix-direnv
+    , hermit-kernel
+    , rust-std-hermit
+    , ...
+    }:
     let
       eachSystem = nixpkgs.lib.genAttrs (import systems);
 
@@ -79,6 +122,7 @@
             # What `packaging_invariants.rs` and `platform_invariants.rs` read.
             || (builtins.match ".*/flake\\.(nix|lock)" path != null)
             || (builtins.match ".*/rust-toolchain\\.toml" path != null)
+            || (builtins.match ".*/hermit-pins\\.toml" path != null)
             || (builtins.match ".*/deny\\.toml" path != null)
             || (builtins.match ".*/deploy(/.*)?" path != null)
             || (builtins.match ".*/docs(/.*)?" path != null)
@@ -183,6 +227,188 @@
       windowsCargoArtifactsFor = system:
         let craneLib = cranelibFor system;
         in craneLib.buildDepsOnly (windowsArgsFor system);
+
+      # --- Hermit unikernel (PKG-013, #250; PKG-014, #251) ---
+      #
+      # This was the largest schedule risk in the project, and the shape of the
+      # risk was that the `hermit` crate is not a library at all: its `lib.rs` is
+      # empty, and its `build.rs` shells out to a nested
+      # `cargo run --package=xtask` that builds the kernel from a git submodule
+      # against *its own* lockfile and *its own* pinned nightly. Crane vendors
+      # neither, and a build script that runs `cargo` is a build script that
+      # wants the network.
+      #
+      # So the crate is not used. The kernel is its own derivation, and the two
+      # link flags the crate's build script would have emitted —
+      # `-L native=…` and `-l static=hermit` — are injected directly. That is
+      # the whole of what it does for a target that is not `common-os`, so
+      # nothing is lost, and what is gained is that the nightly toolchain and
+      # the vendored dependency tree the kernel needs stay inside one derivation
+      # instead of leaking into the workspace.
+      #
+      # The two version-shaped things are the flake inputs above, which
+      # `flake.lock` pins. What is left here is the kernel's own nightly, which
+      # is not a version of anything we ship: it is a build input for one
+      # derivation, in the same sense the pinned MSVC CRT is for the Windows
+      # cross-build. It must equal `channel` in the kernel's own
+      # `rust-toolchain.toml` at the pinned revision, because the kernel uses
+      # `-Z build-std` and unstable flags that only that release accepts.
+      hermitKernelNightly = "2026-08-01";
+
+      hermitTarget = "x86_64-unknown-hermit";
+
+      # `x86_64-unknown-none` is what the kernel proper is compiled for;
+      # `rust-src` and `llvm-tools` are what `-Z build-std` and the symbol
+      # rewriting need.
+      hermitNightlyFor = system:
+        let pkgs = pkgsFor system;
+        in pkgs.rust-bin.nightly.${hermitKernelNightly}.default.override {
+          extensions = [ "rust-src" "llvm-tools" ];
+          targets = [ "x86_64-unknown-none" ];
+        };
+
+      # `libhermit.a`: the unikernel the application is linked against.
+      #
+      # Built by the kernel's own `xtask` rather than by reimplementing it here.
+      # That is deliberate — `xtask build` is not `cargo build`: it copies the
+      # staticlib aside, rewrites every symbol that is not an exported syscall
+      # so the kernel's `core` cannot collide with the application's, links in
+      # `hermit-builtins` for the libm symbols, and stamps `ELFOSABI_STANDALONE`
+      # on every member. Reimplementing four steps in shell would work until the
+      # day upstream adds a fifth.
+      #
+      # Two things it needs that Nix does not give it for free:
+      #
+      #   * Three lockfiles' worth of dependencies — the kernel's, the separate
+      #     `hermit-builtins` workspace's, and the standard library's, because
+      #     `-Z build-std=core` compiles `core` from source. `vendorMultipleCargoDeps`
+      #     is exactly this case, and it resolves the two `git+https` entries in
+      #     the kernel's lockfile without either needing a hash here.
+      #   * A `rustup` that is not there. `xtask` runs `rustup target add
+      #     x86_64-unknown-none` before building; the toolchain above already
+      #     has that target, so the shim below makes the call a no-op rather
+      #     than patching the source.
+      hermitKernelFor = { system, features ? null }:
+        let
+          pkgs = pkgsFor system;
+          src = hermit-kernel;
+          nightly = hermitNightlyFor system;
+          craneNightly = (crane.mkLib pkgs).overrideToolchain nightly;
+          vendor = craneNightly.vendorMultipleCargoDeps {
+            inherit (craneNightly.findCargoFiles src) cargoConfigs;
+            cargoLockList = [
+              "${src}/Cargo.lock"
+              "${src}/hermit-builtins/Cargo.lock"
+              "${nightly}/lib/rustlib/src/rust/library/Cargo.lock"
+            ];
+          };
+        in
+        pkgs.stdenvNoCC.mkDerivation {
+          pname = "hermit-kernel";
+          version = hermit-kernel.shortRev or "unknown";
+          inherit src;
+
+          nativeBuildInputs = [ nightly ];
+
+          configurePhase = ''
+            runHook preConfigure
+
+            export CARGO_HOME="$NIX_BUILD_TOP/cargo-home"
+            mkdir -p "$CARGO_HOME"
+            cp ${vendor}/config.toml "$CARGO_HOME/config.toml"
+
+            mkdir -p "$NIX_BUILD_TOP/shim"
+            printf '#!/bin/sh\nexit 0\n' > "$NIX_BUILD_TOP/shim/rustup"
+            chmod +x "$NIX_BUILD_TOP/shim/rustup"
+            export PATH="$NIX_BUILD_TOP/shim:$PATH"
+
+            runHook postConfigure
+          '';
+
+          buildPhase = ''
+            runHook preBuild
+            cargo run --package=xtask --no-default-features --offline -- build \
+              --arch x86_64 --release \
+              --target-dir "$NIX_BUILD_TOP/target" \
+              ${if features == null then "" else
+                "--no-default-features --features " + builtins.concatStringsSep "," features}
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lib
+            cp "$NIX_BUILD_TOP/target/x86_64/release/libhermit.a" $out/lib/libhermit.a
+            runHook postInstall
+          '';
+
+          # `xtask` spent its last two steps deciding exactly which symbols this
+          # archive exports; `strip` is not invited to have an opinion.
+          dontStrip = true;
+        };
+
+      # The Tier 3 `rust-std` (PKG-014, #251), lifted out of the layout the
+      # release ships: a `rust-installer` component tree plus an `install.sh`
+      # nothing here runs. Only the `lib/rustlib/<target>` half is wanted.
+      rustStdHermitFor = system:
+        let pkgs = pkgsFor system;
+        in pkgs.runCommand "rust-std-hermit" { } ''
+          mkdir -p $out
+          cp -r ${rust-std-hermit}/rust-std-${hermitTarget}/lib $out/lib
+        '';
+
+      # The stable toolchain plus that `rust-std`, as one sysroot.
+      #
+      # A `symlinkJoin` rather than a toolchain override, and it is passed with
+      # `--sysroot` rather than by putting it on `PATH`, because `rustc` derives
+      # its own sysroot from the *resolved* path of its executable: a joined
+      # toolchain whose `bin/rustc` is a symlink finds the original sysroot and
+      # reports `can't find crate for core`. Naming the sysroot explicitly also
+      # keeps host build scripts and proc macros on the real toolchain, since
+      # `CARGO_TARGET_<triple>_RUSTFLAGS` applies to the target only.
+      hermitSysrootFor = system:
+        let pkgs = pkgsFor system;
+        in pkgs.symlinkJoin {
+          name = "rust-hermit-sysroot";
+          paths = [ (rustToolchainFor system) (rustStdHermitFor system) ];
+        };
+
+      hermitArgsFor = { system, features ? null }:
+        let
+          commonArgs = commonArgsFor system;
+          kernel = hermitKernelFor { inherit system features; };
+          sysroot = hermitSysrootFor system;
+        in
+        commonArgs // {
+          pnameSuffix = "-hermit";
+
+          CARGO_BUILD_TARGET = hermitTarget;
+          CARGO_TARGET_X86_64_UNKNOWN_HERMIT_RUSTFLAGS = builtins.concatStringsSep " " [
+            "--sysroot=${sysroot}"
+            "-L native=${kernel}/lib"
+            # `-bundle`, which the `hermit` crate's build script does not say
+            # and which this build needs because it keeps `lto = "fat"`.
+            # Bundling makes `rustc` treat every member of `libhermit.a` as one
+            # of its own objects, and the members are compiled C — the kernel's
+            # `compiler-builtins` intrinsics — with no `.llvmbc` section, so
+            # fat LTO stops with "failed to get bitcode from object file".
+            # `-bundle` hands the archive to the linker instead, which is what
+            # was meant: it is a foreign static library, not a Rust crate.
+            "-l static:-bundle=hermit"
+          ];
+
+          # A unikernel image does not run on the build host, and the test suite
+          # has already run against the host target in `nix flake check`.
+          doCheck = false;
+          cargoExtraArgs = "--package kmsrs-os";
+
+          # The result is an `ELFOSABI_STANDALONE` image for a machine with no
+          # dynamic loader, no `ld.so` and no interpreter. `patchelf` and
+          # `strip` have nothing correct to do to it, and both would be
+          # editing a file that only the hermit-loader knows how to read.
+          dontStrip = true;
+          dontPatchELF = true;
+        };
 
       # --- The build-time settings a deployment might genuinely need changed ---
       #
@@ -329,14 +555,22 @@
 
           server = buildOne { pname = "kmsrsos"; package = "kmsrs-server"; };
           client = buildOne { pname = "kmsrs-client"; package = "kmsrs-client"; };
+
+          # `PKG-013` (#250). The unikernel is configured from the same
+          # `settings` as the two hosted binaries, because a build-time setting
+          # that reached only two of the three targets would be a setting whose
+          # meaning depends on where it is deployed (`CFG-001`, #166).
+          hermitArgs = hermitArgsFor { inherit system; };
         in
         rec {
           inherit server client;
           container = containerFor { inherit pkgs system server client; };
-          # `osImage` and `hermit` join this set once PKG-013 (#250) has a
-          # hermetic Hermit build. Named here rather than stubbed, because an
-          # output that exists and does not work is worse than one that does
-          # not exist.
+
+          hermit = craneLib.buildPackage (hermitArgs // stampEnv // settingsEnv // {
+            cargoArtifacts = craneLib.buildDepsOnly hermitArgs;
+            cargoExtraArgs = hermitArgs.cargoExtraArgs + features;
+          });
+          # `osImage` joins this set once OS-002 (#253) can build one.
         };
 
       # The Debian and RPM architecture names, which are neither Nix's nor
@@ -472,6 +706,15 @@
           windows = craneLib.buildPackage ((windowsArgsFor system) // stampEnv // {
             cargoArtifacts = windowsCargoArtifactsFor system;
           });
+
+          # The Hermit unikernel application: `nix build .#hermit`
+          # (`PKG-013`, #250). An ELF with `ELFOSABI_STANDALONE`, which the
+          # hermit-loader reads — not something this host can execute.
+          hermit = configured.hermit;
+
+          # `libhermit.a` on its own, so that a kernel-side change can be built
+          # and diffed without rebuilding the application (`PKG-013`, #250).
+          hermit-kernel = hermitKernelFor { inherit system; };
 
           # --- OS packages (PKG-009, #246) ---
           #

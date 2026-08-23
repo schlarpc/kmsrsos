@@ -94,6 +94,7 @@ $ cargo fmt                  # format
 ```shell
 $ nix build          # build the package
 $ nix build .#windows # cross-compile for Windows (x86_64-pc-windows-msvc)
+$ nix build .#hermit  # the Hermit unikernel application (x86_64-unknown-hermit)
 $ nix flake check    # run all checks (build, clippy, fmt, test, coverage)
 $ nix flake update   # update flake inputs
 ```

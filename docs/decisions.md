@@ -69,6 +69,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
+| 37 | Hermit build | Kernel as its own derivation; the `hermit` crate is never a dependency, [see below](#the-hermit-build-does-not-use-the-hermit-crate-pkg-013-250) (#250, #251) |
 
 ### Notes on the three decisions that took the most argument
 
@@ -118,6 +119,40 @@ Two things are deliberately *not* done. The count is not floored at 100 for absu
 own sketch suggested: reporting a plausible-looking 100 to a fresh host holding one machine is still
 a sentence no genuine host says, and `world` is simply the true one. And the request is not refused —
 that is #283, declined as [D38](#d38).
+
+### The Hermit build does not use the `hermit` crate (`PKG-013`, #250)
+
+`PKG-013` was filed as the largest schedule risk in the project, and it was correct about the shape
+of the risk. The documented way to build a Hermit application is to depend on the `hermit` crate.
+That crate is not a library: its `lib.rs` is empty for every configuration this project would use,
+and its `build.rs` shells out to a nested `cargo run --package=xtask` that builds the kernel from a
+git submodule against *its own* lockfile and *its own* pinned nightly. Crane vendors neither. A build
+script that runs `cargo` is a build script that wants the network, which is the one thing a Nix build
+does not have.
+
+Both options the issue sketched were tried on paper. Carrying two vendored dependency trees and two
+toolchains inside one derivation makes the workspace's own build depend on the kernel's nightly. The
+other option is what shipped:
+
+* **The kernel is its own derivation.** It builds through the kernel's own `xtask`, not through a
+  reimplementation of it, because `xtask build` is not `cargo build` — it rewrites every symbol that
+  is not an exported syscall so the kernel's `core` cannot collide with the application's, links in
+  `hermit-builtins` for the libm symbols, and stamps `ELFOSABI_STANDALONE` on every archive member.
+  Four steps that a shell script could reproduce, until the day upstream adds a fifth.
+* **The two link flags are injected directly.** `-L native=…` and `-l static:-bundle=hermit` are the
+  whole of what the crate's build script emits for a non-`common-os` target, so nothing is lost by
+  not having it — and `tests/hermit_toolchain.rs` fails if the crate ever reappears in the lockfile.
+* **The workspace stays on stable.** `hermit-os/rust-std-hermit` is built per exact stable release,
+  so pinning it to `rust-toolchain.toml`'s channel avoids `-Z build-std=std,panic_abort`, which would
+  have put every crate that ships on nightly.
+
+Two details cost more time than the design did, and both are recorded in tests rather than only here.
+`rustc` derives its sysroot from the *resolved* path of its own executable, so a `symlinkJoin`
+toolchain finds the original sysroot and reports `can't find crate for core`; the sysroot has to be
+named with `--sysroot`. And `-l static=hermit`, which is what upstream emits, makes `rustc` adopt
+every member of `libhermit.a` as one of its own objects — the kernel's compiled-C intrinsics have no
+`.llvmbc` section, so `lto = "fat"` fails with "failed to get bitcode from object file". `-bundle`
+says what was meant. Neither failure appears in a debug build.
 
 ---
 

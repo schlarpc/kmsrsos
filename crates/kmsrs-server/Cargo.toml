@@ -20,22 +20,30 @@ kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 serde.workspace = true
 toml.workspace = true
-socket2.workspace = true
 mio.workspace = true
 
-# OS-015 (#298): the one dependency that is target-gated, and the reason is that
-# it does not exist on the third target rather than that we do not want it.
+# OS-015 (#298), PKG-013 (#250): the two dependencies that are target-gated, and
+# in both cases the reason is that they do not exist on the third target rather
+# than that we do not want them.
+#
 # `ctrlc` picks its implementation with `#[cfg(unix)]` and `#[cfg(windows)]`;
 # Hermit is neither, so the module is simply absent and the crate does not
 # compile there. Hermit has no signals to handle in the first place
-# (docs/research-findings.md §R2), so nothing is lost — but the fact belongs in
-# the manifest, where a build can act on it, rather than only in a comment.
+# (docs/research-findings.md §R2), so nothing is lost.
+#
+# `socket2` is the same shape: its `sys` module is `#[cfg(unix)]`/`#[cfg(windows)]`
+# and nothing else, so on Hermit the build fails with `E0583` before any of our
+# code is reached. Both options it is used for are already known to be
+# unreachable or a no-op there (`OS-010`, #261), so the Hermit branch of
+# `net::listener` binds with `std::net::TcpListener` instead — see
+# `platform::BACKLOG_IS_EXPLICIT` for the one property that is thereby lost.
 #
 # This is the exception to "never a cfg on an item": every other platform
 # difference is a `const bool` in src/platform.rs whose branches all compile
 # everywhere. No runtime bool can select around a crate that will not build.
 [target.'cfg(not(target_os = "hermit"))'.dependencies]
 ctrlc.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
 # Deterministic entropy for the host-state tests. Enabling `testing` here does

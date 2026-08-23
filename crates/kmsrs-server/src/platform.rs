@@ -70,6 +70,32 @@ pub const SIGNALS_EXIST: bool = !cfg!(target_os = "hermit");
 /// than trusting that none of them matters.
 pub const SETSOCKOPT_IS_A_STUB: bool = cfg!(target_os = "hermit");
 
+/// Whether this target's listen backlog is chosen by this program
+/// (`NET-003`, #152; `PKG-013`, #250).
+///
+/// False on Hermit, and the reason is a *dependency* rather than a kernel
+/// difference: `socket2` selects its `sys` module with `#[cfg(unix)]` and
+/// `#[cfg(windows)]`, so it does not compile there at all and the manifest does
+/// not name it. Without it there is no way to call `listen(2)` with a chosen
+/// depth from safe `std`, so the Hermit branch binds with
+/// `std::net::TcpListener::bind` and takes std's own backlog of 128.
+///
+/// That is only acceptable while std's figure and [`crate::net::addr::BACKLOG`]
+/// agree, which is what [`STD_BACKLOG`] exists to be checked against. A backlog
+/// deeper than a bounded worker pool can drain turns a connection flood from a
+/// fast refusal into a slow one, which is the whole content of `NET-003` — so
+/// the day the two diverge is the day this needs a different answer, not a
+/// larger comment.
+pub const BACKLOG_IS_EXPLICIT: bool = !cfg!(target_os = "hermit");
+
+/// The backlog `std::net::TcpListener::bind` passes to `listen(2)`
+/// (`NET-003`, #152; `PKG-013`, #250).
+///
+/// Not a knob — a fact about the standard library, recorded here so that
+/// [`BACKLOG_IS_EXPLICIT`] has something to be checked against. std has used
+/// 128 on every platform since the socket code was written.
+pub const STD_BACKLOG: i32 = 128;
+
 /// Whether this target's wall clock is trustworthy (`OS-007`, #258).
 ///
 /// False on Hermit. Its monotonic clock is solid — TSC and APIC, microsecond
@@ -292,8 +318,9 @@ mod tests {
     )]
 
     use super::{
-        HermitBehaviour, SETSOCKOPT_IS_A_STUB, SIGNALS_EXIST, SINGLE_SOCKET_ONLY, SOCKET_OPTIONS,
-        SignalHandling, WALL_CLOCK_IS_TRUSTWORTHY, install_shutdown_handler,
+        BACKLOG_IS_EXPLICIT, HermitBehaviour, SETSOCKOPT_IS_A_STUB, SIGNALS_EXIST,
+        SINGLE_SOCKET_ONLY, SOCKET_OPTIONS, STD_BACKLOG, SignalHandling, WALL_CLOCK_IS_TRUSTWORTHY,
+        install_shutdown_handler,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -306,6 +333,25 @@ mod tests {
         assert_eq!(SETSOCKOPT_IS_A_STUB, hermit);
         assert_eq!(SIGNALS_EXIST, !hermit);
         assert_eq!(WALL_CLOCK_IS_TRUSTWORTHY, !hermit);
+        assert_eq!(BACKLOG_IS_EXPLICIT, !hermit);
+    }
+
+    /// `NET-003` (#152): the target that cannot choose its backlog must still
+    /// end up with the depth this program asked for.
+    ///
+    /// Hermit binds through `std::net::TcpListener::bind` because `socket2`
+    /// does not compile there (`PKG-013`, #250), so the queue is std's 128
+    /// rather than [`crate::net::addr::BACKLOG`]. That is fine only while the
+    /// two agree, and this is what notices when they stop.
+    #[test]
+    fn the_implicit_backlog_matches_the_one_we_would_have_chosen() {
+        assert_eq!(
+            crate::net::addr::BACKLOG,
+            STD_BACKLOG,
+            "Hermit takes std's listen backlog because socket2 is absent \
+             there; a NET-003 backlog that no longer equals it is a queue \
+             depth nobody chose"
+        );
     }
 
     /// `OS-010` (#261): the audit's entire content. No socket option may be
