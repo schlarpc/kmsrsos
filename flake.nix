@@ -218,6 +218,23 @@
             cargoNextestExtraArgs =
               "-p kmsrs-policy --features permissive-retail,strict-clock-skew";
           });
+
+          # Every feature combination compiles (CFG-010, #175). vlmcsd has at
+          # least four combinations that do not, which is what happens when the
+          # matrix is large and nobody builds the corners.
+          #
+          # The full powerset, not a subset: with two features in one crate that
+          # is four builds, which is cheap enough that narrowing it would only
+          # be guessing at which corner breaks.
+          feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
+            inherit cargoArtifacts;
+            pname = "kmsrsos-feature-powerset";
+            buildPhaseCargoCommand = ''
+              cargo hack check --workspace --all-targets --feature-powerset --locked
+            '';
+            nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ])
+              ++ [ (pkgsFor system).cargo-hack ];
+          });
         });
 
       devShells = eachSystem (system:

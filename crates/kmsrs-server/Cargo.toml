@@ -18,12 +18,16 @@ kmsrs-policy.workspace = true
 kmsrs-db.workspace = true
 kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # Deterministic entropy for the host-state tests. Enabling `testing` here does
 # not enable it for the binary: under resolver 3 a dev-dependency's features do
 # not propagate to the normal dependency graph (ARCH-003, #3).
 kmsrs-proto = { workspace = true, features = ["testing"] }
+# The wire tests build RPC PDUs by hand, the way a client would.
+zerocopy = { workspace = true, features = ["derive"] }
 # Used only by `tests/workspace_invariants.rs`, which reads the workspace's own
 # manifests and lockfile to check the structural invariants of ARCH-001,
 # ARCH-008, ARCH-016 and SEC-001.

@@ -262,3 +262,16 @@ and `IsRandomized`, and nothing about host builds. Copying the values would be e
 that produced every fabricated GUID the audits found. The constraint is worth enforcing, so it is
 reopened as #286 in the form that has a real data source — deriving each host key's earliest build
 from the images its `pkeyconfig` appears in — rather than closed outright.
+
+**D37 — vlmcsd-scale feature stripping (`CFG-011`, #176).** vlmcsd carries roughly 30 preprocessor
+macros and 7 build presets whose purpose is to shrink the binary for OpenWrt-class embedded targets —
+`NO_LOG`, `NO_CLIENT_LIST`, `NO_STRICT_MODES`, `NO_HELP`, `NO_TIMEOUT`, `ONE_FILE` and the rest. They
+are why 21 of the 119 rows in its feature matrix are build-gated rather than simply present, so a
+statement about "what vlmcsd does" is really a statement about one of 2^n vlmcsd builds.
+
+The targets that motivated them are not targets here (axiom A4: Linux, Windows, and Hermit on
+x86-64). Buying a smaller binary with a combinatorial explosion of behaviours is a bad trade when
+every build has to be differentially tested against a reference — the number of artifacts to test
+would grow faster than confidence in any of them. The two build-time flags that do exist
+(`permissive-retail`, `strict-clock-skew`) each change behaviour a deployment might genuinely need
+changed, and CI builds the **whole powerset** rather than a sampled subset (`CFG-010`, #175).
