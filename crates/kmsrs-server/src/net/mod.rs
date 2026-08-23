@@ -17,6 +17,6 @@ pub mod addr;
 pub mod driver;
 pub mod listener;
 
-pub use addr::{KMS_BIND_ADDRESSES, KMS_PORT, normalise, normalise_socket};
+pub use addr::{KMS_PORT, bind_addresses, normalise, normalise_socket};
 pub use driver::{Capacity, Runtime, Shutdown, serve};
 pub use listener::{BindOutcome, Bound, NothingBound, bind_all};

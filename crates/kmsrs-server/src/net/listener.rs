@@ -40,7 +40,7 @@
 //! only IPv6 serves that. Failing to bind *everything* is the only fatal case,
 //! because a server that listens nowhere is not a server.
 
-use crate::net::addr::{BACKLOG, KMS_BIND_ADDRESSES};
+use crate::net::addr::{BACKLOG, bind_addresses};
 use core::net::SocketAddr;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
@@ -96,7 +96,7 @@ pub type BindOutcome = (Vec<Bound>, Vec<(SocketAddr, io::Error)>);
 /// underlying error — a start-up failure that names one of two addresses is a
 /// start-up failure nobody can diagnose.
 pub fn bind_all() -> Result<BindOutcome, NothingBound> {
-    bind_each(&KMS_BIND_ADDRESSES)
+    bind_each(bind_addresses())
 }
 
 /// Bind a specific set of addresses.
@@ -139,12 +139,27 @@ pub(crate) fn bind_one(address: SocketAddr) -> io::Result<Bound> {
     // *steal* a bound port, so it is not set there — the Windows default
     // already means what Unix's `SO_REUSEADDR` means. They are opposites, which
     // vlmcsd's own diagnostic text confuses.
+    //
+    // Note what `cfg(unix)` does on the third platform: Hermit is not
+    // `target_family = "unix"`, so this is skipped there. That happens to be
+    // right — Hermit's `setsockopt` is a stub and `SO_REUSEADDR` is a silent
+    // no-op — but it is right by luck, not by intent. `cfg(unix)` silently
+    // taking the non-Unix branch on Hermit is the trap `docs/research-findings.md`
+    // §R2 names, so every use of it in this crate is worth a note saying which
+    // branch Hermit lands in and whether that was the intended one.
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
 
     // `NET-001` (#150): make the two sockets genuinely independent, so what is
     // bound is what was asked for rather than whatever `net.ipv6.bindv6only`
     // happens to say.
+    //
+    // Unreachable on Hermit, and that is now by construction rather than by
+    // accident: `KMS_BIND_ADDRESSES` has no IPv6 entry there (`OS-009`, #260).
+    // Hermit's `setsockopt` is a stub that returns `EINVAL` for this option, so
+    // before that change the single-socket outcome came out of *this* `?` — an
+    // error path that also told the operator IPv6 was unavailable rather than
+    // that it does not exist on the target.
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
