@@ -22,6 +22,13 @@
 //! reject rather than skip, and the build is the last place a bad row can be
 //! rejected before it becomes a wrong answer on the wire.
 //!
+//! It is not the only place. `crates/kmsrs-db/tests/data_integrity.rs`
+//! (`TEST-007`, #228) checks the *shipped tables* for what neither this script
+//! nor the generated `const` block can express — table floors, cross-table
+//! agreement, date plausibility, and provenance. A `products.toml` with three
+//! products in it parses here, sorts, and passes every index assertion; what it
+//! fails is being the database.
+//!
 //! # About the lint relaxation
 //!
 //! `ARCH-008` (#8) denies panicking constructs, because a panic in the server

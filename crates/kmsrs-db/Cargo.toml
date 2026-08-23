@@ -16,6 +16,10 @@ repository.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+# `tests/data_integrity.rs` (TEST-007, #228) reads the committed products.toml
+# to check its provenance. The build script already depends on `toml`; this is
+# the same parse, asked a different question.
+toml.workspace = true
 
 [lints]
 workspace = true
