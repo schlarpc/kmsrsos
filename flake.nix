@@ -476,14 +476,14 @@
           dontPatchELF = true;
         };
 
-      # --- The bootable disk image (OS-002, #253) ---
+      # --- What both bootable artefacts are made of (OS-002, #253) ---
       #
-      # A GPT disk with one partition: an EFI system partition holding three
-      # files, which is the whole of what a Hermit deployment is.
+      # An EFI system partition holding three files, which is the whole of what
+      # a Hermit deployment is.
       #
-      #   \EFI\BOOT\BOOTX64.EFI    the loader — the path OVMF starts by default,
-      #                            so nothing has to be registered in NVRAM and
-      #                            the first boot of a fresh VM works
+      #   \EFI\BOOT\BOOTX64.EFI    the loader — the path firmware starts by
+      #                            default, so nothing has to be registered in
+      #                            NVRAM and a fresh VM works on its first boot
       #   \EFI\hermit\hermit-app   this program
       #   \EFI\hermit\hermit-bootargs   optional, and the only runtime channel
       #
@@ -503,52 +503,119 @@
       # took effect, because "the file was read" and "the setting applied" are
       # different claims.
       #
-      # Every identifier that would otherwise be random is fixed: the disk GUID,
-      # the partition GUID and the FAT volume ID. Two builds of one revision are
-      # the same bytes (`SEC-010`, #202), and a disk image is exactly the kind
-      # of artefact where that silently stops being true.
-      hermitDiskImageFor = { system, app, bootargs ? null }:
+      # The FAT volume ID is fixed rather than derived from the clock, and
+      # mtools takes its timestamps from `SOURCE_DATE_EPOCH`, which the stdenv
+      # sets — so two builds of one revision are the same bytes (`SEC-010`,
+      # #202). A filesystem image is exactly the kind of artefact where that
+      # silently stops being true.
+      hermitEspFor = { system, app, bootargs ? null, sectors, fat }:
         let
           pkgs = pkgsFor system;
         in
-        pkgs.runCommand "kmsrsos-hermit-image"
+        pkgs.runCommand "kmsrsos-hermit-esp"
           {
-            nativeBuildInputs = [ pkgs.gptfdisk pkgs.dosfstools pkgs.mtools ];
+            nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ];
           } ''
           set -euo pipefail
 
+          truncate -s $((${toString sectors} * 512)) $out
+          mkfs.vfat -F ${toString fat} -n HERMIT -i DEADBEEF $out
+
+          mmd -i $out ::/EFI ::/EFI/BOOT ::/EFI/hermit
+          mcopy -i $out ${hermit-loader-efi} ::/EFI/BOOT/BOOTX64.EFI
+          mcopy -i $out ${app}/bin/kmsrsos-hermit ::/EFI/hermit/hermit-app
+          ${pkgs.lib.optionalString (bootargs != null) ''
+            printf '%s' ${pkgs.lib.escapeShellArg bootargs} > bootargs
+            mcopy -i $out bootargs ::/EFI/hermit/hermit-bootargs
+          ''}
+        '';
+
+      # --- The bootable disk image (OS-002, #253) ---
+      #
+      # A GPT disk with that ESP as its only partition. This is the artefact for
+      # a machine that boots from a disk, and the one whose bootargs file can be
+      # *edited in place* — mount the ESP, change one line, reboot. The ISO
+      # cannot do that, being read-only.
+      hermitDiskImageFor = { system, app, bootargs ? null }:
+        let
+          pkgs = pkgsFor system;
           # 128 MiB, in 512-byte sectors. The ESP runs from sector 2048 (1 MiB,
           # the conventional alignment) to sector 262110, leaving the last 33
-          # sectors for the backup GPT header and table.
-          sectors=262144
-          first=2048
-          last=262110
+          # for the backup GPT header and table.
+          first = 2048;
+          last = 262110;
+          esp = hermitEspFor {
+            inherit system app bootargs;
+            sectors = last - first + 1;
+            fat = 32;
+          };
+        in
+        pkgs.runCommand "kmsrsos-hermit-image"
+          {
+            nativeBuildInputs = [ pkgs.gptfdisk ];
+          } ''
+          set -euo pipefail
 
-          truncate -s $((sectors * 512)) disk.img
+          truncate -s $((262144 * 512)) disk.img
           sgdisk \
             --clear \
             --disk-guid=6b8a1f2c-9d34-4e5a-8c71-0f2d3e4b5a60 \
-            --new=1:$first:$last \
+            --new=1:${toString first}:${toString last} \
             --typecode=1:ef00 \
             --partition-guid=1:1c4e5f60-7a8b-49cd-9e0f-1a2b3c4d5e6f \
             --change-name=1:"EFI system partition" \
             disk.img
 
-          truncate -s $(((last - first + 1) * 512)) esp.img
-          mkfs.vfat -F 32 -n HERMIT -i DEADBEEF esp.img
-
-          mmd -i esp.img ::/EFI ::/EFI/BOOT ::/EFI/hermit
-          mcopy -i esp.img ${hermit-loader-efi} ::/EFI/BOOT/BOOTX64.EFI
-          mcopy -i esp.img ${app}/bin/kmsrsos-hermit ::/EFI/hermit/hermit-app
-          ${pkgs.lib.optionalString (bootargs != null) ''
-            printf '%s' ${pkgs.lib.escapeShellArg bootargs} > bootargs
-            mcopy -i esp.img bootargs ::/EFI/hermit/hermit-bootargs
-          ''}
-
-          dd if=esp.img of=disk.img bs=512 seek=$first conv=notrunc status=none
+          dd if=${esp} of=disk.img bs=512 seek=${toString first} conv=notrunc \
+            status=none
 
           mkdir -p $out
           cp disk.img $out/kmsrsos-hermit.img
+        '';
+
+      # --- The bootable ISO (OS-002, #253) ---
+      #
+      # The same ESP, as an El Torito no-emulation EFI boot image. Firmware
+      # presents that image as a volume and starts `\EFI\BOOT\BOOTX64.EFI` from
+      # it, so the loader's `get_image_file_system` finds `hermit-app` next to
+      # itself exactly as it does on the disk.
+      #
+      # This exists because it is the only artefact a Proxmox admin can deploy
+      # without touching the CLI: there is an ISO upload button and there is no
+      # "import this disk" button. A CD-ROM is read-only, so the trade is that
+      # its bootargs cannot be edited in place — changing one means rebuilding
+      # the ISO, or using the disk image instead.
+      #
+      # 16 MiB and FAT16 rather than 127 MiB and FAT32. An ISO cannot grow, so
+      # there is nothing for slack to be for, and FAT32 needs enough clusters
+      # that mkfs.vfat will not make one this small. UEFI firmware is required
+      # to read FAT12, FAT16 and FAT32 alike.
+      hermitIsoFor = { system, app, bootargs ? null }:
+        let
+          pkgs = pkgsFor system;
+          esp = hermitEspFor {
+            inherit system app bootargs;
+            sectors = 32768;
+            fat = 16;
+          };
+        in
+        pkgs.runCommand "kmsrsos-hermit-iso"
+          {
+            nativeBuildInputs = [ pkgs.xorriso ];
+          } ''
+          set -euo pipefail
+
+          mkdir -p isoroot
+          cp ${esp} isoroot/efi.img
+
+          xorriso -as mkisofs \
+            -V KMSRSOS \
+            -e efi.img -no-emul-boot \
+            -o kmsrsos-hermit.iso \
+            isoroot
+
+          mkdir -p $out
+          cp kmsrsos-hermit.iso $out/kmsrsos-hermit.iso
         '';
 
       # --- Booting it (OS-001, #252) ---
@@ -774,17 +841,22 @@
       # Proxmox can start, since its web UI exposes no `args` field at all
       # (`OS-008`, #259).
       #
-      # Two boots, because there are two claims:
+      # Three boots, because there are three claims:
       #
-      #   1. The shipped image boots unattended and activates. Unattended is
-      #      part of the claim: OVMF starts `\EFI\BOOT\BOOTX64.EFI` by itself,
-      #      so nothing has to be registered in NVRAM and a fresh VM works on
-      #      its first boot.
+      #   1. The shipped disk image boots unattended and activates. Unattended
+      #      is part of the claim: firmware starts `\EFI\BOOT\BOOTX64.EFI` by
+      #      itself, so nothing has to be registered in NVRAM and a fresh VM
+      #      works on its first boot.
       #   2. A `hermit-bootargs` file on the ESP is honoured. Not "is read" —
       #      honoured. The value moves the web UI to a port it is not on by
       #      default, and the check fails if the default port is still the one
       #      answering. Reading a file and applying what is in it are different
       #      claims, and the difference is where a quoting mistake lives.
+      #   3. The **ISO** boots too, from a CD-ROM rather than a disk. That is a
+      #      different firmware path — El Torito, with the ESP presented as a
+      #      virtual volume — and it is the one a Proxmox admin will actually
+      #      take, since the web UI has an ISO upload button and no way to
+      #      import a disk.
       hermitImageBootCheckFor = system:
         let
           pkgs = pkgsFor system;
@@ -803,15 +875,25 @@
           set -euo pipefail
           mkdir -p $out
 
+          # `medium` is `disk` or `cdrom`: the same firmware, a different way in.
           boot() {
-            local image="$1" name="$2"
+            local image="$1" name="$2" medium="$3"
             local serial="$PWD/$name.log"
 
-            # Both the image and the UEFI variable store are written to, so
-            # neither can be the read-only store path.
-            cp "$image" "$PWD/$name.img"
+            # The UEFI variable store is written to, so it cannot be the
+            # read-only store path. Neither can a disk image; an ISO can, being
+            # read-only by nature.
             cp ${pkgs.OVMF.variables} "$PWD/$name-vars.fd"
-            chmod +w "$PWD/$name.img" "$PWD/$name-vars.fd"
+            chmod +w "$PWD/$name-vars.fd"
+
+            local drive
+            if [ "$medium" = cdrom ]; then
+              drive="-cdrom $image"
+            else
+              cp "$image" "$PWD/$name.img"
+              chmod +w "$PWD/$name.img"
+              drive="-drive format=raw,file=$PWD/$name.img"
+            fi
 
             qemu-system-x86_64 \
               -machine q35 \
@@ -820,7 +902,7 @@
               -serial "file:$serial" \
               -drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware} \
               -drive if=pflash,format=raw,unit=1,file="$PWD/$name-vars.fd" \
-              -drive format=raw,file="$PWD/$name.img" \
+              $drive \
               -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688,hostfwd=tcp:127.0.0.1:8080-:8080,hostfwd=tcp:127.0.0.1:8081-:8081 \
               -device virtio-net-pci,netdev=u1,disable-legacy=on &
             qemu=$!
@@ -853,20 +935,24 @@
             exit 1
           }
 
-          # --- 1. The shipped image, exactly as released ---
-          boot ${configured.osImage}/kmsrsos-hermit.img plain
+          stop() {
+            cp "$PWD/$1.log" $out/$1.log
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+          }
+
+          # --- 1. The shipped disk image, exactly as released ---
+          boot ${configured.osImage}/kmsrsos-hermit.img plain disk
 
           ${configured.client}/bin/kmsrs-client --timeout 30 127.0.0.1:1688 \
             || fail "the image booted but does not activate" plain
           curl -fsS --max-time 10 http://127.0.0.1:8080/ > /dev/null \
             || fail "the web UI is not on its default port" plain
 
-          cp "$PWD/plain.log" $out/plain.log
-          kill $qemu 2>/dev/null || true
-          wait $qemu 2>/dev/null || true
+          stop plain
 
           # --- 2. The same image plus one file on the ESP ---
-          boot ${withBootargs}/kmsrsos-hermit.img bootargs
+          boot ${withBootargs}/kmsrsos-hermit.img bootargs disk
 
           curl -fsS --max-time 10 http://127.0.0.1:8081/ > /dev/null \
             || fail "hermit-bootargs did not move the web UI to 8081" bootargs
@@ -875,8 +961,15 @@
               bootargs
           fi
 
-          cp "$PWD/bootargs.log" $out/bootargs.log
-          kill $qemu 2>/dev/null || true
+          stop bootargs
+
+          # --- 3. The ISO, from a CD-ROM ---
+          boot ${configured.osIso}/kmsrsos-hermit.iso iso cdrom
+
+          ${configured.client}/bin/kmsrs-client --timeout 30 127.0.0.1:1688 \
+            || fail "the ISO booted but does not activate" iso
+
+          stop iso
         '';
 
       # --- The build-time settings a deployment might genuinely need changed ---
@@ -1039,11 +1132,13 @@
             cargoArtifacts = craneLib.buildDepsOnly hermitArgs;
             cargoExtraArgs = hermitArgs.cargoExtraArgs + features;
           });
-          # `OS-002` (#253): the artefact an operator actually deploys. The
-          # image ships without a bootargs file — a deployment that needs one
-          # writes it onto the ESP, which is the entire in-place
-          # reconfiguration story (`OS-008`, #259).
+          # `OS-002` (#253): the two artefacts an operator actually deploys.
+          # Neither ships with a bootargs file — a deployment that needs one
+          # writes it onto the disk image's ESP, which is the entire in-place
+          # reconfiguration story (`OS-008`, #259) and the one thing the
+          # read-only ISO cannot do.
           osImage = hermitDiskImageFor { inherit system; app = hermit; };
+          osIso = hermitIsoFor { inherit system; app = hermit; };
         };
 
       # The Debian and RPM architecture names, which are neither Nix's nor
@@ -1189,10 +1284,15 @@
           # and diffed without rebuilding the application (`PKG-013`, #250).
           hermit-kernel = hermitKernelFor { inherit system; };
 
-          # `nix build .#osImage` — the bootable GPT disk (`OS-002`, #253).
-          # This is what an operator uploads to a hypervisor; everything else
-          # in this set is a component of it.
+          # `nix build .#osImage` — the bootable GPT disk (`OS-002`, #253), for
+          # a machine that boots from a disk and whose bootargs you may want to
+          # edit later.
           osImage = configured.osImage;
+
+          # `nix build .#osIso` — the same thing as an El Torito UEFI ISO. The
+          # only artefact deployable from the Proxmox web UI, which has an ISO
+          # upload button and no disk-import one.
+          osIso = configured.osIso;
 
           # --- OS packages (PKG-009, #246) ---
           #

@@ -314,10 +314,9 @@ The findings this section rests on are in
 [`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
 kernel and `qemu-server` sources rather than from documentation.
 
-### The disk image (`OS-002`, #253)
+### The bootable artifacts (`OS-002`, #253)
 
-`nix build .#osImage` produces `kmsrsos-hermit.img`: a 128 MiB GPT disk with one partition, an EFI
-system partition holding three files.
+There are two, and they contain the same three files:
 
 | Path on the ESP | What it is |
 |---|---|
@@ -326,30 +325,49 @@ system partition holding three files.
 | `\EFI\hermit\hermit-bootargs` | optional; the only runtime channel, see below |
 
 That is the whole deployment. The loader reads all three itself, so there is no `-kernel`, no
-`-initrd` and nothing on the command line — which is what makes it deployable on Proxmox at all,
+`-initrd` and nothing on the command line — which is what makes this deployable on Proxmox at all,
 since the web UI exposes no `args` field (`OS-008`, #259). Because the loader lives at the default
 boot path, nothing has to be registered in UEFI NVRAM and a fresh VM works on its first boot.
 
-To run it locally:
+| | `nix build .#osIso` | `nix build .#osImage` |
+|---|---|---|
+| Artifact | `kmsrsos-hermit.iso`, 17 MiB | `kmsrsos-hermit.img`, 128 MiB GPT disk |
+| Attach as | CD-ROM | disk |
+| Proxmox | **upload in the web UI**, attach, boot | `qm importdisk`, CLI only |
+| Boot args | rebuild the ISO | edit the file on the ESP, reboot |
+
+**Use the ISO unless you want to change boot args in place.** It is the only one deployable without
+touching a Proxmox shell, and a read-only boot medium is the right default for a host with no disk
+I/O anyway. Both are checked by `hermit-image-boot` on every change.
+
+#### On Proxmox
+
+Create a VM with **no disk**, machine type `q35`, BIOS **OVMF (UEFI)**, and an EFI disk for the
+variable store. Upload `kmsrsos-hermit.iso` to your ISO storage, attach it to the CD-ROM drive, and
+put the CD-ROM first in the boot order.
+
+Then read the rest of this section before you start it, because the serial port and the CPU type are
+not optional and the first boot is the one whose output matters.
+
+The disk-image route is `qm importdisk <vmid> kmsrsos-hermit.img <storage>`, then attach the
+resulting unused disk and set the boot order to it.
+
+#### Locally
 
 ```shell
-$ cp result/kmsrsos-hermit.img disk.img && chmod +w disk.img
 $ cp /path/to/OVMF_VARS.fd vars.fd && chmod +w vars.fd
 $ qemu-system-x86_64 -machine q35 \
     -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
     -smp 1 -m 512M -display none -serial stdio -no-reboot \
     -drive if=pflash,format=raw,unit=0,readonly=on,file=/path/to/OVMF_CODE.fd \
     -drive if=pflash,format=raw,unit=1,file=vars.fd \
-    -drive format=raw,file=disk.img \
+    -cdrom result-osiso/kmsrsos-hermit.iso \
     -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
     -device virtio-net-pci,netdev=u1,disable-legacy=on
 ```
 
-Both the image and the UEFI variable store are written to, so neither can be read-only.
-
-On Proxmox: `qm importdisk <vmid> kmsrsos-hermit.img <storage>`, attach the result, set the boot
-order to it, and set the machine type to `q35` with OVMF (UEFI) firmware. Then read the rest of this
-section, because the serial port and the CPU type are not optional.
+The UEFI variable store is written to, so it cannot be the read-only store path. For the disk image,
+swap `-cdrom …` for `-drive format=raw,file=disk.img` and make a writable copy of that too.
 
 ### Running it under plain QEMU (`OS-001`, #252)
 

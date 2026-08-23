@@ -133,8 +133,10 @@ jobs:
       - name: Build the unikernel application
         run: nix build .#hermit --print-build-logs --out-link result-hermit
 
-      - name: Build the bootable disk image
-        run: nix build .#osImage --print-build-logs --out-link result-osimage
+      - name: Build the bootable disk image and ISO
+        run: |
+          nix build .#osImage --print-build-logs --out-link result-osimage
+          nix build .#osIso   --print-build-logs --out-link result-osiso
 
       # The loader identifies a Hermit application by its OS/ABI byte, and a
       # fixup phase that "helpfully" rewrote the ELF would produce something

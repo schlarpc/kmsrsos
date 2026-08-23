@@ -95,7 +95,8 @@ $ cargo fmt                  # format
 $ nix build          # build the package
 $ nix build .#windows # cross-compile for Windows (x86_64-pc-windows-msvc)
 $ nix build .#hermit  # the Hermit unikernel application (x86_64-unknown-hermit)
-$ nix build .#osImage # a bootable GPT/UEFI disk image of that unikernel
+$ nix build .#osIso   # a bootable UEFI ISO of that unikernel
+$ nix build .#osImage # the same thing as a GPT disk image
 $ nix flake check    # run all checks (build, clippy, fmt, test, coverage)
 $ nix flake update   # update flake inputs
 ```

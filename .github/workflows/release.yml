@@ -11,7 +11,7 @@
 #   * `.deb` and `.rpm` for both, carrying the hardened systemd unit
 #   * the container image, to GHCR, multi-arch
 #   * Windows `.exe`s, cross-compiled
-#   * the bootable Hermit OS image, x86_64 only (OS-002, #253)
+#   * the bootable Hermit OS image and ISO, x86_64 only (OS-002, #253)
 #   * an SBOM per artifact, checksums, and a cosign signature over the lot
 name: Release
 
@@ -73,8 +73,13 @@ jobs:
           # a gzip header carries a timestamp (SEC-010, #202).
           if [ "${{ matrix.name }}" = "x86_64-linux" ]; then
             nix build .#osImage --print-build-logs --out-link result-osimage
+            nix build .#osIso   --print-build-logs --out-link result-osiso
             gzip -9 -n -c result-osimage/kmsrsos-hermit.img \
               > out/kmsrsos-hermit-x86_64.img.gz
+            # The ISO is uploaded to a hypervisor as-is, so it ships
+            # uncompressed — it is 17 MiB, and a `.iso.gz` is one more step
+            # between an operator and a running host.
+            cp result-osiso/kmsrsos-hermit.iso out/kmsrsos-hermit-x86_64.iso
           fi
 
       # `SEC-010` (#202): the binaries are static, so "what is in this" is a
