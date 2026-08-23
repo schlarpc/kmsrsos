@@ -358,6 +358,8 @@ dependencies = [
  "kmsrs-crypto",
  "kmsrs-db",
  "kmsrs-proto",
+ "kmsrs-server",
+ "zerocopy",
 ]
 
 [[package]]

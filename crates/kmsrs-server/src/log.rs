@@ -388,11 +388,25 @@ fn application_name(event: &Event) -> &'static str {
 
 /// The product's human name (`POL-017`, #105).
 ///
-/// An unknown product logs as `unknown`, with the raw GUID in its own field
-/// rather than lost — which is the operator-facing half of activating products
-/// this build has never heard of.
+/// Two lookups, because a KMS ID is not always a product row. The value a
+/// client sends is a *counted* ID, and for most products that is also the
+/// activation ID of a `pkeyconfig` row — but not for all of them. Server 2025's
+/// counted ID is one that is not, so looking only in `PRODUCTS` logged
+/// `product: "unknown"` beside `known_product: true`, which is a contradiction
+/// an operator would rightly not trust.
+///
+/// The fallback names the host key that counts it, which is the most specific
+/// true thing available. A genuinely unknown product logs as `unknown` with the
+/// raw GUID in its own field rather than lost — the operator-facing half of
+/// activating products this build has never heard of.
 fn product_name(event: &Event) -> &'static str {
-    kmsrs_db::product(event.counted.0).map_or("unknown", |entry| entry.description)
+    if let Some(entry) = kmsrs_db::product(event.counted.0) {
+        return entry.description;
+    }
+    kmsrs_db::csvlks_counting(event.counted.0)
+        .first()
+        .and_then(|index| kmsrs_db::csvlk_at(*index))
+        .map_or("unknown", |csvlk| csvlk.description)
 }
 
 /// Append `"name":"value"` with the value escaped.

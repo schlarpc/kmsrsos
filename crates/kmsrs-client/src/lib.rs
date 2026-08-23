@@ -8,6 +8,12 @@
 //! survives that probe unreconfigured, so a test that only asks "did it
 //! activate?" would pass on all of them.
 
+pub mod probe;
+pub mod request;
+
+pub use probe::{Finding, Probe, ProbeError, Report};
+pub use request::{RequestError, RequestFields};
+
 /// Every response property the client checks, as a bitfield (`CLI-001`, #207).
 ///
 /// A single pass/fail verdict throws away exactly the information that makes

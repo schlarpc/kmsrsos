@@ -589,7 +589,7 @@ fn the_protocol_crates_own_client_can_activate() {
 
         let reply = read_pdu(&mut stream);
         let parsed = association
-            .read_reply(&reply, call_id, &mut |warning| {
+            .read_reply(&reply, call_id, TransferSyntax::Ndr32, &mut |warning| {
                 warnings.push(warning.to_string());
             })
             .expect("the bind was accepted");
@@ -616,13 +616,14 @@ fn the_protocol_crates_own_client_can_activate() {
 
         let reply = read_pdu(&mut stream);
         let parsed = association
-            .read_reply(&reply, call_id, &mut |warning| {
+            .read_reply(&reply, call_id, accepted.syntax, &mut |warning| {
                 warnings.push(warning.to_string());
             })
             .expect("the request was answered");
-        let Reply::Response { stub } = parsed else {
+        let Reply::Response { stub, result } = parsed else {
             panic!("expected a response, got {parsed:?}");
         };
+        assert_eq!(result, 0, "the call returned an error HRESULT");
         assert!(
             stub.len() > 100,
             "a v6 response carries an ePID and a trailer, got {} bytes",

@@ -435,3 +435,33 @@ fn is_balanced_json_object(line: &str) -> bool {
     }
     depth == 0 && !in_string
 }
+
+/// A KMS ID that is not itself a product row still logs a real name.
+///
+/// The value a client sends is a *counted* ID, and for most products that is
+/// also a `pkeyconfig` activation ID — but not for all. Server 2025's is one
+/// that is not, and looking only in `PRODUCTS` logged `product: "unknown"`
+/// beside `known_product: true`: a contradiction an operator would rightly not
+/// trust.
+#[test]
+fn a_counted_id_that_is_not_a_product_row_still_names_something() {
+    let counted = guid(SERVER_2025);
+    assert!(
+        kmsrs_db::product(counted).is_none(),
+        "this test is about the case where the direct lookup misses"
+    );
+    assert!(kmsrs_db::is_known_counted_id(counted));
+
+    let event = event_for(counted, "office-pc");
+    let line = json_logger().format_request(&event).unwrap();
+
+    assert!(line.contains("\"known_product\":true"), "{line}");
+    assert!(
+        !line.contains("\"product\":\"unknown\""),
+        "a known product must not log as unknown: {line}"
+    );
+    assert!(
+        line.contains("Windows Server 2025"),
+        "it should name the host key that counts it: {line}"
+    );
+}
