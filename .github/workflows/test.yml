@@ -111,9 +111,11 @@ jobs:
   # a platform difference that appears at compile time — `socket2` not existing
   # on Hermit was found exactly this way.
   #
-  # There is nothing to run here: the artefact is an `ELFOSABI_STANDALONE` image
-  # for a machine with no operating system under it, so a runner cannot execute
-  # it and `doCheck` is off. Booting it belongs with `OS-001` (#252).
+  # Nothing here runs the image: it is an `ELFOSABI_STANDALONE` file for a
+  # machine with no operating system under it, so a runner cannot execute it and
+  # `doCheck` is off. Booting it is the `hermit-boot` check (`OS-001`, #252),
+  # which `nix flake check` runs in the matrix leg above — this job is the
+  # faster signal, and the one that would still fail if QEMU were unavailable.
   hermit:
     runs-on: ubuntu-latest
     permissions:

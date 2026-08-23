@@ -16,11 +16,27 @@
 //!   anti-fingerprinting property would become a constant while the service
 //!   kept working, so the entropy self-test refuses to serve (`OS-012`, #263).
 //!
+//! None of those is handled here. Every one of them is a named capability in
+//! [`kmsrs_server::platform`] whose branches compile on all three targets, so
+//! the Hermit behaviour is decided — and asserted — by a test suite running on
+//! Linux. What is left for this crate is a `main` that calls the same entry
+//! point the hosted binary calls, and the reason that is the entire content of
+//! the file is the point of `ARCH-005`: one driver, not one per platform.
+//!
+//! # What the unikernel does not have
+//!
+//! No signals, so nothing installs a handler and the drain path is reached only
+//! by the hypervisor stopping the guest (`OS-015`, #298). No filesystem of any
+//! kind, which is what makes axiom A5 structural here rather than a policy
+//! (`OS-006`, #257). One IPv4 socket, because `bind()` records an address it
+//! then ignores (`OS-009`, #260). And a wall clock that is one CMOS read plus
+//! local ticks, which does not matter because it is read exactly once
+//! (`OS-007`, #258).
+//!
 //! [Hermit]: https://github.com/hermit-os
 
-fn main() {
-    eprintln!(
-        "{} on Hermit — platform layer not yet implemented (OS-001, #252)",
-        kmsrs_server::PRODUCT_NAME
-    );
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    kmsrs_server::entry::serve()
 }

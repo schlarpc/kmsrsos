@@ -314,6 +314,36 @@ The findings this section rests on are in
 [`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
 kernel and `qemu-server` sources rather than from documentation.
 
+### Running it under plain QEMU (`OS-001`, #252)
+
+`nix build .#hermit` produces `bin/kmsrsos-hermit`. That file is an application, not a bootable
+image: it has `ELFOSABI_STANDALONE` set and QEMU cannot start it directly. The
+[hermit-loader](https://github.com/hermit-os/loader) is what boots it, and its multiboot build is
+what `-kernel` takes:
+
+```shell
+$ qemu-system-x86_64 \
+    -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+    -smp 1 -m 512M -display none -serial stdio -no-reboot \
+    -kernel hermit-loader-x86_64-multiboot \
+    -initrd result/bin/kmsrsos-hermit \
+    -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+    -device virtio-net-pci,netdev=u1,disable-legacy=on
+```
+
+The guest acquires a DHCPv4 lease, logs `listening 0.0.0.0:1688`, and answers. `kmsrs-client
+127.0.0.1:1688` is the check that it answers *correctly*; that exact sequence is the `hermit-boot`
+check in `nix flake check`, so it is exercised on every change rather than only when someone
+remembers.
+
+Three flags in that command line are not decoration. `rdseed` is what stops the guest refusing to
+serve — see [Set the CPU type to `host`](#set-the-cpu-type-to-host) for why. `disable-legacy=on` is
+what makes the virtio-net device non-transitional, which is the whole of
+[`OS-004`](#virtio-net-may-not-attach-at-all-os-004-255). And `-serial` is mandatory for the reason
+below.
+
+For a machine that boots from a disk rather than from `-kernel`, see `OS-002` (#253).
+
 ### A serial port is mandatory (`OS-005`, #256)
 
 **Hermit's only console is the 16550 UART at `0x3F8`.** There is no VGA text mode, no framebuffer

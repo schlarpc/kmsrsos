@@ -8,10 +8,13 @@
 //! the tree — which option is set where, how many wall-clock reads exist, which
 //! `cfg` predicates are relied on — and checked on every host.
 //!
-//! That is a weaker guarantee than running the code, and it is the strongest
-//! one available until `OS-001` (#252) can boot. It catches the failure that
-//! actually happens: somebody adds a `setsockopt` call, or a second
-//! `SystemTime::now()`, on a Linux box where both work perfectly.
+//! That is a weaker guarantee than running the code, and it is still worth
+//! having now that `OS-001` (#252) boots: the `hermit-boot` check in
+//! `nix flake check` proves the program serves, and these prove the *reasons*
+//! it does. They catch the failure that actually happens — somebody adds a
+//! `setsockopt` call, or a second `SystemTime::now()`, on a Linux box where
+//! both work perfectly — long before a boot test would notice, and in a form
+//! that says which line is wrong.
 
 #![allow(
     clippy::unwrap_used,
@@ -287,5 +290,41 @@ fn the_cfg_unix_audit_has_something_to_audit() {
         uses > 0,
         "no shipped source uses cfg(unix), so every_cfg_unix_says_what_hermit_does \
          proves nothing and would keep passing if one were added"
+    );
+}
+
+/// `OS-001` (#252): the unikernel binary starts the program, it does not
+/// reimplement starting it.
+///
+/// `kmsrs-os` is a `main` that calls [`kmsrs_server::entry::serve`] and nothing
+/// else. Anything more than that is a second start-up sequence on the one
+/// target where a missing step — the entropy self-test, above all — cannot be
+/// found by attaching a debugger.
+///
+/// The `hermit-boot` check would catch a Hermit binary that failed to serve.
+/// It would not catch one that served *differently*, which is what a second
+/// copy of the wiring drifts into.
+#[test]
+fn the_hermit_binary_only_calls_the_shared_entry_point() {
+    let source = std::fs::read_to_string(workspace_root().join("crates/kmsrs-os/src/main.rs"))
+        .expect("the Hermit binary's main.rs is readable");
+
+    let code: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect();
+
+    assert_eq!(
+        code,
+        vec![
+            "use std::process::ExitCode;",
+            "fn main() -> ExitCode {",
+            "kmsrs_server::entry::serve()",
+            "}",
+        ],
+        "kmsrs-os has grown a start-up sequence of its own. Every binary that \
+         serves KMS calls kmsrs_server::entry::serve, so that the entropy \
+         self-test and the bind order have one definition (OS-001, #252)."
     );
 }

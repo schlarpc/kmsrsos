@@ -53,6 +53,18 @@
         "type": "github"
       }
     },
+    "hermit-loader-multiboot": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-ZTuzYvuOtjMYpoiHsi0skoiiHiBuWDWPminoTObb+ag=",
+        "type": "file",
+        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64-multiboot"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64-multiboot"
+      }
+    },
     "nix-direnv": {
       "inputs": {
         "flake-parts": "flake-parts",
@@ -95,6 +107,7 @@
       "inputs": {
         "crane": "crane",
         "hermit-kernel": "hermit-kernel",
+        "hermit-loader-multiboot": "hermit-loader-multiboot",
         "nix-direnv": "nix-direnv",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",

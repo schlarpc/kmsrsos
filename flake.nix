@@ -51,6 +51,20 @@
       flake = false;
       type = "tarball";
     };
+
+    # The loader, which is what actually boots a Hermit application: the
+    # application ELF is not a kernel image and QEMU cannot start it (`OS-001`,
+    # #252). The multiboot build is the one `-kernel` takes, and it is what the
+    # boot check uses; the UEFI build is a separate artefact and belongs with
+    # the disk image (`OS-002`, #253).
+    #
+    # A released binary rather than a build from source: it is a third program
+    # with a third pinned nightly, and `flake.lock` pins the bytes either way.
+    hermit-loader-multiboot = {
+      url = "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64-multiboot";
+      flake = false;
+      type = "file";
+    };
   };
 
   outputs =
@@ -62,6 +76,7 @@
     , nix-direnv
     , hermit-kernel
     , rust-std-hermit
+    , hermit-loader-multiboot
     , ...
     }:
     let
@@ -409,6 +424,86 @@
           dontStrip = true;
           dontPatchELF = true;
         };
+
+      # --- Booting it (OS-001, #252) ---
+      #
+      # The one test in this repository that runs the shipped program on the
+      # target it is for. Everything else about Hermit is asserted from Linux
+      # against a `const bool` in `platform.rs`, which is the right way to check
+      # a decision — and no way at all to check that the decisions add up to a
+      # host that answers.
+      #
+      # So: boot the unikernel under QEMU, then drive it with `kmsrs-client`,
+      # which is the anti-fingerprinting regression suite (`CLI-002`, #208). A
+      # pass means all three protocol versions completed *and* the probe found
+      # nothing that distinguishes the host — on a target where the entropy
+      # source, the socket semantics and the clock are all different.
+      #
+      # Three details are load-bearing:
+      #
+      #   * `rdseed` in the CPU model. Hermit's `sys_read_entropy` silently
+      #     falls back to a Park-Miller LCG seeded from a static zero, so
+      #     without it the guest refuses to serve (`OS-012`, #263) — which is
+      #     the correct behaviour and would make this check fail for the right
+      #     reason. It is in the model here because what is being tested is the
+      #     serving path.
+      #   * `disable-legacy=on`, which forces a non-transitional virtio-net
+      #     device. Hermit rejects PCI device IDs below 0x1040, and the fact
+      #     that Proxmox never emits this flag is exactly `OS-004` (#255).
+      #   * No `-enable-kvm`. TCG is fast enough — the guest reaches its
+      #     listener in under a second of guest time — and a build sandbox has
+      #     no `/dev/kvm`.
+      hermitBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+        in
+        pkgs.runCommand "hermit-boot"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 600;
+          } ''
+          set -euo pipefail
+          port=1688
+          serial="$PWD/serial.log"
+
+          qemu-system-x86_64 \
+            -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+            -smp 1 -m 512M -display none -no-reboot \
+            -serial "file:$serial" \
+            -kernel ${hermit-loader-multiboot} \
+            -initrd ${configured.hermit}/bin/kmsrsos-hermit \
+            -netdev user,id=u1,hostfwd=tcp:127.0.0.1:$port-:1688 \
+            -device virtio-net-pci,netdev=u1,disable-legacy=on &
+          qemu=$!
+          trap 'kill $qemu 2>/dev/null || true' EXIT
+
+          # The guest boots in about a second; the loop is generous because a
+          # loaded builder is not, and it gives up rather than hanging.
+          for attempt in $(seq 1 60); do
+            if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                 127.0.0.1:$port; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              echo "the guest never answered on $port" >&2
+              cat "$serial" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # The real assertion: every protocol version, and a verdict.
+          if ! ${configured.client}/bin/kmsrs-client --timeout 30 \
+                 127.0.0.1:$port; then
+            echo "--- guest serial console ---" >&2
+            cat "$serial" >&2 || true
+            exit 1
+          fi
+
+          mkdir -p $out
+          cp "$serial" $out/serial.log
+        '';
 
       # --- The build-time settings a deployment might genuinely need changed ---
       #
@@ -914,6 +1009,10 @@
               strictClockSkew = true;
             };
           }).server;
+
+          # `OS-001` (#252): the unikernel boots and activates. The only check
+          # here that runs the program on the platform it was built for.
+          hermit-boot = hermitBootCheckFor system;
 
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
