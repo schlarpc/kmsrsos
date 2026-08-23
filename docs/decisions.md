@@ -35,8 +35,8 @@ These constrain everything. A proposal that violates one is wrong by default, no
 |---|---|---|
 | 1 | Crate split | 8 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary (#1) |
 | 2 | Framing | `zerocopy` end to end, including checked prefix-splitting for variable DCE/RPC sections (#11) |
-| 3 | Panic-freedom | Lints everywhere + a symbol-level CI gate on `proto`/`crypto` + `panic = "abort"` (#9) |
-| 4 | Concurrency | tokio on Linux/Windows; blocking `std::net` + `std::thread` on Hermit (#5) |
+| 3 | Panic-freedom | Lints everywhere + a symbol-level CI gate on `proto`/`crypto` + `panic = "abort"`; [what the gate found](#what-the-panic-freedom-gate-actually-found-arch-009-9) (#9) |
+| 4 | Concurrency | One `mio` event loop on all three targets — superseded the original two-driver plan, [see below](#superseding-decision--one-mio-event-loop-not-two-drivers-arch-005-5) (#5) |
 | 5 | Crypto | One minimal Rijndael in `kmsrs-crypto` with exhaustive KATs, quarantined as the A8 exception (#41) |
 | 6 | Product-data source | Microsoft `pkeyconfig` artifacts, extracted by `kmsrs-dbgen` (#125, #126) |
 | 7 | Product gate | **Split**: permissive on unknown KMS IDs; strict on retail/preview and AppID mismatch (#98) |
@@ -310,3 +310,42 @@ every build has to be differentially tested against a reference — the number o
 would grow faster than confidence in any of them. The two build-time flags that do exist
 (`permissive-retail`, `strict-clock-skew`) each change behaviour a deployment might genuinely need
 changed, and CI builds the **whole powerset** rather than a sampled subset (`CFG-010`, #175).
+
+
+### What the panic-freedom gate actually found (`ARCH-009`, #9)
+
+Decision 3 pairs a lint policy with a symbol-level gate, and the pairing is the point: they catch
+disjoint sets of defects, and the second set is the one that reaches production.
+
+`ARCH-008` (#8) denies `unwrap`, `expect`, `panic`, `indexing_slicing` and unchecked arithmetic in
+the core crates. That is a policy about panics somebody **writes**. `panic-audit/` links
+`kmsrs-proto` and `kmsrs-crypto` into a freestanding `x86_64-unknown-none` binary with the release
+profile's own settings and then reads its symbol table, which is a question about panics the
+**compiler inserts** — and with the deny list already clean, it found six:
+
+| Where | What | Why the lint could not see it |
+|---|---|---|
+| `KeySchedule::expand` ×3 | Bounds checks on the key-word loop and the round-constant index | The module deliberately allows indexing, on the sound argument that no attacker-controlled index exists inside the block permutation. True, and irrelevant to whether the check is *elided* |
+| `KeySchedule::{encrypt_block, decrypt_block}` | `self.round_keys[self.rounds]` | `rounds` is 10 or 11 by construction, but it is a plain `usize` field and a caller holding `&KeySchedule` gives the optimiser no range to work with |
+| `EPid::clone` | `ArrayVec`'s `Clone` collects through `Extend`, which panics on overflow | Source and destination have identical capacity, so overflow is impossible — and invisible to LLVM. Fixed by storing an array and a length, which makes `Clone` a memcpy |
+| `Connection::step` | `inbound.drain(..declared).collect()` — `drain` panics past the end, `Extend` panics on overflow | `declared` had just been checked against both bounds three lines earlier |
+| `Connection::handle_request` | `reassembly.drain(..).collect()` | Same shape |
+| `Connection::next_event` | `events.remove(0)` behind an `is_empty()` guard | The guard makes it unreachable; the optimiser could not put the two facts together |
+
+None of these was a bug — every one was genuinely unreachable, and the tests, the fuzzers and the
+golden vectors all passed with them present. That is precisely why the gate is worth having. The
+release profile sets `panic = "abort"`, and on Hermit an abort kills the VM with only the hypervisor
+able to restart it (`OS-013`, #264): the cost of being wrong about "unreachable" is highest on the
+platform with the least ability to recover, and "unreachable" was being asserted by review rather
+than by the compiler.
+
+The fixes share a shape. Where the impossibility is real, it is *stated* so the optimiser can use it
+— a `min` on a field whose range is known, one extra unread round constant so a quotient is provably
+in range — rather than asserted at runtime. Where a panicking API had a `try_` sibling, the sibling
+is used and its error branch reports rather than truncates (`SEC-012`, #204). Nothing was silenced
+with `unwrap_or`, which would have traded a compile-time-obvious bound for a silently wrong answer.
+
+The check runs on every PR and is self-validating: a second build with `--features inject-panic`
+must **fail** the audit, because a check that has never been observed failing is not a check. Both
+builds need nightly for `-Zbuild-std`, which is confined to `nix develop .#fuzz` and is the same
+nightly the fuzzers use; nothing that ships is built with it.
