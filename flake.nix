@@ -318,11 +318,22 @@
       # removing a transport this program does not use would be a different
       # decision from the one `OS-006` asks for.
       #
-      # `tests/hermit_features.rs` is what keeps this list honest.
+      # **`fsgsbase` is also out**, for a different reason and one found by
+      # booting the image: with it on, the kernel *refuses to run* on a
+      # processor that does not expose the FSGSBASE instruction family, which
+      # is every one of Proxmox's stock CPU models — `kvm64`, `qemu64`,
+      # `x86-64-v2-AES`. The failure is a reset loop, and the one line
+      # explaining it scrolls past before the machine reboots. Without the
+      # feature the kernel uses RDMSR/WRMSR instead, which is slower per thread
+      # switch by an amount no KMS host will ever measure.
+      #
+      # `tests/hermit_features.rs` checks this list, and the
+      # `hermit-kernel-features` check reads the kernel it produced — because a
+      # test of the list cannot notice a build that ignored it, which is exactly
+      # what happened.
       hermitKernelFeatures = [
         "acpi"
         "dhcpv4"
-        "fsgsbase"
         "kernel-stack"
         "loader"
         "pci"
@@ -354,9 +365,18 @@
       #     x86_64-unknown-none` before building; the toolchain above already
       #     has that target, so the shim below makes the call a no-op rather
       #     than patching the source.
-      hermitKernelFor = { system, features ? hermitKernelFeatures }:
+      # There is no `features` parameter, and that is deliberate. There was one,
+      # defaulting to `null` in one caller and to the list in another, and the
+      # result was that `packages.hermit-kernel` had the trimmed feature set
+      # while every artefact that ships was built from the kernel's *defaults* —
+      # `virtio-fs`, `uhyve` and `fsgsbase` all quietly back on. Every test
+      # passed, because they read the list in this file rather than the flags
+      # the build ran. One feature set, one call path, no parameter to disagree
+      # about (`OS-006`, #257).
+      hermitKernelFor = { system }:
         let
           pkgs = pkgsFor system;
+          features = hermitKernelFeatures;
           src = hermit-kernel;
           nightly = hermitNightlyFor system;
           craneNightly = (crane.mkLib pkgs).overrideToolchain nightly;
@@ -396,8 +416,8 @@
             cargo run --package=xtask --no-default-features --offline -- build \
               --arch x86_64 --release \
               --target-dir "$NIX_BUILD_TOP/target" \
-              ${if features == null then "" else
-                "--no-default-features --features " + builtins.concatStringsSep "," features}
+              --no-default-features \
+              --features ${builtins.concatStringsSep "," features}
             runHook postBuild
           '';
 
@@ -405,6 +425,13 @@
             runHook preInstall
             mkdir -p $out/lib
             cp "$NIX_BUILD_TOP/target/x86_64/release/libhermit.a" $out/lib/libhermit.a
+
+            # What was actually passed, recorded next to what it produced. The
+            # feature list in this flake was right for six commits while the
+            # shipped kernel was built from upstream's defaults; a test that
+            # reads the list cannot notice that, and one that reads this can
+            # (`OS-006`, #257).
+            echo "${builtins.concatStringsSep "," features}" > $out/features
             runHook postInstall
           '';
 
@@ -439,10 +466,10 @@
           paths = [ (rustToolchainFor system) (rustStdHermitFor system) ];
         };
 
-      hermitArgsFor = { system, features ? null }:
+      hermitArgsFor = { system }:
         let
           commonArgs = commonArgsFor system;
-          kernel = hermitKernelFor { inherit system features; };
+          kernel = hermitKernelFor { inherit system; };
           sysroot = hermitSysrootFor system;
         in
         commonArgs // {
@@ -713,6 +740,70 @@
 
           mkdir -p $out
           cp "$serial" $out/serial.log
+        '';
+
+      # --- The feature set, checked against the kernel it produced (OS-006) ---
+      #
+      # `tests/hermit_features.rs` reads the list in this file. That is worth
+      # having and it is not enough, which was demonstrated the hard way: the
+      # list said `--no-default-features` while `hermitArgsFor` passed
+      # `features = null` through to the kernel derivation, so every shipped
+      # artefact was built from upstream's defaults — `virtio-fs`, `uhyve` and
+      # `fsgsbase` all quietly on — and every test passed. The symptom was a VM
+      # that reboot-looped on any CPU model without FSGSBASE, which is most of
+      # them.
+      #
+      # So this checks the *artefact*. The kernel records the flags it was
+      # given, and the archive is grepped for code that can only be there if a
+      # forbidden feature was on. A positive control keeps the greps from
+      # passing vacuously if the strings ever move.
+      hermitKernelCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          kernel = hermitKernelFor { inherit system; };
+          expected = builtins.concatStringsSep "," hermitKernelFeatures;
+        in
+        pkgs.runCommand "hermit-kernel-features" { } ''
+          set -euo pipefail
+
+          actual=$(cat ${kernel}/features)
+          if [ "$actual" != "${expected}" ]; then
+            echo "the kernel was built with:  $actual" >&2
+            echo "the flake's list says:      ${expected}" >&2
+            echo "(OS-006, #257)" >&2
+            exit 1
+          fi
+
+          # Not a restatement of the line above: this reads the compiled kernel.
+          # `virtiofs` appears 149 times in a default build and zero times here.
+          if grep -qa virtiofs ${kernel}/lib/libhermit.a; then
+            echo "the kernel contains virtio-fs code, so axiom A5 is a policy \
+          on this target rather than a property of it (OS-006, #257)" >&2
+            exit 1
+          fi
+
+          # The `fsgsbase` feature makes the kernel refuse to run on a processor
+          # without the FSGSBASE instructions — which is a reset loop on
+          # Proxmox's default CPU models, before any output an operator can
+          # read. It is off, and this is what notices if it comes back.
+          if grep -qa "FSGSBASE support is enabled" ${kernel}/lib/libhermit.a; then
+            echo "the kernel is built with fsgsbase, so it will reset on any \
+          CPU model that lacks the instruction family (OS-006, #257)" >&2
+            exit 1
+          fi
+
+          # The positive control. If these stop matching, the two greps above
+          # are passing because the strings moved rather than because the
+          # features are off.
+          for present in "DHCP config acquired" "Virtio network driver initialized"; do
+            grep -qa "$present" ${kernel}/lib/libhermit.a || {
+              echo "the kernel does not contain \"$present\", so this check \
+          can no longer tell an absent feature from a moved string" >&2
+              exit 1
+            }
+          done
+
+          touch $out
         '';
 
       # --- The Proxmox PCI topology, reproduced (OS-004, #255) ---
@@ -1505,6 +1596,11 @@
           # is rejected, the program refuses to start rather than serving
           # nothing, and `disable-legacy=on` rescues it.
           hermit-proxmox-topology = hermitProxmoxCheckFor system;
+
+          # `OS-006` (#257): the kernel that ships was built with the feature
+          # set this flake declares — checked against the archive, not against
+          # the list that was supposed to produce it.
+          hermit-kernel-features = hermitKernelCheckFor system;
 
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;

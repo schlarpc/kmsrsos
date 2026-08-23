@@ -111,20 +111,42 @@ fn no_filesystem_transport_is_compiled_in() {
     }
 }
 
-/// The set is *pinned*, not merely trimmed.
+/// The set is *pinned*, not merely trimmed, and unconditionally so.
 ///
 /// A list of features means nothing if the kernel's defaults are also on: the
-/// default set contains both `virtio-fs` and `uhyve`, so an added feature list
-/// without `--no-default-features` would enable them again and every assertion
-/// above would still pass.
+/// default set contains `virtio-fs`, `uhyve` and `fsgsbase`, so a feature list
+/// passed without `--no-default-features` turns them all back on and every
+/// assertion above still passes.
+///
+/// Which is not hypothetical. The kernel derivation used to take a `features`
+/// parameter, one caller defaulted it to `null`, and `null` meant "pass no
+/// feature flags at all" — so `packages.hermit-kernel` had the trimmed set
+/// while every artefact that ships was built from upstream's defaults. The
+/// tests in this file all passed, because they read this list rather than the
+/// flags the build ran.
+///
+/// So there are two guards now. This one is that the flags are unconditional:
+/// no `features == null`, no `optionalString`, nothing that can evaluate to an
+/// empty string. The other is `checks.hermit-kernel-features`, which reads the
+/// compiled archive.
 #[test]
 fn the_feature_set_replaces_the_kernel_defaults() {
     let flake = flake();
+
     assert!(
-        flake.contains("--no-default-features --features"),
+        flake.contains("--no-default-features \\"),
         "the kernel build no longer passes --no-default-features, so the \
-         kernel's own defaults — which include virtio-fs and uhyve — are back \
-         (OS-006, #257)"
+         kernel's own defaults — which include virtio-fs, uhyve and fsgsbase — \
+         are back (OS-006, #257)"
+    );
+
+    // The kernel derivation takes no `features` argument. One feature set, one
+    // call path, nothing for two callers to disagree about.
+    assert!(
+        !flake.contains("hermitKernelFor = { system, features"),
+        "the kernel derivation has grown a `features` parameter again. It had \
+         one, a caller defaulted it to null, and the shipped kernel was built \
+         from upstream's defaults for six commits (OS-006, #257)."
     );
 }
 
@@ -168,5 +190,36 @@ fn the_feature_list_has_no_duplicates() {
         features.len(),
         before,
         "a kernel feature is listed twice (OS-006, #257)"
+    );
+}
+
+/// The kernel does not demand a CPU feature a hypervisor may not expose
+/// (`OS-006`, #257).
+///
+/// A separate concern from A5, and the one that was found by booting the image
+/// rather than by reading anything. With `fsgsbase` on, the kernel *refuses to
+/// run* on a processor without the FSGSBASE instruction family — and that is
+/// every one of Proxmox's stock CPU models. What an operator sees is a reset
+/// loop; the single line explaining it scrolls past before the machine reboots,
+/// so the symptom carries no information at all.
+///
+/// Without the feature the kernel uses RDMSR/WRMSR, which costs an amount of
+/// time per thread switch that a host answering one 384-byte request per client
+/// per few hours will never measure.
+///
+/// `checks.hermit-kernel-features` asserts the same thing against the compiled
+/// archive, which is the half that would have caught the build ignoring this
+/// list.
+#[test]
+fn the_kernel_needs_no_cpu_feature_a_stock_model_lacks() {
+    let features = kernel_features();
+
+    // Absent from kvm64, qemu64 and x86-64-v2; present in `host` on any Ivy
+    // Bridge or EPYC. Not worth a boot failure.
+    assert!(
+        !features.iter().any(|feature| feature == "fsgsbase"),
+        "the Hermit kernel is built with `fsgsbase`, which makes it refuse to \
+         run — as a reset loop, with no readable diagnostic — on a CPU model \
+         that does not expose the instruction family (OS-006, #257)"
     );
 }

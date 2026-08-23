@@ -494,25 +494,35 @@ pointless: the guest cannot see any of them.
 
 ### Set the CPU type to `host`
 
-Not cosmetic, and not about speed. Hermit's CSPRNG seeds from **RDSEED** or from virtio-rng, and on a
-seeding failure `sys_read_entropy` *silently succeeds* — filling the buffer from a Park–Miller–Lehmer
-LCG seeded with a static zero, a stream that is identical across boots, and emitting only a warning
-the guest never sees. `getrandom` sees an ordinary success and hands it on.
+**Options → Processors → Type: `host`.** Not cosmetic, and not about speed.
 
-Proxmox's default `kvm64` CPU model **does not expose RDSEED**, and Proxmox's `virtio-rng-pci` lands
-on the same conventional PCI bus Hermit rejects. So on a default Proxmox VM this is the likely path
-rather than the edge case, and every value this host draws — the RPC association group, response IVs
-and salts, the hardware ID, the randomised ePID fields — would quietly become a constant while the
-service kept working perfectly.
+Hermit's CSPRNG is properly built — ChaCha20, reseeded every second — but it has to be *seeded*, and
+in this build the only seed source is the **RDSEED** instruction. (`virtio-rng` is not compiled in;
+Proxmox's `virtio-rng-pci` lands on the same conventional PCI bus Hermit rejects, so it would not
+help even if it were.) On a seeding failure `sys_read_entropy` does not fail: it fills the buffer
+from a Park–Miller–Lehmer LCG instead, seeded from the timestamp counter at boot, and emits one
+warning to the serial console. `getrandom` sees an ordinary success and hands it on.
 
-**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) **refuses to
-serve** rather than serving a predictable identity: the process exits 69 and says so, naming RDSEED,
-because the operator who reads that line is one hypervisor setting away from the fix. The source is
-re-tested every five minutes thereafter — Hermit reseeds every second and a failed reseed is
-silent — and a source that starts repeating takes `/healthz` to 503 and
-`kmsrsos_entropy_healthy` to 0.
+That generator has 31 bits of state and a published multiplier. Every value this host draws — the
+RPC association group, response IVs and salts, the hardware ID, the randomised ePID fields — comes
+from it, and recovering its state from a handful of responses is arithmetic rather than
+cryptanalysis.
 
-So the mistake is loud rather than silent. It is still a mistake, and this is how not to make it.
+Proxmox's default `kvm64` model does not expose RDSEED. Neither do `qemu64` or `x86-64-v2-AES`. So on
+a stock VM this is the likely path rather than the edge case.
+
+> **The start-up self-test does not catch this** — a defect, tracked as
+> [#332](https://github.com/schlarpc/kmsrsos/issues/332). `OS-012` (#263) tests for a source that
+> *repeats*, which is what the kernel used to do; the LCG advances, so two draws differ and the test
+> passes. What the console says is `Unable to read entropy! Fallback to a naive implementation!`,
+> once per draw, and the host then serves normally.
+>
+> Until that is fixed, **check the serial console on first boot**. If that line is there, the CPU
+> type is wrong.
+
+The source is still re-tested every five minutes, and a source that starts *repeating* takes
+`/healthz` to 503 and `kmsrsos_entropy_healthy` to 0. That is the failure mode the test was built
+for; it is not this one.
 
 ### Memory (`OS-011`, #262)
 
