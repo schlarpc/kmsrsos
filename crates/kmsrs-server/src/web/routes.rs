@@ -296,7 +296,70 @@ fn status_page(snapshot: &Snapshot<'_>) -> String {
     }
     body.push_str("</table>");
 
+    body.push_str(&machines_table(snapshot));
     page("Status", &body)
+}
+
+/// How many rows the fleet view shows.
+///
+/// A page rather than the fleet, for the same reason `/events` shows a page:
+/// the cost of a render must not grow with how long the host has been up
+/// (`OBS-012`, #188).
+pub const MACHINES_PER_PAGE: usize = 50;
+
+/// The fleet, one row per `(machine, SKU)` (`OBS-006`, #182).
+///
+/// py-kms has keyed this three times, six years apart, and got a different
+/// answer each time: the machine alone, then `(machine, application)`, then
+/// `(machine, SKU)`. The reason it keeps being rediscovered is that the right
+/// key depends on what the row is *for*, and there are two different things:
+/// the **count** a client is told is per `(machine, application)`, because that
+/// is what a genuine host caches; the **fleet view** an operator reads is per
+/// `(machine, SKU)`, because a box running Windows Enterprise and Office LTSC
+/// is two things they maintain.
+///
+/// So one machine activating Windows and Office is two rows here and one entry
+/// in each of two count buckets, and neither number is derived from the other.
+fn machines_table(snapshot: &Snapshot<'_>) -> String {
+    let rows = snapshot.events.clients(MACHINES_PER_PAGE);
+
+    let mut out = String::new();
+    let _: core::fmt::Result = write!(
+        out,
+        "<h2>Machines seen</h2>\
+         <p>One row per machine and product. A machine activating Windows and \
+         Office is two rows here and one entry in each of two counts.</p>\
+         <table><tr><th>Name</th><th>Machine</th><th>Product</th>\
+         <th>Requests</th><th>Activated</th><th>From</th></tr>"
+    );
+
+    if rows.is_empty() {
+        out.push_str("<tr><td colspan=\"6\">nothing yet</td></tr>");
+    }
+
+    for row in &rows {
+        // The SKU is what a client claimed, and a host reads and ignores it
+        // (`KMS-018`, #34) — so it is shown as the raw GUID rather than looked
+        // up, because a name here would suggest this host acted on it.
+        let _: core::fmt::Result = write!(
+            out,
+            "<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>\
+             <td>{}</td><td class=\"{}\">{} / {}</td><td><code>{}</code></td></tr>",
+            escape(row.workstation_name.as_str()),
+            escape(&row.client_machine_id.0.to_string()),
+            escape(&row.sku.0.to_string()),
+            row.requests,
+            if row.activated_last { "ok" } else { "no" },
+            row.activations,
+            row.requests,
+            escape(
+                &row.peer
+                    .map_or_else(|| String::from("—"), |peer| peer.address.to_string())
+            ),
+        );
+    }
+    out.push_str("</table>");
+    out
 }
 
 /// Join the bound ports for display.
@@ -1056,6 +1119,47 @@ mod tests {
         assert!(names.iter().all(|name| name.starts_with("kmsrsos_")));
     }
 
+    /// `OBS-006` (#182): one machine with two products is two rows.
+    ///
+    /// The status page's fleet view is keyed on `(machine, SKU)`, because a box
+    /// running Windows Enterprise and Office LTSC is two things an operator
+    /// maintains. The *count* a client is told is keyed differently and is not
+    /// derived from this — see `EventLog::clients`.
+    #[test]
+    fn the_status_page_shows_one_row_per_machine_and_product() {
+        let mut fixture = Fixture::new();
+        let machine = kmsrs_db::Guid::from_bytes([0xAB; 16]);
+        record_request(&mut fixture.events, machine, [0x01; 16], [0x55; 16]);
+        record_request(&mut fixture.events, machine, [0x02; 16], [0x0F; 16]);
+        // And the same machine and SKU again, which must not add a third row.
+        record_request(&mut fixture.events, machine, [0x01; 16], [0x55; 16]);
+
+        let body = body_of(&fixture, "/");
+        assert!(body.contains("Machines seen"), "{body}");
+
+        let rows = body.matches(&machine.to_string()).count();
+        assert_eq!(
+            rows, 2,
+            "one machine with two products should be two rows:\n{body}"
+        );
+        assert!(
+            body.contains(&kmsrs_db::Guid::from_bytes([0x01; 16]).to_string()),
+            "the first SKU is missing"
+        );
+        assert!(
+            body.contains(&kmsrs_db::Guid::from_bytes([0x02; 16]).to_string()),
+            "the second SKU is missing"
+        );
+    }
+
+    /// A host that has seen nobody says so, rather than rendering an empty
+    /// table an operator has to interpret.
+    #[test]
+    fn the_fleet_view_says_when_it_is_empty() {
+        let fixture = Fixture::new();
+        assert!(body_of(&fixture, "/").contains("nothing yet"));
+    }
+
     /// `CFG-008` (#173): which build this is, in both places an operator looks.
     ///
     /// A constant-1 gauge with labels is the conventional shape for build
@@ -1170,6 +1274,30 @@ mod tests {
     }
 
     fn record_named(log: &mut EventLog, name: &str) {
+        record_full(log, name, [0x44; 16], [0x22; 16], [0x11; 16]);
+    }
+
+    /// One request from a named machine, for a named SKU and application.
+    ///
+    /// The three GUIDs are what `OBS-006` (#182) is about: the fleet view keys
+    /// on `(machine, SKU)` and the count keys on `(machine, application)`, so a
+    /// fixture that could only vary one of them could not tell the two apart.
+    fn record_request(
+        log: &mut EventLog,
+        machine: kmsrs_db::Guid,
+        sku: [u8; 16],
+        application: [u8; 16],
+    ) {
+        record_full(log, "WKS-000001", machine.to_bytes(), sku, application);
+    }
+
+    fn record_full(
+        log: &mut EventLog,
+        name: &str,
+        machine: [u8; 16],
+        sku: [u8; 16],
+        application: [u8; 16],
+    ) {
         use kmsrs_proto::kms::request::Request as KmsRequest;
         use kmsrs_proto::kms::status::LicenseStatus;
         use kmsrs_proto::kms::version::ProtocolVersion;
@@ -1189,10 +1317,10 @@ mod tests {
             client_kind: ClientKind::BareMetal,
             license_status: LicenseStatus::from_wire(2),
             grace: GraceMinutes(0),
-            application: ApplicationId(kmsrs_db::Guid::from_bytes([0x11; 16])),
-            sku: SkuId(kmsrs_db::Guid::from_bytes([0x22; 16])),
+            application: ApplicationId(kmsrs_db::Guid::from_bytes(application)),
+            sku: SkuId(kmsrs_db::Guid::from_bytes(sku)),
             counted: KmsCountedId(kmsrs_db::Guid::from_bytes([0x33; 16])),
-            client_machine_id: ClientMachineId(kmsrs_db::Guid::from_bytes([0x44; 16])),
+            client_machine_id: ClientMachineId(kmsrs_db::Guid::from_bytes(machine)),
             previous_client_machine_id: None,
             client_time: ClientTime(FileTime::from_ticks(133_000_000_000_000_000)),
             required_clients: RequiredClients(25),

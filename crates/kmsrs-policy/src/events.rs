@@ -39,6 +39,7 @@
 use crate::counting::CountOutcome;
 use crate::gate::{Grant, Observations, Refusal};
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 use core::net::IpAddr;
 use core::time::Duration;
 use kmsrs_db::Guid;
@@ -47,7 +48,8 @@ use kmsrs_proto::kms::status::LicenseStatus;
 use kmsrs_proto::kms::version::ProtocolVersion;
 use kmsrs_proto::time::Instant;
 use kmsrs_proto::types::{
-    ApplicationId, ClientKind, ClientMachineId, CsvlkSelection, KmsCountedId, WorkstationName,
+    ApplicationId, ClientKind, ClientMachineId, CsvlkSelection, KmsCountedId, SkuId,
+    WorkstationName,
 };
 
 /// How many events the log holds before the oldest is dropped.
@@ -134,6 +136,14 @@ pub struct Event {
     /// The product the client asked about, kept as a raw GUID so an unknown
     /// product is still legible (`POL-017`, #105).
     pub counted: KmsCountedId,
+    /// The SKU the client claimed (`OBS-006`, #182).
+    ///
+    /// A host **reads and ignores** it (`KMS-018`, #34) — the counted ID is
+    /// what a decision is made on — so this is recorded for the operator's
+    /// benefit and never for a policy's. It is the second half of the composite
+    /// identity: one machine activating Windows and Office is two rows in
+    /// [`EventLog::clients`], and the SKU is what tells them apart.
+    pub sku: SkuId,
     /// The client's machine ID.
     pub client_machine_id: ClientMachineId,
     /// The client's licence status.
@@ -233,6 +243,7 @@ impl EventLog {
             version: request.version,
             application: request.application,
             counted: request.counted,
+            sku: request.sku,
             client_machine_id: request.client_machine_id,
             license_status: request.license_status,
             client_kind: request.client_kind,
@@ -338,6 +349,120 @@ impl EventLog {
         }
         seen.len()
     }
+
+    /// The fleet, one row per `(machine, SKU)` (`OBS-006`, #182).
+    ///
+    /// # Why that key, and not either half of it
+    ///
+    /// py-kms has keyed this three times, six years apart, and got a different
+    /// answer each time: `clientMachineId` alone (2019 fork), then
+    /// `(cmid, applicationId)` (upstream), then `(cmid, skuId)` (2025 fork).
+    /// The reason it keeps being rediscovered is that **the right key depends
+    /// on what the row is for**, and there are two different things here:
+    ///
+    /// * The **count** a client is told is per `(cmid, application)`, because
+    ///   that is what a genuine host caches — one machine activating Windows
+    ///   and Office is one machine to the Windows bucket and one to the Office
+    ///   bucket (`POL-002`, #90). [`crate::counting::ClientCounts`] owns that,
+    ///   and this view is not its source.
+    /// * The **fleet view** an operator reads is per `(cmid, SKU)`, because a
+    ///   machine running Windows Enterprise and Office LTSC is two things they
+    ///   maintain. Keying on the application would merge Office and Project
+    ///   into one row; keying on the machine alone merges everything and loses
+    ///   the answer to "what is on that box".
+    ///
+    /// Keying on the machine alone is also the shape that produces py-kms's
+    /// original defect: a mutable row per machine, overwritten on every
+    /// request, so the SKU column shows whichever product asked last.
+    ///
+    /// # Bounded
+    ///
+    /// Walks the log once and returns at most `limit` rows, most recently seen
+    /// first. The log is already bounded in both dimensions, so this is
+    /// `O(log)` in time and `O(limit)` in output — MelroyB's dashboard sorts
+    /// the whole log per view (`OBS-012`, #188).
+    #[must_use]
+    pub fn clients(&self, limit: usize) -> Vec<ClientView> {
+        let mut rows: Vec<ClientView> = Vec::new();
+
+        for event in &self.events {
+            let key = (event.client_machine_id.0, event.sku.0);
+            if let Some(row) = rows
+                .iter_mut()
+                .find(|row| (row.client_machine_id.0, row.sku.0) == key)
+            {
+                row.requests = row.requests.saturating_add(1);
+                if event.activated() {
+                    row.activations = row.activations.saturating_add(1);
+                }
+                // Last writer wins for the mutable columns, which is right for
+                // a "most recent" view and is why they are named that way.
+                row.last_seen = event.at;
+                row.last_sequence = event.sequence;
+                row.workstation_name = event.workstation_name.clone();
+                row.application = event.application;
+                row.counted = event.counted;
+                row.peer = event.peer;
+                row.activated_last = event.activated();
+            } else {
+                rows.push(ClientView {
+                    client_machine_id: event.client_machine_id,
+                    sku: event.sku,
+                    application: event.application,
+                    counted: event.counted,
+                    workstation_name: event.workstation_name.clone(),
+                    peer: event.peer,
+                    first_seen: event.at,
+                    last_seen: event.at,
+                    last_sequence: event.sequence,
+                    requests: 1,
+                    activations: u64::from(event.activated()),
+                    activated_last: event.activated(),
+                });
+            }
+        }
+
+        // Most recently seen first, by sequence rather than by timestamp: two
+        // requests handled on different threads can read the same clock value,
+        // and the sequence is what makes the order stable.
+        rows.sort_by_key(|row| core::cmp::Reverse(row.last_sequence));
+        rows.truncate(limit);
+        rows
+    }
+}
+
+/// One row of the fleet view (`OBS-006`, #182).
+///
+/// Derived from the log on demand rather than maintained alongside it. That is
+/// the whole difference from py-kms's model: there is no row to overwrite, so
+/// "what activated last Tuesday?" is still answerable on Wednesday.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientView {
+    /// The machine.
+    pub client_machine_id: ClientMachineId,
+    /// The SKU it asked about — the other half of the key.
+    pub sku: SkuId,
+    /// The application that SKU belongs to, as of the most recent request.
+    pub application: ApplicationId,
+    /// The counted ID the most recent request named.
+    pub counted: KmsCountedId,
+    /// The name it most recently called itself. Untrusted (`POL-015`, #103).
+    pub workstation_name: WorkstationName,
+    /// Where the most recent request came from (`OBS-005`, #181).
+    pub peer: Option<Peer>,
+    /// When this pair was first seen, within the retained window.
+    pub first_seen: Instant,
+    /// When it was last seen.
+    pub last_seen: Instant,
+    /// The sequence number of the most recent request, which is what the view
+    /// is ordered by.
+    pub last_sequence: u64,
+    /// How many requests this pair made.
+    pub requests: u64,
+    /// How many of them were activated.
+    pub activations: u64,
+    /// Whether the most recent one was.
+    pub activated_last: bool,
 }
 
 #[cfg(test)]
@@ -357,7 +482,7 @@ mod tests {
 
     use super::{DEFAULT_RETENTION, EventLog, Outcome, Peer};
     use crate::counting::ClientCounts;
-    use crate::gate::{Decision, Refusal, evaluate};
+    use crate::gate::{Decision, Observations, Refusal, evaluate};
     use crate::identity::HostIdentity;
     use alloc::vec::Vec;
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -808,5 +933,170 @@ mod tests {
         );
         assert_eq!(log.len(), 1);
         assert!(!log.is_empty());
+    }
+    /// `OBS-006` (#182): one machine activating Windows and Office produces
+    /// **two view rows and one count entry per application**.
+    ///
+    /// py-kms keyed this three times, six years apart — the machine alone, then
+    /// `(machine, application)`, then `(machine, SKU)` — because the right key
+    /// depends on what the row is for, and nobody wrote down that there were
+    /// two questions. This test is that sentence, executable.
+    #[test]
+    fn one_machine_with_two_products_is_two_rows_and_two_counts() {
+        let windows = ApplicationId(Guid::from_bytes([0x55; 16]));
+        let office = ApplicationId(Guid::from_bytes([0x0f; 16]));
+        let machine = ClientMachineId(Guid::from_bytes([0xAB; 16]));
+
+        let mut log = EventLog::new(64, DEFAULT_RETENTION);
+        let mut counts = ClientCounts::new();
+
+        for (application, sku, counted) in [
+            (windows, [0x01_u8; 16], [0xC1_u8; 16]),
+            (office, [0x02_u8; 16], [0xC2_u8; 16]),
+        ] {
+            let request = request_from(application, sku, counted, machine);
+            let view = counts.observe(
+                application,
+                machine,
+                request.required_clients,
+                Instant::from_nanos(1),
+            );
+            log.record(
+                &request,
+                None,
+                Instant::from_nanos(1),
+                Outcome::Activated(super::Activation {
+                    selection: kmsrs_proto::types::CsvlkSelection::Fallback { index: 0 },
+                    reported_count: view.reported,
+                    cached_count: view.cached,
+                    outcome: view.outcome,
+                    expired: view.expired,
+                    anomalous_demand: view.anomalous_demand,
+                }),
+                Observations {
+                    known_product: true,
+                    clock_skew: None,
+                    clock_skewed: false,
+                },
+            );
+        }
+
+        // Two rows in the fleet view: the machine runs two products, and an
+        // operator maintains both.
+        let rows = log.clients(16);
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert!(rows.iter().all(|row| row.client_machine_id == machine));
+        let skus: Vec<Guid> = rows.iter().map(|row| row.sku.0).collect();
+        assert!(skus.contains(&Guid::from_bytes([0x01; 16])));
+        assert!(skus.contains(&Guid::from_bytes([0x02; 16])));
+
+        // One count entry per application: to the Windows bucket it is one
+        // machine, and to the Office bucket it is one machine.
+        assert_eq!(counts.cached_for(windows), 1);
+        assert_eq!(counts.cached_for(office), 1);
+        assert_eq!(log.distinct_machines(windows), 1);
+        assert_eq!(log.distinct_machines(office), 1);
+    }
+
+    /// The same machine asking about the same SKU twice is **one** row, with
+    /// the request count rising.
+    ///
+    /// The other half of the key: without it, a machine that renews every seven
+    /// days becomes a hundred rows and the view is a log with extra steps.
+    #[test]
+    fn repeated_requests_for_one_product_stay_one_row() {
+        let windows = ApplicationId(Guid::from_bytes([0x55; 16]));
+        let machine = ClientMachineId(Guid::from_bytes([0xAB; 16]));
+        let mut log = EventLog::new(64, DEFAULT_RETENTION);
+
+        for round in 1..=5_u64 {
+            log.record(
+                &request_from(windows, [0x01; 16], [0xC1; 16], machine),
+                None,
+                Instant::from_nanos(round),
+                Outcome::Refused(Refusal::PreviewProduct),
+                Observations {
+                    known_product: true,
+                    clock_skew: None,
+                    clock_skewed: false,
+                },
+            );
+        }
+
+        let rows = log.clients(16);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requests, 5);
+        assert_eq!(rows[0].activations, 0, "none of them activated");
+        assert!(!rows[0].activated_last);
+        assert_eq!(rows[0].first_seen, Instant::from_nanos(1));
+        assert_eq!(rows[0].last_seen, Instant::from_nanos(5));
+    }
+
+    /// The view is bounded and ordered most-recent-first, by sequence rather
+    /// than by timestamp — two requests handled on different threads can read
+    /// the same clock value, and the sequence is what makes the order stable.
+    #[test]
+    fn the_fleet_view_is_bounded_and_most_recent_first() {
+        let windows = ApplicationId(Guid::from_bytes([0x55; 16]));
+        let mut log = EventLog::new(256, DEFAULT_RETENTION);
+
+        for index in 0..40_u128 {
+            let machine = ClientMachineId(Guid::from_bytes(index.to_be_bytes()));
+            log.record(
+                &request_from(windows, [0x01; 16], [0xC1; 16], machine),
+                None,
+                // Every request at the same instant, which is the case a
+                // timestamp sort gets wrong.
+                Instant::from_nanos(7),
+                Outcome::Refused(Refusal::PreviewProduct),
+                Observations {
+                    known_product: true,
+                    clock_skew: None,
+                    clock_skewed: false,
+                },
+            );
+        }
+
+        let rows = log.clients(10);
+        assert_eq!(rows.len(), 10, "the view is not bounded");
+        for pair in rows.windows(2) {
+            assert!(
+                pair[0].last_sequence > pair[1].last_sequence,
+                "the view is not most-recent-first"
+            );
+        }
+        // The most recent is the last machine recorded.
+        assert_eq!(
+            rows[0].client_machine_id.0,
+            Guid::from_bytes(39_u128.to_be_bytes())
+        );
+    }
+
+    /// A request with the fields these tests vary.
+    fn request_from(
+        application: ApplicationId,
+        sku: [u8; 16],
+        counted: [u8; 16],
+        machine: ClientMachineId,
+    ) -> Request {
+        let mut units = [0_u16; kmsrs_proto::types::WORKSTATION_NAME_UNITS];
+        for (slot, unit) in units.iter_mut().zip("WKS-000001".encode_utf16()) {
+            *slot = unit;
+        }
+
+        Request {
+            version: ProtocolVersion::from_wire(0x0006_0000),
+            client_kind: ClientKind::BareMetal,
+            license_status: LicenseStatus::from_wire(2),
+            grace: GraceMinutes(0),
+            application,
+            sku: SkuId(Guid::from_bytes(sku)),
+            counted: KmsCountedId(Guid::from_bytes(counted)),
+            client_machine_id: machine,
+            previous_client_machine_id: None,
+            client_time: ClientTime(FileTime::from_ticks(133_000_000_000_000_000)),
+            required_clients: RequiredClients(25),
+            workstation_name: WorkstationName::decode(&units),
+        }
     }
 }
