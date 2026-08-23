@@ -3,8 +3,9 @@
 A KMS host emulator in pure safe Rust — correct by construction, zero runtime configuration, no
 disk I/O. Targets Linux, Windows, and bare metal ([Hermit] unikernel with virtio-net).
 
-> **Status: design complete, implementation not started.** The plan of record is
-> [`docs/punchlist.md`](docs/punchlist.md), and every work item there has a matching issue.
+> **Status: design complete, implementation not started.** The plan of record is the
+> [issue tracker](https://github.com/schlarpc/kmsrsos/issues) — 264 items across 11 milestones,
+> each with a definition of done and explicit dependency links.
 
 ## What and why
 
@@ -15,9 +16,8 @@ between them they cover most of the problem, but the union is not available in a
 and the intersection of what both miss is large.
 
 `docs/` contains an exhaustive audit of both families: 119 features compared, 23 that **nobody**
-implements, and 24 situations where the two disagree about what a KMS host should do. The punch list
-turns that into ~264 numbered work items, 35 recorded design decisions and 33 explicitly declined
-ones.
+implements, and 24 situations where the two disagree about what a KMS host should do. Planning
+turned that into 264 issues, 35 recorded design decisions and 33 explicitly declined ones.
 
 Design goals, in the order that shapes the code:
 
@@ -39,7 +39,8 @@ Design goals, in the order that shapes the code:
 
 | Document | Contents |
 |---|---|
-| [`docs/punchlist.md`](docs/punchlist.md) | The plan of record: work items, decisions, declined items |
+| [`docs/decisions.md`](docs/decisions.md) | Axioms, the 35 decisions taken, and 33 things deliberately not built |
+| [`docs/research-findings.md`](docs/research-findings.md) | Microsoft-sourced product data, Hermit/Proxmox constraints, coverage map |
 | [`docs/kms-emulator-feature-matrix.md`](docs/kms-emulator-feature-matrix.md) | Cross-implementation synthesis and the 24 behavioural mismatches |
 | [`docs/vlmcsd-features.md`](docs/vlmcsd-features.md) | Complete vlmcsd audit |
 | [`docs/py-kms-features.md`](docs/py-kms-features.md) | Complete py-kms audit |
