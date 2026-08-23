@@ -231,6 +231,41 @@ express a KMS host. Ruled out on paper, not by experiment.
 **D33 — Reimplementing DNS, standard AES, SHA-256, HMAC, HTTP, TLS or binary framing by hand.**
 Two exceptions, both in #41.
 
+### Superseding decision — one mio event loop, not two drivers (`ARCH-005`, #5)
+
+`ARCH-005` originally specified **tokio on Linux and Windows, blocking `std::net` + `std::thread` on
+Hermit** — two drivers, on the reasoning that tokio has no usable Hermit support. The first half of
+that reasoning is right and the conclusion was wrong: the alternative to tokio is not threads, it is
+**mio**, which is the layer tokio itself uses.
+
+Per `docs/research-findings.md` §R2, mio has first-class Hermit support in the stock crates.io
+release and hermit's own CI exercises it on every pull request; its backends are epoll on Linux, IOCP
+on Windows and `poll(2)` on Hermit. tokio, by contrast, works there only through a four-commit fork
+of 1.45.0 whose substantive patch is a level-triggered selector workaround — and tokio's readiness
+caching assumes edge-triggered semantics, so getting it wrong produces *hangs, not errors*. Adopting
+that fork would need a workspace-global `[patch.crates-io]`, pinning Linux and Windows to it too.
+
+One loop removed three hand-built mechanisms, two of which were untestable:
+
+- **Timeouts.** There is no `SO_RCVTIMEO` anywhere. A deadline is the poll timeout, computed from the
+  injected clock, so it behaves identically on every target — including Hermit, whose `setsockopt` is
+  a stub returning `EINVAL` for exactly that option. The previous design chose between a socket
+  timeout and a hand-written polling fallback *at runtime*, and no test ever executed the fallback
+  branch despite it existing solely for Hermit (`OS-014`, #297).
+- **The shutdown wakeup.** `mio::Waker` is an eventfd on Linux and Hermit and a posted IOCP
+  completion on Windows. The previous design woke a blocked `accept()` by connecting to its own
+  listener, which assumed a loopback route Hermit may not have (`OS-015`, #298).
+- **Thread-per-connection.** A connection is a few kilobytes in a map rather than an OS thread, which
+  is what makes the connection ceiling derivable rather than picked (`NET-014`, #296).
+
+What one loop does *not* solve is the reason the platform split existed at all: Hermit's socket
+**semantics**. No readiness abstraction models "this platform's `setsockopt` is a stub", that `bind()`
+ignores the address, that there is never an IPv6 address, or that `cfg(unix)` is false. Those remain
+per-target facts, and the pattern for them is `SINGLE_SOCKET_ONLY` — a named capability whose *both*
+branches compile and are tested on every host, rather than a `cfg` on an item, which only ever
+compiles on the platform that cannot be tested.
+
+
 **D34 — A `MinActiveClients` field per host key (`POL-009`, #97).** The field is inert in both
 existing implementations, for opposite reasons. vlmcsd declares it in `KmsData->CsvlkData` and reads
 it in `kms.c` to floor the reported count, but nothing ever writes it and it is 0 for every CSVLK in

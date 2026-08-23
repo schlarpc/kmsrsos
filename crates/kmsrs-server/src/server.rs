@@ -16,6 +16,7 @@
 use crate::config::{Compiled, Discovered, Operational};
 use crate::host::{Host, RequestContext};
 use crate::log::Logger;
+use kmsrs_policy::access::RateLimiter;
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::kms::layout::MAX_RESPONSE_LEN;
 use kmsrs_proto::time::Instant;
@@ -29,6 +30,7 @@ pub struct Server {
     discovered: Discovered,
     host: Host,
     logger: Logger,
+    limiter: RateLimiter,
 }
 
 /// What a driver should do with the socket after a call to [`Server::handle`].
@@ -63,6 +65,7 @@ impl Server {
             discovered,
             host,
             logger,
+            limiter: RateLimiter::new(),
         })
     }
 
@@ -133,6 +136,27 @@ impl Server {
         }
 
         Handled { response, close }
+    }
+
+    /// The per-source token buckets (`POL-014`, #102).
+    ///
+    /// Owned by the server rather than shared behind a lock: the driver is a
+    /// single event loop, so there is no second thread to contend with
+    /// (`ARCH-005`, #5).
+    pub const fn limiter(&self) -> &RateLimiter {
+        &self.limiter
+    }
+
+    /// The rate limiter, mutably, for the driver.
+    pub const fn limiter_mut(&mut self) -> &mut RateLimiter {
+        &mut self.limiter
+    }
+
+    /// Replace the rate limiter, for tests that need a small burst.
+    #[must_use]
+    pub fn with_limiter(mut self, limiter: RateLimiter) -> Self {
+        self.limiter = limiter;
+        self
     }
 
     /// How this server writes log lines (`OBS-001`, #177).

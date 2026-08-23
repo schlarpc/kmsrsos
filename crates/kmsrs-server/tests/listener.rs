@@ -12,13 +12,13 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
+    clippy::needless_pass_by_value,
     reason = "test code: a failed expectation should abort loudly"
 )]
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::time::Duration;
 use kmsrs_policy::access::{AccessList, RateLimiter, Rule};
-use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::entropy::testing::DeterministicEntropy;
 use kmsrs_proto::kms::framing::{self, Ciphers};
 use kmsrs_proto::kms::layout::{REQUEST_BODY_LEN, RequestBody};
@@ -26,7 +26,7 @@ use kmsrs_proto::kms::version::Version;
 use kmsrs_proto::time::Instant;
 use kmsrs_proto::wire::header::{HEADER_LEN, PacketFlags, PacketType, RpcHeader};
 use kmsrs_server::config::operational::LogLevel;
-use kmsrs_server::net::driver::{Runtime, serve};
+use kmsrs_server::net::driver::Driver;
 use kmsrs_server::net::listener::bind_each;
 use kmsrs_server::{Compiled, Discovered, Operational, Server};
 use std::io::{Read, Write};
@@ -99,22 +99,36 @@ fn kms_payload(machine: u32) -> Vec<u8> {
     stub
 }
 
-/// A monotonic clock that advances on every read, so a test never depends on
-/// how long it actually took.
-struct TestClock(AtomicU64);
-
-impl TestClock {
-    fn now(&self) -> Instant {
-        Instant::from_nanos(self.0.fetch_add(1_000_000, Ordering::AcqRel))
-    }
+/// A clock the test drives, so deadlines are reachable.
+///
+/// Every reading advances by `step`, which is what makes `READ_TIMEOUT` and
+/// `CONNECTION_DEADLINE` testable at all: under the previous 1 ms-per-call
+/// clock neither was reachable, so both were entirely uncovered
+/// (`OS-014`, #297).
+struct TestClock {
+    nanos: AtomicU64,
+    step: u64,
 }
 
-/// A server that does not log, so the test output stays readable. The logging
-/// itself is covered in `tests/logging.rs`.
-fn quiet() -> Operational {
-    Operational {
-        log_level: LogLevel::Error,
-        ..Operational::default()
+impl TestClock {
+    /// A clock that barely moves, for tests that are not about deadlines.
+    fn still() -> Self {
+        Self {
+            nanos: AtomicU64::new(1_000_000),
+            step: 0,
+        }
+    }
+
+    /// A clock that advances `seconds` per reading.
+    fn stepping(seconds: u64) -> Self {
+        Self {
+            nanos: AtomicU64::new(1_000_000),
+            step: seconds.saturating_mul(1_000_000_000),
+        }
+    }
+
+    fn now(&self) -> Instant {
+        Instant::from_nanos(self.nanos.fetch_add(self.step, Ordering::AcqRel))
     }
 }
 
@@ -130,28 +144,47 @@ fn test_server() -> Server {
     .unwrap()
 }
 
-/// Run a server on loopback for the duration of `body`, then shut it down and
-/// assert it stopped.
-fn with_server<T>(limit: usize, body: impl FnOnce(SocketAddr) -> T) -> T {
+/// A server that does not log, so the test output stays readable. The logging
+/// itself is covered in `tests/logging.rs`.
+fn quiet() -> Operational {
+    Operational {
+        log_level: LogLevel::Error,
+        ..Operational::default()
+    }
+}
+
+/// Run a driver on loopback for the duration of `body`, then stop it.
+///
+/// Returns the driver, so a test can inspect the server afterwards.
+fn with_driver<T>(
+    limit: usize,
+    server: Server,
+    clock: TestClock,
+    body: impl FnOnce(SocketAddr) -> T,
+) -> (T, Driver) {
     let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
     let address = bound[0].address;
-    let runtime = Runtime::new(test_server(), limit);
-    let clock = TestClock(AtomicU64::new(1_000_000));
+    let mut driver = Driver::new(server, bound, limit).unwrap();
+    let shutdown = driver.shutdown_handle();
 
     std::thread::scope(|scope| {
-        let runtime_ref = &runtime;
         let clock_ref = &clock;
         let handle = scope.spawn(move || {
-            let entropy: Box<dyn Entropy + Send> =
-                Box::new(DeterministicEntropy::from_seed(0x5A17));
-            serve(runtime_ref, bound, entropy, &|| clock_ref.now()).unwrap();
+            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
+            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+            driver
         });
 
         let result = body(address);
-        runtime.shutdown.request();
-        handle.join().expect("the accept loop stopped cleanly");
-        result
+        shutdown.request();
+        let driver = handle.join().expect("the loop stopped cleanly");
+        (result, driver)
     })
+}
+
+/// The common case: a default server, a clock that does not move.
+fn with_server<T>(limit: usize, body: impl FnOnce(SocketAddr) -> T) -> T {
+    with_driver(limit, test_server(), TestClock::still(), body).0
 }
 
 /// Read a whole RPC PDU: the 16-byte header, then `frag_length - 16` more.
@@ -323,46 +356,19 @@ fn a_connection_beyond_the_pool_is_closed_not_queued() {
 /// asserts the join succeeds for every test in this file; this one makes the
 /// property the subject rather than a side effect.
 #[test]
-fn shutdown_wakes_a_blocked_accept_loop() {
-    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
-    let runtime = Runtime::new(test_server(), 8);
-    let clock = TestClock(AtomicU64::new(1_000_000));
-
-    std::thread::scope(|scope| {
-        let runtime_ref = &runtime;
-        let clock_ref = &clock;
-        let handle = scope.spawn(move || {
-            let entropy: Box<dyn Entropy + Send> =
-                Box::new(DeterministicEntropy::from_seed(0x5A17));
-            serve(runtime_ref, bound, entropy, &|| clock_ref.now()).unwrap();
-        });
-
-        // Nothing has connected, so the loop is blocked in `accept`. Shutdown
-        // must still return — this is what a self-pipe would be needed for on a
-        // selector-based design, and what does not work on Windows.
-        runtime.shutdown.request();
-        handle.join().expect("shutdown unblocked the accept loop");
-    });
+fn shutdown_wakes_a_blocked_poll() {
+    // Nothing ever connects, so the loop is parked in `poll` with no
+    // connections and a full-length timeout. Shutdown must still return
+    // promptly — which is what `mio`'s `Waker` is for (`NET-008`, #158). The
+    // previous design woke a blocked `accept()` by connecting to its own
+    // listener, which assumed a loopback route (`OS-015`, #298).
+    let ((), driver) = with_driver(8, test_server(), TestClock::still(), |_address| {});
+    assert_eq!(driver.in_flight(), 0);
 }
 
-/// `NET-012` (#161): the peer recorded for a loopback IPv4 client is
-/// `127.0.0.1`, never `::ffff:127.0.0.1`.
 #[test]
 fn the_recorded_peer_is_normalised() {
-    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
-    let address = bound[0].address;
-    let runtime = Runtime::new(test_server(), 8);
-    let clock = TestClock(AtomicU64::new(1_000_000));
-
-    std::thread::scope(|scope| {
-        let runtime_ref = &runtime;
-        let clock_ref = &clock;
-        let handle = scope.spawn(move || {
-            let entropy: Box<dyn Entropy + Send> =
-                Box::new(DeterministicEntropy::from_seed(0x5A17));
-            serve(runtime_ref, bound, entropy, &|| clock_ref.now()).unwrap();
-        });
-
+    let ((), driver) = with_driver(8, test_server(), TestClock::still(), |address| {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
         stream
@@ -373,14 +379,10 @@ fn the_recorded_peer_is_normalised() {
             .write_all(&pdu(PacketType::Request, 3, &request_body(&kms_payload(7))))
             .unwrap();
         read_pdu(&mut stream);
-        drop(stream);
-
-        runtime.shutdown.request();
-        handle.join().unwrap();
     });
 
-    let server = runtime.server.lock().unwrap();
-    let event = server
+    let event = driver
+        .server()
         .host()
         .events()
         .iter()
@@ -466,9 +468,6 @@ fn a_denied_peer_never_reaches_the_protocol() {
         deny: DENY,
     };
 
-    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
-    let address = bound[0].address;
-
     let mut entropy = DeterministicEntropy::from_seed(0x11_22_33_44);
     let server = Server::new(
         compiled,
@@ -478,24 +477,14 @@ fn a_denied_peer_never_reaches_the_protocol() {
         kmsrs_db::Date::new(2026, 8, 1).unwrap(),
     )
     .unwrap();
-    let runtime = Runtime::new(server, 8);
-    let clock = TestClock(AtomicU64::new(1_000_000));
 
-    std::thread::scope(|scope| {
-        let runtime_ref = &runtime;
-        let clock_ref = &clock;
-        let handle = scope.spawn(move || {
-            let entropy: Box<dyn Entropy + Send> =
-                Box::new(DeterministicEntropy::from_seed(0x5A17));
-            serve(runtime_ref, bound, entropy, &|| clock_ref.now()).unwrap();
-        });
-
+    let ((), driver) = with_driver(8, server, TestClock::still(), |address| {
         let mut stream = TcpStream::connect(address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        // The bind may or may not be accepted into the socket buffer before the
-        // close; either way there must be no reply.
+        // The bind may or may not reach the socket buffer before the close;
+        // either way there must be no reply.
         let _ = stream.write_all(&pdu(PacketType::Bind, 2, &bind_body()));
 
         let mut buffer = [0_u8; 64];
@@ -504,16 +493,12 @@ fn a_denied_peer_never_reaches_the_protocol() {
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
             other => panic!("a denied peer got a reply: {other:?}"),
         }
-
-        runtime.shutdown.request();
-        handle.join().unwrap();
     });
 
     // Nothing reached the protocol, so nothing was activated or refused — a
     // denial happens before there is a request to have an opinion about.
-    let server = runtime.server.lock().unwrap();
     assert_eq!(
-        server.host().events().len(),
+        driver.server().host().events().len(),
         0,
         "a denied peer produced a protocol-level event"
     );
@@ -545,21 +530,9 @@ fn the_default_build_admits_everyone() {
 /// would refuse a legitimate office (see `access::BURST`).
 #[test]
 fn a_source_over_its_budget_is_rate_limited() {
-    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
-    let address = bound[0].address;
-    let runtime = Runtime::with_limiter(test_server(), 8, RateLimiter::with(2, 1));
+    let server = test_server().with_limiter(RateLimiter::with(2, 1));
     // A clock that does not advance, so no tokens are earned back mid-test.
-    let clock = || Instant::from_nanos(1_000_000);
-
-    std::thread::scope(|scope| {
-        let runtime_ref = &runtime;
-        let handle = scope.spawn(move || {
-            let entropy: Box<dyn Entropy + Send> =
-                Box::new(DeterministicEntropy::from_seed(0x5A17));
-            serve(runtime_ref, bound, entropy, &clock).unwrap();
-        });
-
-        // Each connection spends one token on its first read.
+    let (counts, driver) = with_driver(8, server, TestClock::still(), |address| {
         let mut answered = 0_u32;
         let mut cut_off = 0_u32;
         for _ in 0..6 {
@@ -580,18 +553,14 @@ fn a_source_over_its_budget_is_rate_limited() {
                 Err(_) => cut_off += 1,
             }
         }
-
-        assert_eq!(answered, 2, "exactly the budget was served");
-        assert!(cut_off >= 1, "and the rest were cut off");
-
-        runtime.shutdown.request();
-        handle.join().unwrap();
+        (answered, cut_off)
     });
 
-    // The limiter is tracking exactly one source, since every connection came
-    // from loopback.
-    let limiter = runtime.limiter.lock().unwrap();
-    assert_eq!(limiter.tracked(), 1, "one source, one bucket");
+    assert_eq!(counts.0, 2, "exactly the budget was served");
+    assert!(counts.1 >= 1, "and the rest were cut off");
+
+    // One source, since every connection came from loopback.
+    assert_eq!(driver.server().limiter().tracked(), 1);
 }
 
 /// The client-side framing in `kmsrs-proto` talks to this server
@@ -666,5 +635,116 @@ fn the_protocol_crates_own_client_can_activate() {
             warnings.is_empty(),
             "our own server tripped detection warnings: {warnings:?}"
         );
+    });
+}
+
+/// `NET-004` (#153) and `OS-014` (#297): a connection that goes quiet is
+/// closed when its read deadline passes.
+///
+/// **This is the test that could not exist before.** The deadline used to be
+/// enforced by `SO_RCVTIMEO` where that worked and by a hand-written polling
+/// fallback where it did not — and the fallback branch was never executed by
+/// any test, on any platform, despite existing solely for the one platform
+/// where the socket option fails. With the poller there is one path, and the
+/// deadline is a pure function of the injected clock, so a test can simply
+/// drive the clock to it.
+#[test]
+fn a_quiet_connection_is_closed_when_its_read_deadline_passes() {
+    // Each clock reading advances 20 seconds, so `READ_TIMEOUT` (30 s) is
+    // crossed within a couple of poll wakeups.
+    let (outcome, driver) = with_driver(8, test_server(), TestClock::stepping(20), |address| {
+        let mut stream = TcpStream::connect(address).unwrap();
+        // Say nothing at all, and wait to be hung up on.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let mut buffer = [0_u8; 16];
+        stream.read(&mut buffer)
+    });
+
+    match outcome {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("the connection was not closed on its deadline: {other:?}"),
+    }
+    assert_eq!(
+        driver.in_flight(),
+        0,
+        "the expired connection was not forgotten"
+    );
+}
+
+/// `NET-004` (#153): the total deadline bounds a connection that *is* making
+/// progress, which the read deadline alone cannot.
+///
+/// A slowloris that sends one byte just inside every read timeout resets the
+/// idle deadline forever. Here the client dribbles bytes steadily while the
+/// clock advances, and the connection is closed anyway once
+/// `CONNECTION_DEADLINE` passes.
+#[test]
+fn a_dribbling_connection_is_closed_when_its_total_deadline_passes() {
+    // 10 seconds per reading: under `READ_TIMEOUT` each time, so the idle
+    // deadline keeps being reset, but past `CONNECTION_DEADLINE` (2 min) within
+    // a dozen or so wakeups.
+    let (outcome, driver) = with_driver(8, test_server(), TestClock::stepping(10), |address| {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        // Dribble one byte at a time, never completing a PDU, until the server
+        // hangs up.
+        for _ in 0..2_000 {
+            if stream.write_all(&[0x05]).is_err() {
+                return Ok(0);
+            }
+            let mut buffer = [0_u8; 16];
+            match stream.read(&mut buffer) {
+                Ok(0) => return Ok(0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+                other => return other,
+            }
+        }
+        Err(std::io::Error::other("never closed"))
+    });
+
+    match outcome {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("a dribbling connection outlived its total deadline: {other:?}"),
+    }
+    assert_eq!(driver.in_flight(), 0);
+}
+
+/// A connection that is doing real work is *not* closed while it works — the
+/// deadline tests above would pass trivially if the loop simply hung up on
+/// everything.
+#[test]
+fn an_active_connection_survives_a_moving_clock() {
+    with_driver(8, test_server(), TestClock::stepping(5), |address| {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+
+        stream
+            .write_all(&pdu(PacketType::Bind, 2, &bind_body()))
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream)[2], 12);
+
+        // Several activations, each well inside the read deadline.
+        for machine in 1..=4_u32 {
+            stream
+                .write_all(&pdu(
+                    PacketType::Request,
+                    machine + 2,
+                    &request_body(&kms_payload(machine)),
+                ))
+                .unwrap();
+            assert_eq!(
+                read_pdu(&mut stream)[2],
+                2,
+                "request {machine} was cut off while active"
+            );
+        }
     });
 }

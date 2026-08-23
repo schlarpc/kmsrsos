@@ -68,6 +68,10 @@ ctrlc = { version = "=3.5.2", features = ["termination"] }
 # without the first, whether IPv4 works depends on a sysctl; without the
 # second, the backlog is SOMAXCONN, far deeper than the pool can drain.
 socket2 = { version = "=0.6.5" }
+# The one readiness abstraction with first-class, unpatched Hermit support
+# (ARCH-005, #5). Backends: epoll on Linux, IOCP on Windows, poll(2) on Hermit —
+# where the kernel has sys_poll and sys_eventfd and no epoll at all.
+mio = { version = "=1.2.2", features = ["os-poll", "net"] }
 serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
 
 # `kmsrs-dbgen` only. Nothing that ships may name these; the test in

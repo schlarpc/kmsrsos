@@ -1,339 +1,519 @@
-//! The blocking driver: one thread per listener, a bounded worker pool
+//! One readiness-driven event loop, for all three platforms
 //! (`ARCH-005`, #5; `NET-004`…`NET-008`).
 //!
-//! Because the core is sans-io there is no async abstraction layer to write.
-//! This driver owns its loop, reads bytes, hands them to
-//! [`Server::handle`](crate::Server::handle), and writes back whatever comes
-//! out. It is `std::net` and `std::thread` only, so it is also the Hermit
-//! driver (`ARCH-005`, #5).
+//! # Why one loop and not two drivers
 //!
-//! # Fairness comes from the structure, not from a policy
+//! `ARCH-005` originally called for tokio on Linux and Windows and a blocking
+//! `std::net` driver on Hermit. Both halves of that turned out to be avoidable.
 //!
-//! One accept thread per listener (`NET-006`, #155). vlmcsd runs a single
-//! `select()` loop that always takes the first ready descriptor in list order,
-//! so a saturated early listener starves every later one. With a thread each,
-//! the OS scheduler decides, and there is no ordering to be unfair about.
+//! tokio has **zero upstream Hermit support**. It works there only through a
+//! four-commit fork of 1.45.0 whose substantive patch is a level-triggered
+//! selector workaround — and tokio's readiness caching assumes edge-triggered
+//! semantics, so getting it wrong produces *hangs, not errors*. Adopting that
+//! fork would mean a workspace-global `[patch.crates-io]`, pinning Linux and
+//! Windows to it as well.
 //!
-//! # Rejecting at accept, never queueing
+//! `mio` — the layer tokio would have used anyway — has first-class Hermit
+//! support in the stock crates.io release, and hermit's own CI exercises it on
+//! every pull request. Its backends are epoll on Linux, IOCP on Windows, and
+//! `poll(2)` on Hermit, where the kernel has `sys_poll` and `sys_eventfd` and no
+//! epoll at all.
 //!
-//! A connection that cannot get a worker permit is accepted and **closed**
-//! immediately (`NET-005`, #154). vlmcsd's `-m` is a counting semaphore that
-//! *queues*, so slowloris connections hold every worker for the full timeout
-//! each; its own manual page recommends that plus a short timeout as the entire
-//! mitigation strategy. py-kms spawns one unbounded thread per connection with
-//! no timeout at all.
+//! So there is one driver, and the platform differences that remain are facts
+//! about socket *semantics* rather than about I/O plumbing — see
+//! [`crate::net::addr::SINGLE_SOCKET_ONLY`] for the one that survives.
 //!
-//! Closing immediately is also the honest signal: the client learns at once
-//! that this host is full, instead of waiting out a timeout to discover it.
+//! # What using a poller removes
 //!
-//! # Timeouts live in the state machine
+//! Three things that were previously hand-built and, in two cases, untestable:
 //!
-//! `SO_RCVTIMEO` is not portable in the way it looks: on Hermit `setsockopt`
-//! returns `EINVAL` for it (`NET-004`, #153). So the deadline is the state
-//! machine's, and the socket timeout is only an *optimisation* — where it
-//! works, the thread sleeps; where it does not, [`ReadStrategy::Polled`] falls
-//! back to a non-blocking socket and a short sleep. Both enforce the same
-//! deadline, which is the point: the timeout is a property of the protocol
-//! driver, not of a socket option that may silently do nothing.
+//! * **Timeouts.** There is no `SO_RCVTIMEO` anywhere. A deadline is the poll
+//!   timeout, computed from the injected clock, so it behaves identically on
+//!   every target — including Hermit, whose `setsockopt` is a stub returning
+//!   `EINVAL` for exactly that option (`NET-004`, #153; `OS-014`, #297).
+//! * **The shutdown wakeup.** [`mio::Waker`] is an eventfd on Linux and Hermit
+//!   and a posted IOCP completion on Windows. The previous design woke a
+//!   blocked `accept()` by connecting to its own listener, which assumed a
+//!   loopback route Hermit may not have (`NET-008`, #158; `OS-015`, #298).
+//! * **Thread-per-connection.** A connection is now a few kilobytes in a map
+//!   rather than an OS thread, which is what makes the connection ceiling
+//!   derivable rather than picked (`NET-014`, #296).
+//!
+//! # Fairness
+//!
+//! vlmcsd runs a `select()` loop that always services the first ready
+//! descriptor in list order, so a saturated early listener starves later ones.
+//! Here **every** event in a batch is processed before polling again, and
+//! accepting is bounded by the free capacity — so no source can monopolise the
+//! loop (`NET-006`, #155).
 
 use crate::host::RequestContext;
 use crate::net::addr::normalise_socket;
 use crate::net::listener::Bound;
 use crate::server::Server;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
-use kmsrs_policy::access::{Admission, RateLimiter};
+use kmsrs_policy::access::Admission;
 use kmsrs_policy::events::Peer;
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::time::Instant;
+use kmsrs_proto::wire::connection::Connection;
+use mio::event::Event;
+use mio::net::{TcpListener, TcpStream};
+use mio::{Events, Interest, Poll, Token, Waker};
+use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::Arc;
 
-/// How many connections may be in flight at once (`NET-005`, #154).
-pub const MAX_CONNECTIONS: usize = 64;
-
-/// How long a connection may take in total, however slowly it feeds us.
+/// How much memory this host will hold in connection state.
 ///
-/// The read timeout bounds one read; this bounds the whole conversation, which
-/// is what a slowloris actually attacks — a peer that sends one byte just
-/// inside every read timeout can hold a worker indefinitely otherwise.
-pub const CONNECTION_DEADLINE: Duration = Duration::from_mins(2);
+/// The basis for [`MAX_CONNECTIONS`]. Four mebibytes is a rounding error on
+/// Linux and Windows; the binding constraint is Hermit, a unikernel with a
+/// fixed memory budget and no swap, where it is still comfortable.
+pub const CONNECTION_STATE_BUDGET: usize = 4 * 1024 * 1024;
 
-/// How long a single read may block.
+/// Bytes of state one connection occupies.
+///
+/// A [`Connection`] holds a `MAX_PDU_LEN` inbound buffer — 2048 bytes — plus the
+/// association state; the outbound buffer is bounded by [`MAX_OUTBOUND`]; the
+/// rest is the socket, the map entry and the per-request bookkeeping. Rounded
+/// up generously, because the point of this number is to bound the ceiling, not
+/// to predict an allocator.
+pub const CONNECTION_STATE_BYTES: usize = 4096;
+
+/// How many connections may be in flight at once (`NET-005`, #154;
+/// `NET-014`, #296).
+///
+/// **Derived, not chosen**: [`CONNECTION_STATE_BUDGET`] divided by
+/// [`CONNECTION_STATE_BYTES`]. That is only meaningful because a connection is
+/// now a map entry rather than an OS thread — under thread-per-connection the
+/// ceiling was a thread count, and 8 MiB of default stack reservation each made
+/// any generous number look reckless.
+///
+/// Generosity is the right direction, and the argument is `POL-014`'s (#102)
+/// applied to the same traffic: refusing a legitimate client is both a broken
+/// client *and* a fingerprint, because a genuine KMS host does not refuse. A
+/// limit a real fleet can reach is a worse failure than one only an attacker
+/// reaches.
+pub const MAX_CONNECTIONS: usize = {
+    // `checked_div` rather than `/`, because the workspace forbids raw integer
+    // division and a `const` is the one place a divisor typo cannot be caught
+    // by a test. A zero here is a build failure, not a server that accepts
+    // nobody.
+    let Some(count) = CONNECTION_STATE_BUDGET.checked_div(CONNECTION_STATE_BYTES) else {
+        panic!("the per-connection budget must not be zero")
+    };
+    count
+};
+
+/// The most unsent response bytes one connection may accumulate.
+///
+/// A response is at most `MAX_RESPONSE_LEN` plus its RPC header, so this is
+/// several PDUs of slack for a peer that has stopped reading. Beyond it the
+/// connection is closed rather than buffered indefinitely — an unbounded write
+/// queue is how a slow reader becomes a memory leak.
+pub const MAX_OUTBOUND: usize = 8 * 1024;
+
+/// How long a connection may sit without making progress.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long the polling fallback sleeps between attempts.
+/// How long a connection may live in total, however slowly it feeds us.
 ///
-/// Only reached on a platform whose `SO_RCVTIMEO` does not work. Short enough
-/// that a request is not noticeably delayed, long enough that an idle
-/// connection is not a spin loop.
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// The read timeout bounds one quiet period; this bounds the whole
+/// conversation, which is what a slowloris actually attacks — a peer sending
+/// one byte just inside every read timeout resets the idle deadline forever.
+pub const CONNECTION_DEADLINE: Duration = Duration::from_mins(2);
 
-/// The largest request this driver will buffer before giving up.
+/// The longest a single poll will block.
 ///
-/// The protocol crate bounds a single PDU; this bounds the total a peer may
-/// send on one connection without producing a complete one.
-const MAX_INBOUND: usize = 1 << 20;
+/// Deadlines are evaluated against the *injected* clock, which need not advance
+/// with real time — under a test clock it may not advance at all between
+/// wakeups. Capping the poll bounds how stale a deadline check can get and makes
+/// the loop's liveness independent of what the clock does.
+const MAX_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How a connection waits for bytes.
+/// The token the shutdown waker uses.
+const WAKER_TOKEN: Token = Token(0);
+
+/// The first token a listener may use. Connections take everything above.
+const FIRST_LISTENER_TOKEN: usize = 1;
+
+/// Ask a running [`Driver`] to stop, from anywhere (`NET-007`, #157).
 ///
-/// Decided per connection by *trying* to set the socket timeout, because that
-/// is the only reliable way to know whether it works — Hermit's `setsockopt`
-/// returns `EINVAL` here, and a platform check would be a guess about a
-/// platform this code may not have been tested on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadStrategy {
-    /// The socket enforces the timeout. The thread sleeps until data arrives.
-    Blocking,
-    /// The socket is non-blocking and the driver enforces the timeout by
-    /// checking the clock between short sleeps (`NET-004`, #153).
-    Polled,
+/// Cloneable and safe to call from a signal handler: it sets a flag and posts to
+/// the poller's waker, which allocates nothing and takes no lock.
+#[derive(Debug, Clone)]
+pub struct ShutdownHandle {
+    requested: Arc<AtomicBool>,
+    waker: Arc<Waker>,
 }
 
-impl ReadStrategy {
-    /// Choose a strategy by trying the efficient one.
-    fn choose(stream: &TcpStream) -> io::Result<Self> {
-        if stream.set_read_timeout(Some(READ_TIMEOUT)).is_ok() {
-            stream.set_write_timeout(Some(READ_TIMEOUT)).ok();
-            return Ok(Self::Blocking);
-        }
-        stream.set_nonblocking(true)?;
-        Ok(Self::Polled)
+impl ShutdownHandle {
+    /// Ask the loop to stop accepting and drain.
+    ///
+    /// Idempotent. In-flight connections are finished rather than cut off, so a
+    /// client mid-activation still gets its answer.
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        // A failed wake means the poller is already gone, which is the outcome
+        // being asked for.
+        let _ = self.waker.wake();
     }
-}
 
-/// A shared count of in-flight connections, with a hard ceiling.
-///
-/// Deliberately not a queueing semaphore. [`Permit::try_acquire`] either
-/// succeeds now or fails now; there is no waiting, because waiting is what
-/// makes a bounded pool behave like an unbounded one under attack
-/// (`NET-005`, #154).
-#[derive(Debug, Default)]
-pub struct Capacity {
-    in_flight: AtomicUsize,
-    limit: usize,
-}
-
-/// Proof that a connection holds one of the pool's slots.
-#[derive(Debug)]
-pub struct Permit<'a> {
-    capacity: &'a Capacity,
-}
-
-impl Drop for Permit<'_> {
-    fn drop(&mut self) {
-        self.capacity.in_flight.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-impl Capacity {
-    /// A pool of the given size.
+    /// Whether shutdown has been asked for.
     #[must_use]
-    pub const fn new(limit: usize) -> Self {
-        Self {
-            in_flight: AtomicUsize::new(0),
-            limit,
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+/// One client's connection.
+#[derive(Debug)]
+struct Conn {
+    stream: TcpStream,
+    connection: Connection,
+    peer: SocketAddr,
+    /// Response bytes not yet written.
+    outbound: Vec<u8>,
+    /// How much of `outbound` has been written.
+    written: usize,
+    /// Whether `WRITABLE` interest is currently registered.
+    watching_writable: bool,
+    /// When it was accepted.
+    started: Instant,
+    /// When it last made progress.
+    last_progress: Instant,
+    /// Close once `outbound` has drained.
+    closing: bool,
+    /// The application the last request named, for the rate-limit key
+    /// (`POL-014`, #102).
+    last_application: kmsrs_db::Guid,
+}
+
+impl Conn {
+    /// When this connection must be closed if nothing changes.
+    fn deadline(&self) -> Instant {
+        let by_idle = self
+            .last_progress
+            .checked_add(READ_TIMEOUT)
+            .unwrap_or(self.last_progress);
+        let by_total = self
+            .started
+            .checked_add(CONNECTION_DEADLINE)
+            .unwrap_or(self.started);
+        if by_idle < by_total {
+            by_idle
+        } else {
+            by_total
         }
     }
 
-    /// Take a slot if one is free, without waiting.
-    pub fn try_acquire(&self) -> Option<Permit<'_>> {
-        let mut current = self.in_flight.load(Ordering::Acquire);
-        loop {
-            if current >= self.limit {
-                return None;
-            }
-            match self.in_flight.compare_exchange_weak(
-                current,
-                current.saturating_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Permit { capacity: self }),
-                Err(actual) => current = actual,
-            }
+    /// Whether this connection has outlived one of its deadlines.
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline()
+    }
+}
+
+/// The event loop.
+#[derive(Debug)]
+pub struct Driver {
+    poll: Poll,
+    events: Events,
+    listeners: Vec<(Token, TcpListener)>,
+    connections: HashMap<Token, Conn>,
+    next_token: usize,
+    limit: usize,
+    requested: Arc<AtomicBool>,
+    waker: Arc<Waker>,
+    server: Server,
+}
+
+impl Driver {
+    /// Build a loop over the given listeners.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the poller could not be created or a listener
+    /// could not be registered.
+    pub fn new(server: Server, listeners: Vec<Bound>, limit: usize) -> io::Result<Self> {
+        let poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN)?);
+
+        let mut registered = Vec::with_capacity(listeners.len());
+        for (index, bound) in listeners.into_iter().enumerate() {
+            // mio requires a non-blocking listener.
+            bound.listener.set_nonblocking(true)?;
+            let mut listener = TcpListener::from_std(bound.listener);
+            let token = Token(FIRST_LISTENER_TOKEN.saturating_add(index));
+            poll.registry()
+                .register(&mut listener, token, Interest::READABLE)?;
+            registered.push((token, listener));
         }
+
+        let next_token = FIRST_LISTENER_TOKEN.saturating_add(registered.len());
+        Ok(Self {
+            poll,
+            events: Events::with_capacity(256),
+            listeners: registered,
+            connections: HashMap::new(),
+            next_token,
+            limit: limit.max(1),
+            requested: Arc::new(AtomicBool::new(false)),
+            waker,
+            server,
+        })
+    }
+
+    /// A handle that can stop this loop from another thread.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            requested: Arc::clone(&self.requested),
+            waker: Arc::clone(&self.waker),
+        }
+    }
+
+    /// The server this loop is driving.
+    #[must_use]
+    pub const fn server(&self) -> &Server {
+        &self.server
     }
 
     /// How many connections are in flight.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::Acquire)
+        self.connections.len()
     }
 
-    /// The ceiling.
-    #[must_use]
-    pub const fn limit(&self) -> usize {
-        self.limit
-    }
-}
-
-/// The signal that stops the accept loops (`NET-007`, #157; `NET-008`, #158).
-///
-/// # Why this is not a pipe
-///
-/// The obvious portable wakeup is a self-pipe, and it is what py-kms uses. It
-/// does not work on Windows, where a pipe handle cannot be registered with a
-/// socket selector — which is precisely what breaks py-kms there
-/// (`NET-008`, #158).
-///
-/// This wakes a blocked `accept()` by **connecting to the listener**, which
-/// needs nothing but a TCP stack and therefore works identically on Linux,
-/// Windows and Hermit. The flag is checked before the connection is served, so
-/// the wakeup connection is accepted and dropped rather than handled.
-#[derive(Debug)]
-pub struct Shutdown {
-    requested: AtomicBool,
-    /// The addresses to poke, one per accept loop.
-    listeners: Mutex<Vec<SocketAddr>>,
-}
-
-impl Default for Shutdown {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Shutdown {
-    /// A signal nobody has raised.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            requested: AtomicBool::new(false),
-            listeners: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Register a listener address so shutdown can wake its accept loop.
-    pub fn register(&self, address: SocketAddr) {
-        if let Ok(mut listeners) = self.listeners.lock() {
-            listeners.push(address);
-        }
-    }
-
-    /// Whether shutdown has been requested.
-    #[must_use]
-    pub fn requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-
-    /// Ask every accept loop to stop, and wake them.
+    /// Serve until [`ShutdownHandle::request`] is called and every in-flight
+    /// connection has finished.
     ///
-    /// Safe to call more than once and from any thread — which matters because
-    /// on Unix it is called from a signal-handling thread. vlmcsd calls its
-    /// `logger()` — `fopen` and `fprintf` — directly from signal context, and
-    /// neither signals nor waits for its in-flight children.
-    pub fn request(&self) {
-        self.requested.store(true, Ordering::Release);
-        let addresses = self
-            .listeners
-            .lock()
-            .map(|listeners| listeners.clone())
-            .unwrap_or_default();
-        for address in addresses {
-            // A connect that fails is fine: it means the loop is already gone.
-            // The timeout stops a wedged listener from wedging shutdown too.
-            let _ = TcpStream::connect_timeout(&address, Duration::from_millis(250));
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] only if polling itself fails. A failure on one
+    /// connection closes that connection; one client's broken socket is not the
+    /// server's problem.
+    pub fn run(
+        &mut self,
+        entropy: &mut dyn Entropy,
+        clock: &dyn Fn() -> Instant,
+    ) -> io::Result<()> {
+        loop {
+            if self.requested.load(Ordering::Acquire) && self.connections.is_empty() {
+                return Ok(());
+            }
+
+            let timeout = self.poll_timeout(clock());
+            match self.poll.poll(&mut self.events, Some(timeout)) {
+                Ok(()) => {}
+                // A signal interrupted the wait. Not an error; go round again.
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+
+            // `NET-006` (#155): every event in the batch is handled before the
+            // next poll, so no source can be starved by an earlier one.
+            let batch: Vec<(Token, bool, bool)> = self
+                .events
+                .iter()
+                .map(|event| (event.token(), is_readable(event), is_writable(event)))
+                .collect();
+
+            for (token, readable, writable) in batch {
+                if token == WAKER_TOKEN {
+                    continue;
+                }
+                if self
+                    .listeners
+                    .iter()
+                    .any(|(candidate, _)| *candidate == token)
+                {
+                    self.accept_from(token, clock());
+                } else {
+                    self.service(token, readable, writable, entropy, clock);
+                }
+            }
+
+            self.expire(clock());
         }
     }
-}
 
-/// Read until the server produces a response or the connection ends.
-///
-/// Handles short reads and writes and retries on `EINTR` (`NET-006`, #156).
-/// py-kms uses `send()` rather than `sendall()`, so a partial write silently
-/// truncates a response — the client then sees a malformed PDU and blames the
-/// protocol.
-fn serve_connection(
-    runtime: &Runtime,
-    stream: &mut TcpStream,
-    peer: SocketAddr,
-    strategy: ReadStrategy,
-    entropy: &Mutex<Box<dyn Entropy + Send>>,
-    started: Instant,
-    clock: &dyn Fn() -> Instant,
-) -> io::Result<()> {
-    let server = &runtime.server;
-    let mut connection = {
-        let guard = server.lock().map_err(poisoned)?;
-        guard.connection(0x1234_5678)
-    };
-
-    let mut buffer = [0_u8; 8192];
-    let mut consumed = 0_usize;
-    let mut last_progress = clock();
-    // The application this connection last asked about, for the rate-limit
-    // key. Zero until the first request has been decoded.
-    let mut last_application = kmsrs_db::Guid::ZERO;
-
-    loop {
-        let now = clock();
-        // The total-connection deadline. A peer feeding one byte per read
-        // timeout would otherwise hold this worker forever.
-        if now.saturating_duration_since(started) > CONNECTION_DEADLINE {
-            return Ok(());
+    /// How long the next poll may block.
+    fn poll_timeout(&self, now: Instant) -> Duration {
+        let soonest = self.connections.values().map(Conn::deadline).min();
+        match soonest {
+            Some(deadline) if deadline > now => deadline
+                .saturating_duration_since(now)
+                .min(MAX_POLL_INTERVAL),
+            // A deadline has already passed: do not block.
+            Some(_) => Duration::ZERO,
+            None => MAX_POLL_INTERVAL,
         }
+    }
 
-        let read = match stream.read(&mut buffer) {
-            Ok(0) => return Ok(()),
-            Ok(count) => count,
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error)
-                if strategy == ReadStrategy::Polled
-                    && matches!(error.kind(), ErrorKind::WouldBlock) =>
-            {
-                // `NET-004` (#153): the deadline is enforced here rather than
-                // by a socket option that may silently do nothing.
-                if now.saturating_duration_since(last_progress) > READ_TIMEOUT {
-                    return Ok(());
-                }
-                std::thread::sleep(POLL_INTERVAL);
+    /// Accept everything queued on one listener, up to the free capacity.
+    fn accept_from(&mut self, token: Token, now: Instant) {
+        loop {
+            if self.requested.load(Ordering::Acquire) {
+                return;
+            }
+            let Some((_, listener)) = self
+                .listeners
+                .iter()
+                .find(|(candidate, _)| *candidate == token)
+            else {
+                return;
+            };
+
+            let (stream, peer) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return,
+                // `EINTR`: nothing was accepted, so go round again.
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                // An accept failure is a fact about one connection, not about
+                // the listener. vlmcsd treats several of these as fatal.
+                Err(_) => return,
+            };
+
+            // `NET-012` (#161): one client, one identity, from the moment it
+            // arrives.
+            let peer = normalise_socket(peer);
+
+            // `NET-005` (#154): beyond the ceiling, close now rather than
+            // queue. Closing at once is the honest signal — the client learns
+            // immediately that this host is full instead of waiting out a
+            // timeout to discover it.
+            if self.connections.len() >= self.limit {
+                drop(stream);
+                self.server.logger().message(
+                    crate::log::Severity::Warn,
+                    "at-capacity",
+                    &peer.ip().to_string(),
+                );
                 continue;
             }
-            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                // The socket enforced the timeout for us.
-                return Ok(());
+
+            // `POL-013` (#101): checked here, before any RPC state exists, so a
+            // refused peer never reaches the parser.
+            if let Err(denial) = self.server.compiled().access.check(peer.ip()) {
+                drop(stream);
+                self.server.logger().message(
+                    crate::log::Severity::Warn,
+                    "blocked",
+                    &format!("{}: {denial:?}", peer.ip()),
+                );
+                continue;
             }
-            Err(error) => return Err(error),
-        };
 
-        last_progress = now;
-        consumed = consumed.saturating_add(read);
-        if consumed > MAX_INBOUND {
-            return Ok(());
+            // A registration failure drops the connection and moves on; the
+            // listener is still fine.
+            let _ = self.register(stream, peer, now);
         }
+    }
 
-        // `POL-014` (#102): one token per read that carries work, keyed on
-        // (source, application). Checked here rather than at accept because a
-        // connection is not the unit of abuse — a single connection can carry
-        // any number of requests.
-        //
-        // The application is not known until the request is decoded, so the
-        // bucket is keyed on the *previous* request's application on this
-        // connection, or the zero GUID for the first. That is deliberate: a
-        // client cannot game it by varying the field, because the key it lands
-        // in was fixed before it chose.
-        {
-            let mut limiter = runtime.limiter.lock().map_err(poisoned)?;
+    /// Register an accepted stream with the poller.
+    fn register(&mut self, stream: TcpStream, peer: SocketAddr, now: Instant) -> io::Result<()> {
+        let mut stream = stream;
+        let token = Token(self.next_token);
+        self.next_token = self.next_token.saturating_add(1);
+        self.poll
+            .registry()
+            .register(&mut stream, token, Interest::READABLE)?;
+
+        let connection = self.server.connection(0x1234_5678);
+        self.connections.insert(
+            token,
+            Conn {
+                stream,
+                connection,
+                peer,
+                outbound: Vec::new(),
+                written: 0,
+                watching_writable: false,
+                started: now,
+                last_progress: now,
+                closing: false,
+                last_application: kmsrs_db::Guid::ZERO,
+            },
+        );
+        Ok(())
+    }
+
+    /// Handle readiness on one connection.
+    fn service(
+        &mut self,
+        token: Token,
+        readable: bool,
+        writable: bool,
+        entropy: &mut dyn Entropy,
+        clock: &dyn Fn() -> Instant,
+    ) {
+        if writable && self.flush(token).is_err() {
+            self.close(token);
+            return;
+        }
+        if readable && self.read_and_answer(token, entropy, clock).is_err() {
+            self.close(token);
+            return;
+        }
+        self.finish(token);
+    }
+
+    /// Read what is available and answer it.
+    fn read_and_answer(
+        &mut self,
+        token: Token,
+        entropy: &mut dyn Entropy,
+        clock: &dyn Fn() -> Instant,
+    ) -> io::Result<()> {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = {
+                let Some(conn) = self.connections.get_mut(&token) else {
+                    return Ok(());
+                };
+                match conn.stream.read(&mut buffer) {
+                    // The peer closed its side.
+                    Ok(0) => {
+                        conn.closing = true;
+                        return Ok(());
+                    }
+                    Ok(count) => count,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(()),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+
+            let now = clock();
+            let Some(peer) = self.connections.get(&token).map(|conn| conn.peer) else {
+                return Ok(());
+            };
+
+            // `POL-014` (#102): one token per read that carries work, keyed on
+            // (source, application). The application is not known until the
+            // request is decoded, so the key uses the *previous* request's —
+            // fixed before this client chose its fields, so varying them cannot
+            // move it to a fresh bucket.
+            let application = self
+                .connections
+                .get(&token)
+                .map_or(kmsrs_db::Guid::ZERO, |conn| conn.last_application);
             if let Admission::Limited { retry_after } =
-                limiter.admit(peer.ip(), last_application, now)
+                self.server.limiter_mut().admit(peer.ip(), application, now)
             {
-                if let Ok(guard) = server.lock() {
-                    guard.logger().message(
-                        crate::log::Severity::Warn,
-                        "rate-limited",
-                        &format!("{}: retry in {}s", peer.ip(), retry_after.as_secs()),
-                    );
+                self.server.logger().message(
+                    crate::log::Severity::Warn,
+                    "rate-limited",
+                    &format!("{}: retry in {}s", peer.ip(), retry_after.as_secs()),
+                );
+                if let Some(conn) = self.connections.get_mut(&token) {
+                    conn.closing = true;
                 }
                 return Ok(());
             }
-        }
 
-        let handled = {
-            let mut guard = server.lock().map_err(poisoned)?;
-            let mut entropy = entropy.lock().map_err(poisoned)?;
             let context = RequestContext {
                 peer: Some(Peer {
                     address: peer.ip(),
@@ -342,236 +522,159 @@ fn serve_connection(
                 now,
                 host_time: None,
             };
-            guard.handle(
-                &mut connection,
-                buffer.get(..read).unwrap_or(&[]),
-                context,
-                entropy.as_mut(),
-            )
-        };
 
-        if !handled.response.is_empty() {
-            write_all(stream, &handled.response, strategy, clock, started)?;
-        }
-        // Remember what this connection is about, for the next request's
-        // rate-limit key.
-        if let Ok(guard) = server.lock()
-            && let Some(event) = guard.host().events().iter().next_back()
-        {
-            last_application = event.application.0;
-        }
+            let handled = {
+                let Some(conn) = self.connections.remove(&token) else {
+                    return Ok(());
+                };
+                let mut conn = conn;
+                let input = buffer.get(..read).unwrap_or(&[]);
+                let handled = self
+                    .server
+                    .handle(&mut conn.connection, input, context, entropy);
+                self.connections.insert(token, conn);
+                handled
+            };
 
-        if handled.close {
-            return Ok(());
-        }
-    }
-}
+            // Remember what this connection is about, for the next request's
+            // rate-limit key.
+            let latest = self
+                .server
+                .host()
+                .events()
+                .iter()
+                .next_back()
+                .map(|event| event.application.0);
 
-/// Write every byte, looping on short writes and retrying on `EINTR`.
-fn write_all(
-    stream: &mut TcpStream,
-    mut bytes: &[u8],
-    strategy: ReadStrategy,
-    clock: &dyn Fn() -> Instant,
-    started: Instant,
-) -> io::Result<()> {
-    while !bytes.is_empty() {
-        if clock().saturating_duration_since(started) > CONNECTION_DEADLINE {
-            return Err(io::Error::new(
-                ErrorKind::TimedOut,
-                "the connection deadline passed mid-write",
-            ));
-        }
-        match stream.write(bytes) {
-            Ok(0) => {
+            let Some(conn) = self.connections.get_mut(&token) else {
+                return Ok(());
+            };
+            conn.last_progress = now;
+            if let Some(application) = latest {
+                conn.last_application = application;
+            }
+            if conn.outbound.len().saturating_add(handled.response.len()) > MAX_OUTBOUND {
+                // A peer that has stopped reading must not become a memory leak.
                 return Err(io::Error::new(
                     ErrorKind::WriteZero,
-                    "the peer stopped accepting bytes",
+                    "the peer is not reading its responses",
                 ));
             }
-            Ok(count) => bytes = bytes.get(count..).unwrap_or(&[]),
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(error)
-                if strategy == ReadStrategy::Polled && error.kind() == ErrorKind::WouldBlock =>
-            {
-                std::thread::sleep(POLL_INTERVAL);
+            conn.outbound.extend_from_slice(&handled.response);
+            if handled.close {
+                conn.closing = true;
             }
-            Err(error) => return Err(error),
-        }
-    }
-    stream.flush()
-}
 
-/// A poisoned lock, as an I/O error.
-///
-/// Reached only if a worker panicked while holding the server lock. Treating it
-/// as an I/O error closes the one connection rather than propagating a panic
-/// into every other worker.
-fn poisoned<T>(_: std::sync::PoisonError<T>) -> io::Error {
-    io::Error::other("a worker panicked while holding the host lock")
-}
-
-/// Everything the accept loops share.
-#[derive(Debug)]
-pub struct Runtime {
-    /// The host, its configuration and its state.
-    pub server: Mutex<Server>,
-    /// The pool ceiling (`NET-005`, #154).
-    pub capacity: Capacity,
-    /// The stop signal (`NET-007`, #157).
-    pub shutdown: Shutdown,
-    /// Per-source token buckets (`POL-014`, #102).
-    pub limiter: Mutex<RateLimiter>,
-}
-
-impl Runtime {
-    /// Wrap a server in the shared state the driver needs.
-    #[must_use]
-    pub fn new(server: Server, limit: usize) -> Self {
-        Self {
-            server: Mutex::new(server),
-            capacity: Capacity::new(limit),
-            shutdown: Shutdown::new(),
-            limiter: Mutex::new(RateLimiter::new()),
+            self.flush(token)?;
+            if self
+                .connections
+                .get(&token)
+                .is_some_and(|conn| conn.closing)
+            {
+                return Ok(());
+            }
         }
     }
 
-    /// The same, with an explicit rate limiter.
+    /// Write as much of the outbound buffer as the socket will take.
     ///
-    /// For tests, which need a burst small enough to reach in a few requests —
-    /// the shipped burst is deliberately large enough that a NAT-ted site does
-    /// not trip it (`POL-014`, #102).
-    #[must_use]
-    pub fn with_limiter(server: Server, limit: usize, limiter: RateLimiter) -> Self {
-        Self {
-            server: Mutex::new(server),
-            capacity: Capacity::new(limit),
-            shutdown: Shutdown::new(),
-            limiter: Mutex::new(limiter),
-        }
-    }
-}
-
-/// Serve until [`Shutdown::request`] is called.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] only if the accept loops could not be started at
-/// all. A failure on an individual connection closes that connection and is
-/// not propagated — one client's broken socket is not the server's problem.
-///
-/// One thread per listener (`NET-006`, #155), plus one per in-flight
-/// connection up to the pool ceiling. Returns once every accept loop has
-/// stopped and every in-flight connection has drained (`NET-007`, #157) —
-/// draining rather than killing, because a client mid-activation deserves its
-/// answer.
-pub fn serve(
-    runtime: &Runtime,
-    listeners: Vec<Bound>,
-    entropy: Box<dyn Entropy + Send>,
-    clock: &(dyn Fn() -> Instant + Sync),
-) -> io::Result<()> {
-    let entropy = Mutex::new(entropy);
-    for bound in &listeners {
-        runtime.shutdown.register(bound.address);
-    }
-
-    std::thread::scope(|scope| {
-        for bound in listeners {
-            let runtime = &runtime;
-            let entropy = &entropy;
-            scope.spawn(move || {
-                accept_loop(runtime, &bound.listener, entropy, clock);
-            });
-        }
-    });
-
-    Ok(())
-}
-
-/// Accept and dispatch until asked to stop.
-fn accept_loop(
-    runtime: &Runtime,
-    listener: &TcpListener,
-    entropy: &Mutex<Box<dyn Entropy + Send>>,
-    clock: &(dyn Fn() -> Instant + Sync),
-) {
-    // In-flight connections are joined before this returns, which is what makes
-    // shutdown a drain rather than a kill.
-    std::thread::scope(|scope| {
-        loop {
-            if runtime.shutdown.requested() {
-                return;
-            }
-            let (stream, peer) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                // An accept failure is a fact about one connection, not about
-                // the listener. vlmcsd treats several of these as fatal.
-                Err(_) => continue,
-            };
-
-            // Re-checked after accept, because the wakeup connection arrives
-            // here (`NET-008`, #158).
-            if runtime.shutdown.requested() {
-                return;
-            }
-
-            // `NET-005` (#154): no permit means close now, not queue.
-            let Some(permit) = runtime.capacity.try_acquire() else {
-                drop(stream);
-                continue;
-            };
-
-            // `NET-012` (#161): one client, one identity, from the moment it
-            // arrives.
-            let peer = normalise_socket(peer);
-
-            // `POL-013` (#101): the access list is checked here, before any RPC
-            // state exists — so a refused peer never reaches the parser, and
-            // the gate cannot be bypassed by anything in the protocol.
-            //
-            // A blocked attempt is an event, not a silent drop (`POL-014`,
-            // #102): the connection is closed and the reason is logged, so an
-            // operator debugging "why can this client not activate" has an
-            // answer.
-            {
-                let access = runtime
-                    .server
-                    .lock()
-                    .map(|server| server.compiled().access)
-                    .unwrap_or_default();
-                if let Err(denial) = access.check(peer.ip()) {
-                    if let Ok(server) = runtime.server.lock() {
-                        server.logger().message(
-                            crate::log::Severity::Warn,
-                            "blocked",
-                            &format!("{}: {denial:?}", peer.ip()),
-                        );
-                    }
-                    drop(stream);
-                    continue;
+    /// Loops on short writes and retries on `EINTR` (`NET-006`, #156). py-kms
+    /// uses `send()` rather than `sendall()`, so a partial write silently
+    /// truncates a response and the client blames the protocol.
+    fn flush(&mut self, token: Token) -> io::Result<()> {
+        let Some(conn) = self.connections.get_mut(&token) else {
+            return Ok(());
+        };
+        while conn.written < conn.outbound.len() {
+            let pending = conn.outbound.get(conn.written..).unwrap_or(&[]);
+            match conn.stream.write(pending) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        ErrorKind::WriteZero,
+                        "the peer stopped accepting bytes",
+                    ));
                 }
+                Ok(count) => conn.written = conn.written.saturating_add(count),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
             }
-            scope.spawn(move || {
-                let _permit = permit;
-                let mut stream = stream;
-                let Ok(strategy) = ReadStrategy::choose(&stream) else {
-                    return;
-                };
-                let started = clock();
-                let _ = serve_connection(
-                    runtime,
-                    &mut stream,
-                    peer,
-                    strategy,
-                    entropy,
-                    started,
-                    clock,
-                );
-            });
         }
-    });
+
+        if conn.written >= conn.outbound.len() {
+            conn.outbound.clear();
+            conn.written = 0;
+        }
+        Ok(())
+    }
+
+    /// Adjust interest, and close if there is nothing left to do.
+    fn finish(&mut self, token: Token) {
+        let (wants_writable, done) = {
+            let Some(conn) = self.connections.get(&token) else {
+                return;
+            };
+            let pending = conn.written < conn.outbound.len();
+            (pending, conn.closing && !pending)
+        };
+
+        if done {
+            self.close(token);
+            return;
+        }
+
+        let Some(conn) = self.connections.get_mut(&token) else {
+            return;
+        };
+        if wants_writable != conn.watching_writable {
+            let interest = if wants_writable {
+                Interest::READABLE | Interest::WRITABLE
+            } else {
+                Interest::READABLE
+            };
+            if self
+                .poll
+                .registry()
+                .reregister(&mut conn.stream, token, interest)
+                .is_ok()
+            {
+                conn.watching_writable = wants_writable;
+            }
+        }
+    }
+
+    /// Close and forget one connection.
+    fn close(&mut self, token: Token) {
+        if let Some(mut conn) = self.connections.remove(&token) {
+            let _ = self.poll.registry().deregister(&mut conn.stream);
+        }
+    }
+
+    /// Close every connection that has outlived a deadline (`NET-004`, #153).
+    fn expire(&mut self, now: Instant) {
+        let expired: Vec<Token> = self
+            .connections
+            .iter()
+            .filter(|(_, conn)| conn.expired(now))
+            .map(|(token, _)| *token)
+            .collect();
+        for token in expired {
+            self.close(token);
+        }
+    }
+}
+
+/// Whether an event says the source is readable.
+///
+/// A hangup counts: there may be buffered bytes to read before the close, and
+/// treating it as not-readable is how a final request gets dropped.
+fn is_readable(event: &Event) -> bool {
+    event.is_readable() || event.is_read_closed()
+}
+
+/// Whether an event says the source is writable.
+fn is_writable(event: &Event) -> bool {
+    event.is_writable()
 }
 
 #[cfg(test)]
@@ -583,82 +686,73 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects,
         clippy::assertions_on_constants,
+        clippy::integer_division,
+        clippy::integer_division_remainder_used,
         reason = "test code: a failed expectation should abort loudly"
     )]
 
-    use super::{Capacity, MAX_CONNECTIONS, Shutdown};
+    use super::{
+        CONNECTION_DEADLINE, CONNECTION_STATE_BUDGET, CONNECTION_STATE_BYTES, MAX_CONNECTIONS,
+        MAX_OUTBOUND, READ_TIMEOUT,
+    };
 
-    /// `NET-005` (#154): the pool refuses rather than waits. vlmcsd's `-m` is a
-    /// counting semaphore that queues, which is why its own manual recommends
-    /// a short timeout as the entire slowloris mitigation.
+    /// `NET-014` (#296): the ceiling is derived from a memory budget rather than
+    /// picked. This is what makes that claim checkable — replace the constant
+    /// with a literal and the arithmetic stops holding.
     #[test]
-    fn capacity_refuses_immediately_rather_than_queueing() {
-        let capacity = Capacity::new(2);
-        let first = capacity.try_acquire().expect("one");
-        let second = capacity.try_acquire().expect("two");
-        assert_eq!(capacity.in_flight(), 2);
+    fn the_connection_ceiling_is_derived_from_the_memory_budget() {
+        assert_eq!(
+            MAX_CONNECTIONS,
+            CONNECTION_STATE_BUDGET / CONNECTION_STATE_BYTES
+        );
+        assert_eq!(MAX_CONNECTIONS, 1024);
 
+        // The per-connection figure must cover what a connection actually
+        // holds: a `MAX_PDU_LEN` inbound buffer plus association state.
         assert!(
-            capacity.try_acquire().is_none(),
-            "a third must be refused, not queued"
+            CONNECTION_STATE_BYTES > kmsrs_proto::wire::connection::MAX_PDU_LEN,
+            "the budget must cover the inbound buffer"
         );
 
-        drop(second);
-        assert_eq!(capacity.in_flight(), 1);
-        let third = capacity.try_acquire();
-        assert!(third.is_some(), "a slot frees when one is released");
-
-        drop(first);
-        drop(third);
-        assert_eq!(capacity.in_flight(), 0);
-    }
-
-    /// The ceiling holds under contention, which is the only condition that
-    /// matters for it.
-    #[test]
-    fn the_ceiling_holds_under_concurrent_acquisition() {
-        let capacity = Capacity::new(8);
-        let peak = std::sync::atomic::AtomicUsize::new(0);
-
-        std::thread::scope(|scope| {
-            for _ in 0..32 {
-                scope.spawn(|| {
-                    for _ in 0..200 {
-                        if let Some(permit) = capacity.try_acquire() {
-                            let now = capacity.in_flight();
-                            peak.fetch_max(now, std::sync::atomic::Ordering::AcqRel);
-                            drop(permit);
-                        }
-                    }
-                });
-            }
-        });
-
-        assert_eq!(capacity.in_flight(), 0, "every permit was returned");
+        // And the whole thing must fit somewhere a unikernel can live.
         assert!(
-            peak.load(std::sync::atomic::Ordering::Acquire) <= 8,
-            "the ceiling was exceeded: {}",
-            peak.load(std::sync::atomic::Ordering::Acquire)
+            CONNECTION_STATE_BUDGET <= 64 * 1024 * 1024,
+            "Hermit has a fixed memory budget and no swap"
         );
     }
 
+    /// The ceiling must be far above what a real fleet produces, because
+    /// refusing a legitimate client is both a broken client and a fingerprint —
+    /// `POL-014`'s (#102) argument applied to the same traffic.
     #[test]
-    fn shutdown_is_idempotent_and_observable() {
-        let shutdown = Shutdown::new();
-        assert!(!shutdown.requested());
-        shutdown.request();
-        assert!(shutdown.requested());
-        // Called again from anywhere, including a signal-handling thread.
-        shutdown.request();
-        assert!(shutdown.requested());
+    fn the_ceiling_is_far_above_what_a_real_fleet_produces() {
+        // A KMS client renews on a seven-day interval, and a request is
+        // sub-millisecond, so concurrent connections are dominated by arrival
+        // burstiness rather than by fleet size.
+        let fleet = 50_000_u64;
+        let renewal_seconds = 7 * 24 * 60 * 60_u64;
+        assert!(fleet / renewal_seconds < 1, "under one request per second");
+        assert!(
+            MAX_CONNECTIONS >= 1024,
+            "a ceiling a real fleet can reach is a fingerprint"
+        );
     }
 
+    /// Two deadlines, and the shorter one is not the interesting one: a peer
+    /// sending one byte just inside every read timeout resets the idle deadline
+    /// forever, which is why the total exists.
     #[test]
-    fn the_default_pool_is_bounded() {
-        assert!(MAX_CONNECTIONS > 0);
-        assert!(
-            MAX_CONNECTIONS <= 1024,
-            "an unbounded pool is py-kms's thread-per-connection failure"
-        );
+    fn the_total_deadline_is_longer_than_the_idle_one() {
+        assert!(CONNECTION_DEADLINE > READ_TIMEOUT);
+        assert_eq!(READ_TIMEOUT.as_secs(), 30);
+        assert_eq!(CONNECTION_DEADLINE.as_secs(), 120);
+    }
+
+    /// The outbound buffer is bounded, so a peer that stops reading cannot turn
+    /// into a memory leak.
+    #[test]
+    fn the_outbound_buffer_is_bounded_but_holds_several_responses() {
+        assert!(MAX_OUTBOUND > kmsrs_proto::kms::layout::MAX_RESPONSE_LEN * 4);
+        assert!(MAX_OUTBOUND <= 64 * 1024);
     }
 }
