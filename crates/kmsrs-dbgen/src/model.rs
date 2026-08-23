@@ -143,7 +143,19 @@ impl Database {
                 .then_with(|| a.activation_id.cmp(&b.activation_id))
         });
         for product in &mut self.products {
-            product.key_blocks.sort_by_key(|block| block.start);
+            // A Windows image carries the same pkeyconfig document in three
+            // places — System32, SysWOW64 and a WinSxS component directory — so
+            // every key range is read three times. Identical blocks are the
+            // same block; overlapping ones would not be, which is why this
+            // deduplicates rather than merges, and why `kmsrs-db`'s build still
+            // rejects a genuine overlap.
+            product.key_blocks.sort_by(|a, b| {
+                a.start
+                    .cmp(&b.start)
+                    .then_with(|| a.end.cmp(&b.end))
+                    .then_with(|| a.part_number.cmp(&b.part_number))
+            });
+            product.key_blocks.dedup();
             product.counted_ids.sort_unstable();
             product.counted_ids.dedup();
         }

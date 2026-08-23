@@ -10,6 +10,11 @@ repository.workspace = true
 
 [dependencies]
 
+[build-dependencies]
+# Build-only, so it never reaches the shipped binary. `build.rs` turns the
+# committed data file into static tables (DB-003, #127).
+toml.workspace = true
+
 [dev-dependencies]
 
 [lints]
