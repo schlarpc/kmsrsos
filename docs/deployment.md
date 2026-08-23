@@ -9,6 +9,8 @@ any of this are in [`decisions.md`](decisions.md).
 
 - [Where the host has to live](#where-the-host-has-to-live) — the loopback constraint
 - [DNS: the `_vlmcs._tcp` SRV record](#dns-the-_vlmcs_tcp-srv-record)
+- [Building it, and configuring it](#building-it-and-configuring-it)
+- [Containers and Kubernetes](#containers-and-kubernetes)
 - [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
 
@@ -121,6 +123,130 @@ slmgr /dlv
 
 `/dlv` prints the host the client used and its activation interval, which is the quickest way to tell
 *"the client never found a host"* from *"the client found one and did not like the answer"*.
+
+---
+
+## Building it, and configuring it
+
+There is no configuration file, no command line and no per-knob environment variable
+([D5](decisions.md#declined-with-rationale)). Anything that can change a byte on the wire is decided
+when the binary is built (`CFG-001`, #166), and the way to change it is to build a different binary.
+
+That doctrine is only usable if the rebuild is two lines, so it is a function (`CFG-003`, #168):
+
+```nix
+# flake.nix
+{
+  inputs.kmsrsos.url = "github:schlarpc/kmsrsos";
+  outputs = { self, kmsrsos, ... }: {
+    packages.x86_64-linux = kmsrsos.lib.mkKmsrsos {
+      system = "x86_64-linux";
+      settings = {
+        activationInterval = 240;      # minutes; Microsoft's default is 120
+        renewalInterval = 20160;       # minutes; Microsoft's default is 10080
+        permissiveRetail = true;       # activate retail/OEM/eval SKUs too (POL-010, #98)
+        strictClockSkew = false;       # refuse a clock more than four hours out (POL-011, #99)
+      };
+    };
+  };
+}
+```
+
+It returns `{ server, client, container }`. `osImage` joins that set once #250 has a hermetic Hermit
+build.
+
+Those four settings are the entire build-time surface — see [D37](decisions.md#d37) for why it is not
+thirty preprocessor macros and seven presets. A bad value is a **compile error** rather than a
+start-up failure, because `Compiled::BUILD` parses the overrides in const context (`CFG-004`, #169):
+`activationInterval = 0` produces a build that stops, not a server that starts and behaves oddly.
+
+The flake's own outputs, without configuring anything:
+
+| `nix build .#…` | What it is |
+|---|---|
+| `default` | the whole workspace |
+| `server` | the server binary, statically linked against musl on Linux |
+| `client` | the diagnostic and detection-resistance client |
+| `container` | the container image, as a `tar.gz` ready for `docker load` |
+| `windows` | `kmsrsos.exe` and `kmsrs-client.exe`, cross-compiled |
+
+`nix flake check` runs the whole gate: build, clippy, fmt, tests, coverage with a floor under the
+sans-io crates, the data-integrity check, the feature powerset, a configured build through
+`mkKmsrsos`, and the container image (`PKG-002`, #239).
+
+### Which build is running
+
+There is no `--version` flag, because the server takes no arguments at all (`CFG-007`, #172). The
+build stamp is on the status page and in `/metrics` instead (`CFG-008`, #173):
+
+```
+kmsrsos_build_info{version="0.1.0",revision="…",source_date_epoch="…"} 1
+```
+
+The revision and the date come from the flake, and the date is the **source** date rather than the
+build date — which is what makes two builds of one revision identical, and is checked by
+`nix build --rebuild` in CI. A `cargo build` in a checkout reports `unknown` rather than guessing.
+
+---
+
+## Containers and Kubernetes
+
+```sh
+nix build .#container
+docker load < result
+docker run --rm --read-only -p 1688:1688 -p 8080:8080 kmsrsos:latest
+```
+
+The image is **two statically linked binaries and nothing else** (`PKG-004`, #241) — the server and
+the client. Not "a minimal base image": there is no libc, no package manager, no shell, no
+`/etc/passwd`. `packaging_invariants.rs` fails if anything that is a shell, or could run one, appears
+in the expression.
+
+It runs as `65534:65534` and needs no capabilities, because 1688 is unprivileged. `--read-only` is
+free rather than aspirational: the program performs no filesystem I/O at all (axiom A5), and CI
+proves it by running the real binary under `strace` (`SEC-006`, #198).
+
+The `HEALTHCHECK` probes the **KMS port** by doing what a client does — connect, bind, activate,
+decode — via `kmsrs-client --healthcheck`. That is why the client is in the image at all: a scratch
+container has no shell, no `curl` and no `nc`, so the check has to be a binary. Probing the HTTP
+handler instead would prove the one fact the caller already had by getting a reply, which is the
+Organization fork's `readyz` mistake (`OBS-008`, #184). A host that is merely *distinguishable* from a
+genuine one is still healthy — a check that failed on a detection finding would take a working service
+out of rotation for a cosmetic reason.
+
+There is no `Dockerfile` and there never will be. The image is built by `dockerTools` from store
+paths, so there is no build context to `COPY` and no `RUN` to execute — which is what makes it
+impossible for the build to reach the network (`PKG-005`, #242). Upstream py-kms's Dockerfiles
+`git clone` GitHub master instead of copying the build context, so `docker build` there produces
+whatever upstream happened to be that morning and silently ignores local changes.
+
+### Kubernetes
+
+```sh
+kubectl apply -f deploy/kubernetes/kmsrsos.yaml
+```
+
+Plain manifests, and **no Helm chart** ([D17](decisions.md#d17)).
+
+> **`replicas: 1` is not a tuning parameter.** This host's state is in memory and per-pod, so two
+> replicas means two CMID tables, two event logs and — the part that matters — **two ePIDs**. A client
+> that reaches pod A and then pod B is told two different host identities by one host name. That is
+> MM01, the single loudest emulator tell in the ecosystem and the canonical detection test,
+> reintroduced at the infrastructure layer by a config value. The update strategy is `Recreate` for
+> the same reason: a rolling update runs two pods at once.
+
+Helm's value is parameterization, and `replicaCount` is the parameter people would reach for first —
+which is exactly the one that must never change. The Organization fork's chart exposes it as a
+top-level value.
+
+The probes hit `/healthz`, which answers 200 only when the KMS side is working: an identity was drawn,
+the listener is bound, and the entropy self-test still passes (`OS-012`, #263).
+
+The Service is `ClusterIP` by default. Clients live outside the cluster, so this normally wants a
+`LoadBalancer` or a `NodePort` — left to be chosen deliberately rather than defaulted into, because
+exposing 1688 is a decision about the network. And remember the
+[loopback constraint](#where-the-host-has-to-live): the address the clients get must be one they can
+route to.
 
 ---
 
