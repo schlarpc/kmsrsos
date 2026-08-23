@@ -19,9 +19,13 @@
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::time::Duration;
+use kmsrs_client::load::{Charge, Charged, Soak, Vary};
+use kmsrs_client::names::Flavour;
 use kmsrs_client::probe::{Finding, Probe};
+use kmsrs_client::request::RequestFields;
+use kmsrs_client::session::Session;
 use kmsrs_proto::entropy::testing::DeterministicEntropy;
-use kmsrs_proto::kms::version::Version;
+use kmsrs_proto::kms::version::{ProtocolVersion, Version};
 use kmsrs_proto::time::Instant;
 use kmsrs_server::config::operational::LogLevel;
 use kmsrs_server::net::driver::Driver;
@@ -115,6 +119,186 @@ fn our_own_server_survives_the_full_probe() {
         findings.is_empty(),
         "our own server is distinguishable from a genuine host: {findings:#?}"
     );
+}
+
+/// `CLI-006` (#212): a concurrent soak run against our own server completes,
+/// and reports one ePID.
+///
+/// The concurrency is the point. `vlmcs` is strictly sequential and
+/// single-threaded, so what it measures is round-trip latency times N — a fact
+/// about the network, not about the host. What finds a host's real bugs is
+/// several workers contending over one CMID table and one event log at once.
+///
+/// One ePID across every one of those requests is the property `ID-001` (#106)
+/// buys, and a soak run is where a per-response generator shows up most
+/// clearly: py-kms produces a fresh one for every single response unless `-e`
+/// is given.
+#[test]
+fn a_concurrent_soak_run_completes_and_reports_one_epid() {
+    let report = with_server(|address| {
+        let mut entropy = DeterministicEntropy::from_seed(0x50AC_1234);
+        Soak {
+            target: address,
+            timeout: Duration::from_secs(10),
+            fields: RequestFields::default(),
+            requests: 120,
+            concurrency: 6,
+            reconnect: false,
+            vary: Vary {
+                machine_id: true,
+                workstation_name: Some(Flavour::NetBios),
+            },
+        }
+        .run(&mut entropy)
+        .expect("the soak run starts")
+    });
+
+    assert_eq!(report.failed, 0, "{:?}", report.first_failure);
+    assert_eq!(report.completed, 120);
+    assert_eq!(
+        report.distinct_epids, 1,
+        "a genuine host has one ePID for its lifetime"
+    );
+    // 120 distinct machines against a client SKU's N_Policy of 25 saturates at
+    // 2N (`POL-001`, #89), and does not go past it.
+    assert_eq!(report.highest_count, 50);
+}
+
+/// The same, rebinding per request, which exercises the accept path and the
+/// connection ceiling rather than the request path.
+#[test]
+fn a_soak_run_that_reconnects_per_request_also_completes() {
+    let report = with_server(|address| {
+        let mut entropy = DeterministicEntropy::from_seed(0x50AC_5678);
+        Soak {
+            target: address,
+            timeout: Duration::from_secs(10),
+            fields: RequestFields::default(),
+            requests: 40,
+            concurrency: 4,
+            reconnect: true,
+            vary: Vary::default(),
+        }
+        .run(&mut entropy)
+        .expect("the soak run starts")
+    });
+
+    assert_eq!(report.failed, 0, "{:?}", report.first_failure);
+    assert_eq!(report.completed, 40);
+    assert_eq!(report.distinct_epids, 1);
+}
+
+/// `CLI-007` (#213): charging a cold host reaches the threshold.
+#[test]
+fn charging_a_cold_host_reaches_the_threshold() {
+    let outcome = with_server(|address| {
+        let mut entropy = DeterministicEntropy::from_seed(0x0C4A_0001);
+        Charge {
+            target: address,
+            timeout: Duration::from_secs(10),
+            fields: RequestFields::default(),
+            limit: 100,
+        }
+        .run(&mut entropy)
+        .expect("the charge completes")
+    });
+
+    // `POL-001` (#89) answers the very first request with the minimum that
+    // activates, so a cold host is "charged" immediately — which is the whole
+    // reason this host exists and is worth asserting rather than assuming.
+    match outcome {
+        Charged::Reached { count, requests } => {
+            assert!(count >= 25, "reached with only {count}");
+            assert!(requests >= 1);
+        }
+        Charged::Saturated { count, threshold } => {
+            panic!("a cold host settled at {count} below {threshold}");
+        }
+    }
+}
+
+/// And a host asked for more than it will ever report says so, without
+/// anybody calling it a failure.
+///
+/// `vlmcs` aborts here with *"the KMS server does not increment its active
+/// clients"*, which is the right diagnosis for a real host and the wrong one
+/// for a saturated one. Under `POL-001` (#89) the count saturates at `2N`, and
+/// `POL-019` (#313) stops an absurd demand being reflected back — so a client
+/// asking for more than the model tracks is told what the host holds, and the
+/// count stops rising. That is a result, not an error.
+#[test]
+fn charging_past_what_a_host_will_report_is_saturation_not_failure() {
+    let outcome = with_server(|address| {
+        let mut entropy = DeterministicEntropy::from_seed(0x0C4A_0002);
+        Charge {
+            target: address,
+            timeout: Duration::from_secs(10),
+            fields: RequestFields {
+                // Far past `MAX_TRACKED_REQUIRED_CLIENTS`, so the host answers
+                // with the world rather than with the demand.
+                required_clients: 5_000,
+                ..RequestFields::default()
+            },
+            limit: 40,
+        }
+        .run(&mut entropy)
+        .expect("the charge completes")
+    });
+
+    match outcome {
+        Charged::Saturated { count, threshold } => {
+            assert_eq!(threshold, 5_000);
+            assert!(count <= 200, "the demand came back: {count}");
+        }
+        Charged::Reached { count, .. } => {
+            panic!("the host claimed to hold {count} machines");
+        }
+    }
+}
+
+/// `CLI-005` (#211): a request may declare a version it is not framed as.
+///
+/// A genuine host dispatches on **both halves** of the version word, so 6.1 is
+/// refused rather than serviced as v6 — py-kms's defect, and one a client can
+/// detect by asking (`KMS-008`, #24). What the client has to be able to do is
+/// ask, which means writing a version word the request is not.
+#[test]
+fn an_unsupported_declared_version_is_refused_rather_than_serviced() {
+    with_server(|address| {
+        for declared in [
+            ProtocolVersion { major: 7, minor: 0 },
+            ProtocolVersion { major: 6, minor: 1 },
+            ProtocolVersion { major: 0, minor: 0 },
+        ] {
+            let mut entropy = DeterministicEntropy::from_seed(0x0C11_0005);
+            let mut session = Session::open(address, Duration::from_secs(10), true, &mut |_| {})
+                .expect("the bind succeeds");
+
+            let fields = RequestFields {
+                version: Version::V6,
+                declared_version: Some(declared),
+                ..RequestFields::default()
+            };
+            let outcome = session.activate(&fields, &mut entropy, &mut |_| {});
+            assert!(
+                outcome.is_err(),
+                "{declared} was serviced rather than refused, which is py-kms's \
+                 defect"
+            );
+        }
+
+        // And the control: the same request declaring what it is succeeds, so
+        // the refusals above are about the version rather than about the probe.
+        let mut entropy = DeterministicEntropy::from_seed(0x0C11_0006);
+        let mut session = Session::open(address, Duration::from_secs(10), true, &mut |_| {})
+            .expect("the bind succeeds");
+        assert!(
+            session
+                .activate(&RequestFields::default(), &mut entropy, &mut |_| {})
+                .is_ok(),
+            "a v6 request declaring 6.0 must still work"
+        );
+    });
 }
 
 /// The probe is not vacuous: it *can* report findings.
