@@ -13,7 +13,9 @@ sha2.workspace = true
 hmac.workspace = true
 
 [dev-dependencies]
-hex.workspace = true
+# `alloc` for `hex::encode`, which the known-answer tests use so that a failure
+# prints a hex string comparable by eye against the reference generator's output.
+hex = { workspace = true, features = ["alloc"] }
 
 [lints]
 workspace = true
