@@ -1,8 +1,13 @@
 name: Test
 
+# `pull_request` covers every branch with an open PR; `push` is narrowed to the
+# default branch so the two do not both fire on the same commit (CI-001, #305).
+# Before SEC-004 (#196) that only wasted one runner; with a six-way fuzz matrix
+# it wastes fourteen.
 on:
   pull_request:
   push:
+    branches: [main]
 
 jobs:
   tests:
