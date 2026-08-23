@@ -1,0 +1,70 @@
+# Re-extract the product data and fail if it has drifted (TEST-007, #228).
+#
+# Not part of the pull-request gate, and deliberately so. Re-extraction pulls
+# a Windows container image and an Office volume-licence pack — several hundred
+# megabytes from Microsoft — so running it per PR would make every change wait
+# on somebody else's CDN. It also *cannot* be a gate in the ordinary sense: a
+# failure here usually means Microsoft published new data, which is news rather
+# than a defect in the pull request that happened to be open.
+#
+# What runs on every PR is the cheap half, in
+# crates/kmsrs-db/tests/data_integrity.rs: that the committed file still names
+# the generator that produced it, that every source carries a digest, and that
+# every row names a source. That catches a hand-edited products.toml and a
+# generator whose output changed without the data being regenerated. It cannot
+# catch Microsoft changing what it publishes, which is what this job is for.
+name: Data drift
+
+on:
+  schedule:
+    # Weekly, early Monday UTC. Microsoft's licensing artifacts change on the
+    # order of months, so anything more frequent is just downloading.
+    - cron: "17 4 * * 1"
+  # And on demand, for when somebody wants to know now.
+  workflow_dispatch:
+
+jobs:
+  re-extract:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Re-extract from Microsoft's artifacts
+        run: nix develop -c cargo run -p kmsrs-dbgen -- regenerate
+
+      - name: Show what changed
+        id: diff
+        run: |
+          if git diff --quiet -- crates/kmsrs-db/data/products.toml; then
+            echo "no drift"
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- crates/kmsrs-db/data/products.toml
+            git --no-pager diff -- crates/kmsrs-db/data/products.toml | head -500
+          fi
+
+      # The regenerated file, whether or not it drifted: if it did, this is
+      # what somebody reviews and commits, and re-running the extraction by
+      # hand to get it back is the slow part.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: products-toml
+          path: crates/kmsrs-db/data/products.toml
+          if-no-files-found: error
+
+      - name: Fail if the data drifted
+        if: steps.diff.outputs.drifted == 'true'
+        run: |
+          echo "::error::crates/kmsrs-db/data/products.toml is no longer what" \
+               "kmsrs-dbgen extracts from Microsoft's current artifacts."
+          echo "Download the products-toml artifact from this run, review the" \
+               "diff, and commit it. Do not hand-edit the file: data ships" \
+               "through the pipeline or it does not ship (declined item D19)."
+          exit 1
