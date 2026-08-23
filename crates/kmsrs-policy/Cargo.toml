@@ -13,6 +13,10 @@ kmsrs-db.workspace = true
 kmsrs-proto.workspace = true
 
 [dev-dependencies]
+# See kmsrs-proto's manifest: an integration-style dev-dependency on the
+# protocol crate with `testing` enabled, so tests can use deterministic
+# entropy. The shipped binary never enables it (ARCH-003, #3).
+kmsrs-proto = { workspace = true, features = ["testing"] }
 proptest.workspace = true
 
 [lints]
