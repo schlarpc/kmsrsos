@@ -1,0 +1,122 @@
+# Workspace root (ARCH-001, ARCH-016).
+#
+# One workspace, one lockfile, one pinned MSRV. The eight-crate split is
+# load-bearing rather than cosmetic; see `ARCH-001` (#1) and the table in
+# CLAUDE.md. The two properties the split exists to enforce are:
+#
+#   * `kmsrs-dbgen`'s dependencies (XML, gzip, HTTP) are unreachable from the
+#     runtime binary, because nothing the binary depends on names it.
+#   * `kmsrs-crypto` is the single place where axiom A8 ("reuse crates, don't
+#     reimplement") is violated, so quarantining it keeps the hand-written
+#     Rijndael independently auditable.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/kmsrs-proto",
+    "crates/kmsrs-crypto",
+    "crates/kmsrs-db",
+    "crates/kmsrs-dbgen",
+    "crates/kmsrs-policy",
+    "crates/kmsrs-server",
+    "crates/kmsrs-client",
+    "crates/kmsrs-os",
+    "crates/kmsrs-vectors",
+]
+# cargo-fuzz keeps its own nightly-only workspace (SEC-004, #196).
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Must equal `channel` in rust-toolchain.toml; CI asserts it (ARCH-016, #16).
+rust-version = "1.96.1"
+authors = ["Chaz Schlarp"]
+license = "MIT"
+repository = "https://github.com/schlarpc/kmsrsos"
+readme = "README.md"
+
+# Every dependency is pinned to an exact version (PKG-006, #243). Ranges are
+# what let a rebuild of a tagged release produce different bytes.
+[workspace.dependencies]
+kmsrs-proto = { path = "crates/kmsrs-proto" }
+kmsrs-crypto = { path = "crates/kmsrs-crypto" }
+kmsrs-db = { path = "crates/kmsrs-db" }
+kmsrs-dbgen = { path = "crates/kmsrs-dbgen" }
+kmsrs-policy = { path = "crates/kmsrs-policy" }
+kmsrs-server = { path = "crates/kmsrs-server" }
+kmsrs-vectors = { path = "crates/kmsrs-vectors" }
+
+zerocopy = { version = "=0.8.56", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false }
+getrandom = { version = "=0.4.3", default-features = false }
+arrayvec = { version = "=0.7.8", default-features = false }
+hex = { version = "=0.4.3", default-features = false }
+proptest = { version = "=1.11.0" }
+toml = { version = "=1.1.4" }
+
+# Workspace lint policy (ARCH-008, #8; SEC-001, #193).
+#
+# `unsafe_code = "forbid"` is set here rather than per-crate so that a new crate
+# cannot silently opt out by forgetting the inner attribute. `kmsrs-os` is the
+# single documented exception (OS-013, #264) and overrides this table with its
+# own; it is the only manifest in the tree permitted to do so.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# The ARCH-008 deny list. These are the ways a Rust program written in a hurry
+# still panics or silently truncates at runtime, which axiom A2 forbids.
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+cast_precision_loss = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+mem_forget = "deny"
+# `a / 0` and `a % 0` panic; `checked_div`/`checked_rem` do not (ID-015, #120).
+integer_division = "deny"
+integer_division_remainder_used = "deny"
+
+# Pedantic lints that fight the house style more than they help. The doc
+# comments in this tree are prose about a protocol, so `doc_markdown` spends its
+# time demanding backticks around Microsoft, RustCrypto and Hermit.
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Half of the panic-freedom strategy (decision 3): the lints in the table above
+# stop panics being written, `panic = "abort"` removes the unwinding machinery
+# so that a panic that slips through cannot unwind across a request boundary and
+# leave a half-updated CMID table behind. See `ARCH-009` (#9).
+panic = "abort"
+
+[profile.test]
+opt-level = 0
+debug = true

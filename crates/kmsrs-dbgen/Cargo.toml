@@ -1,0 +1,23 @@
+[package]
+name = "kmsrs-dbgen"
+description = "Host-only extractor turning Microsoft pkeyconfig artifacts into product data (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published: this is a development tool, and the whole point of the crate
+# split is that nothing shipped can reach it.
+publish = false
+
+[[bin]]
+name = "kmsrs-dbgen"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

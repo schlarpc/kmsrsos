@@ -1,0 +1,24 @@
+[package]
+name = "kmsrs-client"
+description = "Diagnostic, validation and soak client; the anti-fingerprinting regression suite (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kmsrs-client"
+path = "src/main.rs"
+
+[dependencies]
+kmsrs-proto.workspace = true
+kmsrs-db.workspace = true
+kmsrs-crypto.workspace = true
+getrandom = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

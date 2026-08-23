@@ -1,0 +1,22 @@
+[package]
+name = "kmsrs-proto"
+description = "Sans-io KMS v4/v5/v6 payloads and DCE/RPC codec (ARCH-001)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kmsrs-crypto.workspace = true
+kmsrs-db.workspace = true
+zerocopy = { workspace = true, features = ["derive"] }
+arrayvec.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true
