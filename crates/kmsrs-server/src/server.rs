@@ -15,6 +15,7 @@
 
 use crate::config::{Compiled, Discovered, Operational};
 use crate::host::{Host, RequestContext};
+use crate::log::Logger;
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::kms::layout::MAX_RESPONSE_LEN;
 use kmsrs_proto::time::Instant;
@@ -27,6 +28,7 @@ pub struct Server {
     operational: Operational,
     discovered: Discovered,
     host: Host,
+    logger: Logger,
 }
 
 /// What a driver should do with the socket after a call to [`Server::handle`].
@@ -54,11 +56,13 @@ impl Server {
         today: kmsrs_db::Date,
     ) -> Result<Self, kmsrs_policy::EntropyUnavailable> {
         let host = Host::new(entropy, today)?.with_intervals(compiled.intervals);
+        let logger = Logger::new(&operational, &discovered);
         Ok(Self {
             compiled,
             operational,
             discovered,
             host,
+            logger,
         })
     }
 
@@ -75,6 +79,11 @@ impl Server {
     ) -> Handled {
         let mut response = Vec::new();
         let mut close = false;
+        // The sequence number the next event will get. Used rather than the
+        // log's length because the log is bounded and may evict while this
+        // call runs — a length would then skip the wrong events, whereas a
+        // sequence number is monotonic and never reused (`OBS-004`, #180).
+        let logged_through = self.host.events().recorded();
 
         if connection.receive(input).is_err() {
             // The peer sent more than the framing permits before a complete PDU
@@ -111,7 +120,25 @@ impl Server {
             }
         }
 
+        // `OBS-003` (#179): one line per handled request, written after the
+        // state machine has finished with the input so that a request split
+        // across reads produces one line rather than several.
+        for event in self
+            .host
+            .events()
+            .iter()
+            .filter(|event| event.sequence >= logged_through)
+        {
+            self.logger.request(event);
+        }
+
         Handled { response, close }
+    }
+
+    /// How this server writes log lines (`OBS-001`, #177).
+    #[must_use]
+    pub const fn logger(&self) -> &Logger {
+        &self.logger
     }
 
     /// A fresh connection using this build's negotiation settings.

@@ -13,12 +13,14 @@
 pub mod config;
 pub mod entropy;
 pub mod host;
+pub mod log;
 pub mod net;
 pub mod server;
 
 pub use config::{Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
 pub use host::{Host, RequestContext};
+pub use log::{Logger, Severity};
 pub use server::{Handled, Server};
 
 /// The name the emulator reports for itself. Used by the log sink and the web

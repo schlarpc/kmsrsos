@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::time::Instant;
 use kmsrs_server::config::{Compiled, Discovered, Operational};
+use kmsrs_server::log::{Logger, Severity};
 use kmsrs_server::net::driver::{MAX_CONNECTIONS, Runtime, serve};
 use kmsrs_server::net::listener::bind_all;
 use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server};
@@ -71,12 +72,17 @@ fn main() {
 fn run(operational: Operational) -> Result<(), i32> {
     let discovered = Discovered::observe();
     let compiled = Compiled::BUILD;
+    // Everything from here on goes through the logger, so it is shaped and
+    // filtered the same way a request is (`OBS-001`, #177). The two failures
+    // above happen before a logger can exist, since the logger is built from
+    // the configuration that failed to parse.
+    let logger = Logger::new(&operational, &discovered);
 
     // The wall clock is read exactly once, to bound the randomised activation
     // date in the ePID (`ID-007`, #112). Nothing in the request path reads one
     // again, which is why this host needs no accurate clock (`ARCH-004`, #4).
     let today = today().ok_or_else(|| {
-        eprintln!("{PRODUCT_NAME}: the system clock is not usable");
+        logger.message(Severity::Error, "startup", "the system clock is not usable");
         EXIT_UNAVAILABLE
     })?;
 
@@ -90,7 +96,7 @@ fn run(operational: Operational) -> Result<(), i32> {
         })?;
 
     let (bound, failures) = bind_all().map_err(|error| {
-        eprintln!("{PRODUCT_NAME}: {error}");
+        logger.message(Severity::Error, "bind", &error.to_string());
         EXIT_UNAVAILABLE
     })?;
 
@@ -98,10 +104,14 @@ fn run(operational: Operational) -> Result<(), i32> {
         // `NET-001` (#150): one stack missing is a fact about the host, not a
         // failure — but it is worth saying out loud, since an operator who
         // expected IPv6 to work should not have to guess.
-        eprintln!("{PRODUCT_NAME}: not listening on {address}: {error}");
+        logger.message(
+            Severity::Warn,
+            "bind-skipped",
+            &format!("{address}: {error}"),
+        );
     }
     for entry in &bound {
-        eprintln!("{PRODUCT_NAME}: listening on {}", entry.address);
+        logger.message(Severity::Info, "listening", &entry.address.to_string());
     }
 
     let runtime = Arc::new(Runtime::new(server, MAX_CONNECTIONS));
@@ -121,7 +131,7 @@ fn run(operational: Operational) -> Result<(), i32> {
                 // A second signal means the operator is not willing to wait for
                 // in-flight connections. Honouring that is more useful than
                 // draining twice as politely.
-                eprintln!("{PRODUCT_NAME}: exiting without draining");
+                logger.message(Severity::Warn, "shutdown", "exiting without draining");
                 #[expect(
                     clippy::exit,
                     reason = "a second signal is an explicit instruction not to \
@@ -131,10 +141,14 @@ fn run(operational: Operational) -> Result<(), i32> {
                 )]
                 std::process::exit(EXIT_INTERRUPTED);
             }
-            eprintln!("{PRODUCT_NAME}: draining");
+            logger.message(Severity::Info, "shutdown", "draining");
             runtime.shutdown.request();
         }) {
-            eprintln!("{PRODUCT_NAME}: no shutdown handler installed: {error}");
+            logger.message(
+                Severity::Warn,
+                "shutdown",
+                &format!("no handler installed: {error}"),
+            );
         }
     }
 
@@ -146,11 +160,11 @@ fn run(operational: Operational) -> Result<(), i32> {
 
     let entropy: Box<dyn Entropy + Send> = Box::new(OsEntropy);
     if let Err(error) = serve(&runtime, bound, entropy, &clock) {
-        eprintln!("{PRODUCT_NAME}: {error}");
+        logger.message(Severity::Error, "serve", &error.to_string());
         return Err(EXIT_UNAVAILABLE);
     }
 
-    eprintln!("{PRODUCT_NAME}: stopped");
+    logger.message(Severity::Info, "stopped", PRODUCT_NAME);
     Ok(())
 }
 
