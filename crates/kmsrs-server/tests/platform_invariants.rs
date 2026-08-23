@@ -219,12 +219,13 @@ fn the_wall_clock_is_read_exactly_once() {
         reads.len(),
         1,
         "the wall clock must be read in exactly one place — `today()` in \
-         kmsrs-server/src/main.rs. Anything else is a dependency on a clock \
+         kmsrs-server/src/entry.rs. Anything else is a dependency on a clock \
          Hermit does not have (OS-007, #258). Found: {reads:#?}"
     );
     assert!(
-        reads.iter().all(|at| at.contains("main.rs")),
-        "the one wall-clock read moved out of main: {reads:#?}"
+        reads.iter().all(|at| at.contains("entry.rs")),
+        "the one wall-clock read moved out of the shared entry point: \
+         {reads:#?}"
     );
 }
 

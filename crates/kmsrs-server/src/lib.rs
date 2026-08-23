@@ -22,6 +22,7 @@
 pub mod budget;
 pub mod config;
 pub mod entropy;
+pub mod entry;
 pub mod host;
 pub mod log;
 pub mod net;

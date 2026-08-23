@@ -145,9 +145,9 @@ fn every_failure_says_which_check_failed() {
 #[test]
 fn the_refusal_message_names_the_fix() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/entry.rs"),
     )
-    .expect("main.rs is readable");
+    .expect("entry.rs is readable");
 
     let refusal = source
         .split("if let Err(failure) = OsEntropy.self_test()")
