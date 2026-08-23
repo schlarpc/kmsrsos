@@ -33,6 +33,15 @@ use zerocopy::FromBytes;
 
 /// Why a response could not be read at all.
 ///
+/// Each variant carries the number that made it fail, which is what turns a
+/// refusal into a diagnosis. The three vlmcsd *client* defects `SEC-002` (#194)
+/// pins are all cases where the equivalent C read that number and then did not
+/// check it: [`Self::TooShort`] is where `DecryptResponseV4` `memcpy`s an
+/// unbounded length into a 188-byte stack struct, [`Self::NotBlockAligned`] is
+/// where `DecryptResponseV6` hands a non-multiple of 16 to CBC and walks off
+/// the front of the buffer, and [`Self::PidSizeOutOfRange`] is where
+/// `checkPidLength` indexes `KmsPID[-1]` at `PIDSize == 0`.
+///
 /// Deliberately short. Anything a caller could want to *report* rather than
 /// give up on is a validation result, not an error here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

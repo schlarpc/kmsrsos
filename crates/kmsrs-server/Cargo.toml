@@ -35,6 +35,12 @@ zerocopy = { workspace = true, features = ["derive"] }
 # manifests and lockfile to check the structural invariants of ARCH-001,
 # ARCH-008, ARCH-016 and SEC-001.
 toml.workspace = true
+# `tests/audited_c_defects.rs` (SEC-002, #194) drives the committed responses
+# through the client's decoder, because half the audited defects are in
+# vlmcsd's *client*. A dev-dependency, so the cycle with kmsrs-client — which
+# depends on this crate — is one cargo permits and one nothing shipped can see.
+kmsrs-vectors.workspace = true
+kmsrs-client = { path = "../kmsrs-client" }
 
 [lints]
 workspace = true

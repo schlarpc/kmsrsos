@@ -21,6 +21,11 @@
 //! nobody in either ecosystem does it — MelroyB's fork normalises inside its
 //! blacklist matcher only, so its logs and its filter disagree about who
 //! connected.
+//!
+//! Every address here is distinct, which is also what stops the defect
+//! `SEC-002` (#194) pins in `addListeningSocket()`: vlmcsd computes one slot
+//! pointer, writes every `getaddrinfo` result to it, and leaves the rest of
+//! `SocketList` uninitialised for `select()` to consume.
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 

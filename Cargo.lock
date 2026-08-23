@@ -430,10 +430,12 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "getrandom 0.4.3",
+ "kmsrs-client",
  "kmsrs-crypto",
  "kmsrs-db",
  "kmsrs-policy",
  "kmsrs-proto",
+ "kmsrs-vectors",
  "mio",
  "serde",
  "socket2",
