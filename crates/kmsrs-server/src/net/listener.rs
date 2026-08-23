@@ -256,6 +256,11 @@ mod tests {
     /// `NET-009` (#159): a restart must not be blocked by `TIME_WAIT`. On Unix
     /// `std::net` sets `SO_REUSEADDR`, which is what makes rebinding the same
     /// port work; this checks the behaviour rather than the option.
+    ///
+    /// `cfg(unix)` is false on Hermit (`ARCH-015`, #15), so this does not
+    /// compile there — which is the intended branch, twice over: the option is
+    /// a silent no-op on that target (`OS-010`, #261), and a unikernel guest
+    /// has no restart to rebind through in the first place.
     #[cfg(unix)]
     #[test]
     fn a_port_can_be_rebound_after_its_listener_is_dropped() {

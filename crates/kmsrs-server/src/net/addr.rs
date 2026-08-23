@@ -48,22 +48,11 @@ pub const BACKLOG: i32 = 128;
 
 /// Whether this target must bind exactly one socket (`OS-009`, #260).
 ///
-/// True on Hermit, for two reasons taken from the kernel source rather than
-/// inferred:
-///
-/// * `bind()` records the address and then ignores it — `listen()` passes only
-///   the *port* to smoltcp. One `0.0.0.0` socket therefore already accepts on
-///   every local address, and two sockets on one port race with **no defined
-///   dispatch**: which one receives a connection is unspecified.
-/// * Hermit never gets an IPv6 address at all. smoltcp has v6 compiled in, but
-///   the kernel only ever assigns IPv4 and speaks DHCPv4 only — no SLAAC, no
-///   RA, no DHCPv6.
-///
-/// A single `bool` rather than a `cfg` on each list, so both shapes exist on
-/// every target and [`tests`] can check the one this host does not use. A
-/// `cfg`-selected item is only ever compiled on the platform that selects it,
-/// which is exactly the platform that cannot be tested here.
-pub const SINGLE_SOCKET_ONLY: bool = cfg!(target_os = "hermit");
+/// Defined in [`crate::platform`], which is where every per-target fact is
+/// named, and re-exported here because this is the module that acts on it. A
+/// single `bool` rather than a `cfg` on each list, so both shapes exist on
+/// every target and [`tests`] can check the one this host does not use.
+pub use crate::platform::SINGLE_SOCKET_ONLY;
 
 /// The dual-stack bind list: an IPv6 wildcard and an IPv4 wildcard.
 ///

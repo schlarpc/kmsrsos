@@ -9,8 +9,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use kmsrs_proto::time::Instant;
 use kmsrs_server::config::{Compiled, Discovered, Operational};
 use kmsrs_server::log::{Logger, Severity};
-use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS, Role};
+use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS, Role, ShutdownHandle};
 use kmsrs_server::net::listener::bind_all;
+use kmsrs_server::platform::SignalHandling;
 use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server};
 
 /// Exit code for a configuration this binary could not understand.
@@ -160,41 +161,7 @@ fn run(operational: Operational) -> Result<(), i32> {
         })?;
     let shutdown = driver.shutdown_handle();
 
-    // `NET-007` (#157): SIGINT and SIGTERM on Unix, `SetConsoleCtrlHandler` on
-    // Windows, through a safe wrapper so this crate keeps `forbid(unsafe_code)`.
-    // The handler does one thing — set a flag and poke the listeners — rather
-    // than vlmcsd's `fopen`/`fprintf` from signal context.
-    //
-    // The Windows *service* control handler is a separate mechanism and belongs
-    // with the rest of the service work (M8).
-    {
-        let shutdown = shutdown.clone();
-        let already_asked = AtomicBool::new(false);
-        if let Err(error) = ctrlc::set_handler(move || {
-            if already_asked.swap(true, Ordering::AcqRel) {
-                // A second signal means the operator is not willing to wait for
-                // in-flight connections. Honouring that is more useful than
-                // draining twice as politely.
-                logger.message(Severity::Warn, "shutdown", "exiting without draining");
-                #[expect(
-                    clippy::exit,
-                    reason = "a second signal is an explicit instruction not to \
-                              wait for in-flight connections; unwinding out of a \
-                              signal handler is not possible, so exiting is the \
-                              only way to honour it"
-                )]
-                std::process::exit(EXIT_INTERRUPTED);
-            }
-            logger.message(Severity::Info, "shutdown", "draining");
-            shutdown.request();
-        }) {
-            logger.message(
-                Severity::Warn,
-                "shutdown",
-                &format!("no handler installed: {error}"),
-            );
-        }
-    }
+    arrange_to_stop_politely(logger, &shutdown);
 
     let boot = std::time::Instant::now();
     let clock = move || {
@@ -212,9 +179,67 @@ fn run(operational: Operational) -> Result<(), i32> {
     Ok(())
 }
 
+/// Ask the operating system to drain us when it wants us gone
+/// (`NET-007`, #157; `OS-015`, #298).
+///
+/// SIGINT and SIGTERM on Unix, `SetConsoleCtrlHandler` on Windows, through a
+/// safe wrapper so this crate keeps `forbid(unsafe_code)`. The handler does one
+/// thing — set a flag and poke the poller's waker — rather than vlmcsd's
+/// `fopen`/`fprintf` from signal context.
+///
+/// On Hermit there is nothing to install: that target has no signals at all, so
+/// the drain path is reached only through [`ShutdownHandle`], and
+/// [`kmsrs_server::platform::install_shutdown_handler`] reports that rather than
+/// a failure to deliver something that does not exist. Not being able to stop
+/// politely is never fatal — a host that ignores SIGTERM is still a host that
+/// activates — so every outcome here is logged and none returns an error.
+///
+/// The Windows *service* control handler is a separate mechanism and belongs
+/// with the rest of the service work (M8).
+fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
+    let shutdown = shutdown.clone();
+    let already_asked = AtomicBool::new(false);
+
+    match kmsrs_server::platform::install_shutdown_handler(move || {
+        if already_asked.swap(true, Ordering::AcqRel) {
+            // A second signal means the operator is not willing to wait for
+            // in-flight connections. Honouring that is more useful than
+            // draining twice as politely.
+            logger.message(Severity::Warn, "shutdown", "exiting without draining");
+            #[expect(
+                clippy::exit,
+                reason = "a second signal is an explicit instruction not to \
+                          wait for in-flight connections; unwinding out of a \
+                          signal handler is not possible, so exiting is the \
+                          only way to honour it"
+            )]
+            std::process::exit(EXIT_INTERRUPTED);
+        }
+        logger.message(Severity::Info, "shutdown", "draining");
+        shutdown.request();
+    }) {
+        Ok(SignalHandling::Installed) => {}
+        // Not a warning. A target with no signals has not failed to deliver
+        // one, and logging it as a problem would train an operator to ignore
+        // the line that does mean something.
+        Ok(SignalHandling::Unsupported) => logger.message(
+            Severity::Info,
+            "shutdown",
+            "this target has no signals; stopping is the hypervisor's job",
+        ),
+        Err(error) => logger.message(
+            Severity::Warn,
+            "shutdown",
+            &format!("no handler installed: {error}"),
+        ),
+    }
+}
+
 /// Today's date in UTC, from the system clock.
 ///
-/// The only wall-clock read in the program.
+/// The only wall-clock read in the program (`OS-007`, #258). Everything else
+/// that needs time uses the injected monotonic clock, which is why this host
+/// works on a target whose `SystemTime` is a CMOS read plus local ticks.
 fn today() -> Option<kmsrs_db::Date> {
     /// Seconds in a day. Leap seconds are not represented in Unix time, so
     /// this conversion is exact.
