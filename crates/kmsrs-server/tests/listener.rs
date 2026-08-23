@@ -749,3 +749,77 @@ fn an_active_connection_survives_a_moving_clock() {
         }
     });
 }
+
+/// `WIRE-011` (#69): with two listeners, each `bind_ack` advertises the port of
+/// the socket that **actually accepted** — not a configured constant.
+///
+/// py-kms echoes its configured primary port regardless of which listener took
+/// the connection, so a client that reconnects to the advertised endpoint can
+/// be sent somewhere the host is not listening.
+#[test]
+fn each_listener_advertises_its_own_port() {
+    // Two listeners on two ephemeral ports, so the ports genuinely differ and
+    // neither is the compiled-in 1688.
+    let (bound, _) = bind_each(&[
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+    ])
+    .unwrap();
+    assert_eq!(bound.len(), 2, "two listeners were needed");
+    let first = bound[0].address;
+    let second = bound[1].address;
+    assert_ne!(first.port(), second.port());
+
+    let mut driver = Driver::new(test_server(), bound, 8).unwrap();
+    let shutdown = driver.shutdown_handle();
+    let clock = TestClock::still();
+
+    std::thread::scope(|scope| {
+        let clock_ref = &clock;
+        let handle = scope.spawn(move || {
+            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
+            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+        });
+
+        let result = std::panic::catch_unwind(|| {
+            for address in [first, second] {
+                let advertised = advertised_endpoint(address);
+                assert_eq!(
+                    advertised,
+                    address.port().to_string(),
+                    "the listener on {} advertised {advertised}",
+                    address.port()
+                );
+            }
+        });
+
+        shutdown.request();
+        handle.join().unwrap();
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    });
+}
+
+/// Bind to `address` and read back the secondary address from the `bind_ack`.
+fn advertised_endpoint(address: SocketAddr) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream
+        .write_all(&pdu(PacketType::Bind, 2, &bind_body()))
+        .unwrap();
+    let reply = read_pdu(&mut stream);
+
+    // The bind_ack body is: max_xmit u16, max_recv u16, assoc_group u32, then a
+    // counted secondary address including its terminating NUL.
+    let body = &reply[HEADER_LEN..];
+    let len = usize::from(u16::from_le_bytes([body[8], body[9]]));
+    assert!(len > 0, "a bind_ack must advertise an endpoint");
+    let text = &body[10..10 + len];
+    assert_eq!(
+        text.last(),
+        Some(&0),
+        "the advertised port is NUL-terminated"
+    );
+    String::from_utf8_lossy(&text[..len - 1]).into_owned()
+}

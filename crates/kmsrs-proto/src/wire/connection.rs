@@ -330,6 +330,83 @@ pub struct Connection {
     reassembling_context: Option<u16>,
     deadline: Option<Instant>,
     events: ArrayVec<ConnectionEvent, 8>,
+    secondary_address: SecondaryAddress,
+}
+
+/// The endpoint a `bind_ack` advertises (`WIRE-011`, #69).
+///
+/// The ASCII port of the socket that **actually accepted**, which is not the
+/// same as the configured port when a host listens on more than one. py-kms
+/// echoes its configured primary port regardless of which listener took the
+/// connection, so a client that reconnects to the advertised endpoint can be
+/// sent somewhere the host is not.
+///
+/// A fixed buffer rather than a borrow, so a `Connection` owns everything it
+/// needs to answer — the platform layer supplies the port once at accept and
+/// the protocol core never reaches back for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecondaryAddress {
+    bytes: [u8; Self::CAPACITY],
+    len: usize,
+}
+
+impl SecondaryAddress {
+    /// The longest port a `u16` can spell.
+    pub const CAPACITY: usize = 5;
+
+    /// The endpoint for a socket bound to `port`.
+    ///
+    /// The digits are written out rather than formatted: this crate is `no_std`
+    /// without `alloc`, so there is no `format!`. Checked arithmetic throughout,
+    /// because `ARCH-007` (#7) forbids `as` and bare `/` in wire handling — a
+    /// silent truncation in a field a client will connect back to is exactly
+    /// the defect class that rule exists for.
+    #[must_use]
+    pub fn for_port(port: u16) -> Self {
+        // Least-significant digit first, then reversed.
+        let mut digits = [0_u8; Self::CAPACITY];
+        let mut count = 0_usize;
+        let mut value = port;
+        loop {
+            let digit = value.checked_rem(10).unwrap_or(0);
+            if let Some(slot) = digits.get_mut(count) {
+                // `digit` is 0..=9, so the narrowing cannot lose anything.
+                *slot = b'0'.wrapping_add(u8::try_from(digit).unwrap_or(0));
+            }
+            count = count.saturating_add(1);
+            value = value.checked_div(10).unwrap_or(0);
+            if value == 0 {
+                break;
+            }
+        }
+
+        let mut bytes = [0_u8; Self::CAPACITY];
+        let last = count.saturating_sub(1);
+        for index in 0..count {
+            let source = last.saturating_sub(index);
+            if let Some(digit) = digits.get(source).copied()
+                && let Some(slot) = bytes.get_mut(index)
+            {
+                *slot = digit;
+            }
+        }
+        Self { bytes, len: count }
+    }
+
+    /// The ASCII port, without a terminating NUL.
+    ///
+    /// The NUL is added by [`crate::wire::bind::write_ack`], which is the one
+    /// place that knows the field's framing.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.get(..self.len).unwrap_or(&[])
+    }
+}
+
+impl Default for SecondaryAddress {
+    fn default() -> Self {
+        Self::for_port(1688)
+    }
 }
 
 impl Connection {
@@ -351,7 +428,26 @@ impl Connection {
             reassembling_context: None,
             deadline: None,
             events: ArrayVec::new(),
+            secondary_address: SecondaryAddress::default(),
         }
+    }
+
+    /// Advertise the port of the socket that accepted this connection
+    /// (`WIRE-011`, #69).
+    ///
+    /// With two listeners each must report **its own** port, which is why this
+    /// is per-connection rather than a constant. Left at 1688 if the platform
+    /// layer does not say.
+    #[must_use]
+    pub const fn with_secondary_address(mut self, address: SecondaryAddress) -> Self {
+        self.secondary_address = address;
+        self
+    }
+
+    /// What this connection will advertise as its endpoint.
+    #[must_use]
+    pub const fn secondary_address(&self) -> &SecondaryAddress {
+        &self.secondary_address
     }
 
     /// Append received bytes.
@@ -544,7 +640,7 @@ impl Connection {
             secondary_address: if is_alter {
                 &[]
             } else {
-                Self::secondary_address()
+                self.secondary_address.as_bytes()
             },
             client_flags: header.flags(),
         };
@@ -555,16 +651,6 @@ impl Connection {
                 reason: CloseReason::Refused,
             },
         }
-    }
-
-    /// The endpoint this host advertises.
-    ///
-    /// A placeholder until the platform layer supplies the port of the socket
-    /// that actually accepted (`WIRE-011`, #69, and `NET-001`, #150). It is a
-    /// function rather than an inline constant so that wiring it up is one
-    /// change here rather than a search through call sites.
-    const fn secondary_address() -> &'static [u8] {
-        b"1688"
     }
 
     fn handle_request(
@@ -825,3 +911,60 @@ impl AssociationGroups {
 
 /// The size of the fault PDU, re-exported so a driver can size its buffer.
 pub const MIN_OUTPUT_LEN: usize = FAULT_LEN;
+
+#[cfg(test)]
+mod secondary_address_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "test code: a failed expectation should abort loudly"
+    )]
+
+    use super::SecondaryAddress;
+    use alloc::format;
+
+    /// The port is formatted by hand, because this crate is `no_std` without
+    /// `alloc`. Hand-rolled integer formatting is exactly the kind of thing
+    /// that comes out right for the value you tried and wrong one digit either
+    /// side, so every width is checked.
+    #[test]
+    fn every_port_width_formats_correctly() {
+        for port in [
+            0_u16, 1, 9, 10, 99, 100, 999, 1000, 1688, 9999, 10_000, 65_535,
+        ] {
+            let address = SecondaryAddress::for_port(port);
+            assert_eq!(
+                address.as_bytes(),
+                format!("{port}").as_bytes(),
+                "port {port}"
+            );
+        }
+    }
+
+    /// Exhaustive, because there are only 65536 of them and a wrong digit in
+    /// any one is a wrong endpoint advertised to a real client.
+    #[test]
+    fn no_port_formats_wrongly() {
+        for port in 0..=u16::MAX {
+            let address = SecondaryAddress::for_port(port);
+            assert_eq!(address.as_bytes(), format!("{port}").as_bytes(), "{port}");
+        }
+    }
+
+    /// The default is the KMS port, so a connection whose platform layer says
+    /// nothing still advertises something sensible.
+    #[test]
+    fn the_default_is_the_kms_port() {
+        assert_eq!(SecondaryAddress::default().as_bytes(), b"1688");
+    }
+
+    /// No terminating NUL here: the framing belongs to `write_ack`, which is
+    /// the one place that knows the field's layout.
+    #[test]
+    fn the_value_carries_no_terminator() {
+        let address = SecondaryAddress::for_port(1688);
+        assert_eq!(address.as_bytes().len(), 4);
+        assert!(!address.as_bytes().contains(&0));
+    }
+}
