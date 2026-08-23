@@ -4,12 +4,16 @@
 //! The DCE/RPC framing that carries them lives in [`crate::wire`]; this module
 //! is about what is inside the stub.
 
+pub mod epid;
+pub mod framing;
 pub mod hresult;
 pub mod layout;
 pub mod request;
 pub mod status;
 pub mod version;
 
+pub use epid::EPid;
+pub use framing::{Ciphers, DecodedRequest, ResponsePlan};
 pub use hresult::HResult;
 pub use request::{Request, RequestError};
 pub use status::LicenseStatus;
