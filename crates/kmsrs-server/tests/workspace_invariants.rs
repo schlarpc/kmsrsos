@@ -480,6 +480,113 @@ fn no_shipped_crate_touches_the_filesystem() {
     );
 }
 
+/// `SEC-013` (#205): nothing secret is embedded in the shipped artifact.
+///
+/// Not "the secrets are well protected" — there are none. The three protocol
+/// keys are published constants compiled into every genuine KMS host and both
+/// existing emulators (`CRY-001`, #40); RFC 2136 dynamic DNS update is declined
+/// partly because it would have needed the first real one (declined item D15);
+/// the web UI is read-only so there is no credential to hold (D27); and axiom
+/// A5 forbids the disk a key file would live on.
+///
+/// Three checks, because "no secrets" fails in three ways: a credential-shaped
+/// name is how one gets added deliberately, a PEM block is how one gets pasted
+/// in, and a fourth constant in `kmsrs-crypto::keys` is how one gets added
+/// while looking like it belongs.
+///
+/// Deliberately *not* checked: every `[u8; N]` constant in the tree. The
+/// protocol is made of published GUIDs — transfer syntaxes, interface IDs,
+/// application IDs — so that test is all noise and its failures would be
+/// silenced rather than read.
+#[test]
+fn no_secret_material_is_embedded() {
+    /// Names that mean "this is a credential".
+    const CREDENTIAL_SHAPED: &[&str] = &[
+        "password",
+        "passphrase",
+        "secret_key",
+        "api_key",
+        "private_key",
+        "tsig",
+        "bearer",
+        "credential",
+    ];
+
+    /// Text that means somebody pasted key material in.
+    const PASTED_KEY_MATERIAL: &[&str] = &["-----BEGIN", "PRIVATE KEY", "ssh-rsa", "AKIA"];
+
+    let root = workspace_root();
+    let mut offences = Vec::new();
+
+    for (name, manifest_path) in crate_manifests(&root) {
+        if name == QUARANTINED_CRATE {
+            continue;
+        }
+        let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        if !source_dir.is_dir() {
+            continue;
+        }
+
+        for (path, text) in rust_sources_with_paths(&source_dir) {
+            for (number, line) in text.lines().enumerate() {
+                // Comments are stripped: this file's own prose says
+                // "password", and so does the doc comment above.
+                let code = match line.find("//") {
+                    Some(comment) => line.split_at(comment).0,
+                    None => line,
+                };
+                let lowered = code.to_ascii_lowercase();
+
+                let hit = CREDENTIAL_SHAPED
+                    .iter()
+                    .find(|needle| lowered.contains(*needle))
+                    .or_else(|| {
+                        PASTED_KEY_MATERIAL
+                            .iter()
+                            .find(|needle| code.contains(*needle))
+                    });
+
+                if let Some(needle) = hit {
+                    offences.push(format!(
+                        "{}:{}: {needle}",
+                        path.display(),
+                        number.saturating_add(1)
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "these shipped sources look like they carry a secret, and there is \
+         nothing in this program that should have one (SEC-013, #205): \
+         {offences:#?}"
+    );
+
+    // The crypto crate holds exactly three key constants, all published, all
+    // Microsoft's. A fourth is how key material would arrive looking like it
+    // belonged, and it is the one place in the tree where it would.
+    let keys = std::fs::read_to_string(root.join("crates/kmsrs-crypto/src/keys.rs"))
+        .expect("the published key constants live here");
+    let declared: Vec<&str> = keys
+        .lines()
+        .filter(|line| line.trim_start().starts_with("pub const "))
+        .collect();
+    assert_eq!(
+        declared.len(),
+        3,
+        "kmsrs-crypto::keys declares {} constants; it holds the three published \
+         Microsoft keys and nothing else (SEC-013, #205): {declared:#?}",
+        declared.len()
+    );
+    for key in ["pub const V4:", "pub const V5:", "pub const V6:"] {
+        assert!(keys.contains(key), "{key} is no longer where it was");
+    }
+}
+
 /// Every `.rs` file under a directory, with its path.
 fn rust_sources_with_paths(dir: &Path) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();

@@ -113,6 +113,21 @@ pub struct Request<'a> {
     /// How many bytes of the buffer the head occupied, including the blank
     /// line. A driver consumes exactly this many.
     pub head_len: usize,
+    /// The `Host` header, if it is one this host will repeat back
+    /// (`DISC-006`, #148).
+    ///
+    /// The one header that is read at all, and it exists for one page: the
+    /// instructions render `slmgr /skms` and a DNS zone snippet, and the
+    /// address that belongs in them is *the address that reached this server* —
+    /// which the operator's own browser has just demonstrated. Enumerating
+    /// interfaces would be a worse answer as well as a syscall: a host with
+    /// three NICs has no way to know which one its clients route to, and on
+    /// Hermit `bind()` does not record an address at all (`OS-009`, #260).
+    ///
+    /// **Client-controlled**, so it is filtered rather than trusted: see
+    /// [`plausible_host`]. Everything downstream also HTML-escapes it, and the
+    /// page's Content-Security-Policy has no `script-src` at all.
+    pub host: Option<&'a str>,
 }
 
 /// Why a request could not be answered as asked.
@@ -243,6 +258,7 @@ pub fn parse(buffer: &[u8]) -> Parsed<'_> {
     };
 
     let mut count = 0_usize;
+    let mut host = None;
     for line in lines {
         if line.is_empty() {
             break;
@@ -264,6 +280,13 @@ pub fn parse(buffer: &[u8]) -> Parsed<'_> {
         if declares_a_body(name, value) {
             return Parsed::Refused(RequestError::BodyNotAllowed);
         }
+        // The first `Host` wins. A second one is not refused — this is not a
+        // proxy and there is nothing downstream to disagree with — but neither
+        // is it allowed to overwrite the first, which is the half of request
+        // smuggling that is about *which* value gets used.
+        if host.is_none() && name.eq_ignore_ascii_case("Host") {
+            host = plausible_host(value.trim());
+        }
     }
 
     let (path, query) = match target.split_once('?') {
@@ -276,7 +299,47 @@ pub fn parse(buffer: &[u8]) -> Parsed<'_> {
         path,
         query,
         head_len,
+        host,
     })
+}
+
+/// The host part of a `Host` header, if it is one worth repeating back
+/// (`DISC-006`, #148).
+///
+/// The port is dropped — the instructions are about the **KMS** port, and the
+/// one in the header is the web UI's. An IPv6 literal keeps its brackets,
+/// because that is how it has to appear in `slmgr /skms`.
+///
+/// The filter is an allow-list of the characters a hostname or an IP literal
+/// can contain, and it is deliberately narrower than the specification: a
+/// `Host` this host does not recognise produces `None` and the page renders a
+/// placeholder rather than an attacker's string. Nothing is lost by being
+/// strict, because the only reader is an operator looking at their own server.
+#[must_use]
+pub fn plausible_host(value: &str) -> Option<&str> {
+    /// The longest host worth rendering. Longer than any real name and far
+    /// shorter than a header line, so this cannot become a way to inflate a
+    /// page.
+    const MAX_HOST: usize = 255;
+
+    let host = if let Some(rest) = value.strip_prefix('[') {
+        // `[::1]:8080` — the brackets are part of the address, the port is not.
+        let end = rest.find(']')?;
+        value.get(..end.checked_add(2)?)?
+    } else {
+        match value.split_once(':') {
+            Some((host, _port)) => host,
+            None => value,
+        }
+    };
+
+    if host.is_empty() || host.len() > MAX_HOST {
+        return None;
+    }
+    let acceptable = host.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']' | b'_')
+    });
+    acceptable.then_some(host)
 }
 
 /// Split `METHOD TARGET HTTP/1.x` into the two parts that matter.
@@ -415,6 +478,65 @@ mod tests {
             Parsed::Refused(RequestError::HeadTooLong),
             "a client that never sends a blank line was still being read"
         );
+    }
+
+    /// `DISC-006` (#148): the `Host` header is captured, and only the host
+    /// part of it.
+    ///
+    /// The port in that header is the *web UI's*; the instructions page is
+    /// about the KMS port, so carrying it through would put the wrong number
+    /// in an `slmgr /skms` line an operator is about to paste.
+    #[test]
+    fn the_host_header_is_captured_without_its_port() {
+        for (header, expected) in [
+            ("kms.example.net", Some("kms.example.net")),
+            ("kms.example.net:8080", Some("kms.example.net")),
+            ("10.0.0.5:8080", Some("10.0.0.5")),
+            ("[2001:db8::1]:8080", Some("[2001:db8::1]")),
+            ("[::1]", Some("[::1]")),
+        ] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: {header}\r\n\r\n");
+            let Parsed::Complete(request) = parse(raw.as_bytes()) else {
+                panic!("{header} did not parse");
+            };
+            assert_eq!(request.host, expected, "{header}");
+        }
+    }
+
+    /// A `Host` this host does not recognise produces `None`, so the page
+    /// renders a placeholder rather than whatever a client sent.
+    ///
+    /// The filter is an allow-list and deliberately narrower than the
+    /// specification permits. Nothing is lost: the only reader is an operator
+    /// looking at their own server.
+    #[test]
+    fn an_implausible_host_header_is_dropped_rather_than_carried() {
+        for header in [
+            "<script>alert(1)</script>",
+            "exa mple.net",
+            "kms.example.net/../..",
+            "",
+        ] {
+            let raw = format!("GET / HTTP/1.1\r\nHost: {header}\r\n\r\n");
+            match parse(raw.as_bytes()) {
+                Parsed::Complete(request) => {
+                    assert_eq!(request.host, None, "{header:?} survived the filter");
+                }
+                // Refused outright is a stronger answer than dropped.
+                Parsed::Refused(_) | Parsed::Incomplete => {}
+            }
+        }
+    }
+
+    /// The first `Host` wins. A second cannot overwrite the first, which is the
+    /// half of request smuggling that is about *which* value a server uses.
+    #[test]
+    fn a_second_host_header_cannot_overwrite_the_first() {
+        let raw = b"GET / HTTP/1.1\r\nHost: first.example\r\nHost: second.example\r\n\r\n";
+        let Parsed::Complete(request) = parse(raw) else {
+            panic!("it did not parse");
+        };
+        assert_eq!(request.host, Some("first.example"));
     }
 
     #[test]

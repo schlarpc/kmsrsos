@@ -45,6 +45,7 @@
 //! There is no login here to rate-limit, and the peer address the event log
 //! records is the one the socket reports.
 
+use crate::net::addr::KMS_PORT;
 use crate::web::request::{Method, Request};
 use crate::web::response::{Response, Status};
 use core::fmt::Write as _;
@@ -117,7 +118,7 @@ pub fn route(request: &Request<'_>, snapshot: &Snapshot<'_>) -> Response {
     match request.path {
         "/" => Response::html(status_page(snapshot)),
         "/events" => Response::html(events_page(snapshot)),
-        "/instructions" => Response::html(instructions_page(snapshot)),
+        "/instructions" => Response::html(instructions_page(snapshot, request.host)),
         "/products" => Response::html(products_page()),
         "/healthz" => health(snapshot),
         "/metrics" => Response::metrics(metrics(snapshot)),
@@ -378,29 +379,110 @@ fn describe_outcome(outcome: &kmsrs_policy::events::Outcome) -> String {
 /// The audit's MM22: neither implementation tells an operator what to do, and
 /// the answer is always a manual `slmgr /skms` or a hand-made DNS record. The
 /// least this host can do is say so, with its own ports filled in.
-fn instructions_page(snapshot: &Snapshot<'_>) -> String {
-    let port = snapshot.kms_ports.first().copied().unwrap_or(1688);
+fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
+    let port = snapshot.kms_ports.first().copied().unwrap_or(KMS_PORT);
+    // The address the operator's own browser reached this server on. Escaped
+    // here rather than trusted: the `Host` header is client-controlled, and
+    // `plausible_host` has already reduced it to a hostname or an IP literal.
+    let address = host.map_or_else(|| String::from(HOST_PLACEHOLDER), escape);
+    let loopback = is_loopback_text(&address);
+
     let mut body = String::new();
+
+    if loopback {
+        // `NET-014` (#163). The most expensive way to learn this is to spend an
+        // afternoon on it; the second most expensive is vlmcsd's, which is a
+        // 370-line TAP driver that swaps ip_src and ip_dst on every packet
+        // (declined item D21).
+        let _: core::fmt::Result = write!(
+            body,
+            "<h2 class=\"no\">This page was reached over loopback</h2>\
+             <p><strong>A Windows client will not activate against \
+             <code>127.0.0.1</code> or <code>::1</code>.</strong> Software \
+             Protection Platform refuses a KMS host on the loopback interface, \
+             whatever the port, and reports a generic failure rather than \
+             saying so.</p>\
+             <p>Give the clients an address that is not loopback: this \
+             machine's LAN address, a second interface, a container bridge \
+             address, or the host-side address of a Hyper-V or WSL virtual \
+             switch. The commands below will work once <code>{HOST_PLACEHOLDER}</code> \
+             is one of those.</p>"
+        );
+    }
+
     let _: core::fmt::Result = write!(
         body,
         "<h2>On each client</h2>\
-         <p>Run as administrator, replacing <code>HOST</code> with this \
-         machine's address:</p>\
-         <pre><code>slmgr /skms HOST:{port}\nslmgr /ato</code></pre>\
-         <p>For Office, run the same commands against \
-         <code>ospp.vbs</code> in the Office installation directory.</p>\
-         <h2>Or by DNS</h2>\
-         <p>A client with no explicit host looks up an SRV record. Publish \
-         one in the domain the clients search:</p>\
-         <pre><code>_vlmcs._tcp  IN  SRV  0 0 {port}  HOST.</code></pre>\
+         <p>Run as administrator:</p>\
+         <pre><code>slmgr /skms {address}:{port}\nslmgr /ato</code></pre>\
+         <p>For Office, run the same two steps against <code>ospp.vbs</code> in \
+         the Office installation directory:</p>\
+         <pre><code>cscript ospp.vbs /sethst:{address}\ncscript ospp.vbs /act</code></pre>\
+         <p>A client must already be installed with the generic volume licence \
+         key for its edition, or it will not contact a KMS host at all. \
+         <a href=\"/products\">The product list</a> has them.</p>\
+         \
+         <h2>Or by DNS, so no client needs configuring</h2>\
+         <p>A client with no explicit host looks up \
+         <code>_vlmcs._tcp</code> in the domains it searches, which is how a \
+         real KMS deployment is found. Publish one of these; all three say the \
+         same thing.</p>\
+         \
+         <h3>BIND-style zone file</h3>\
+         <pre><code>_vlmcs._tcp  IN  SRV  0 0 {port}  {address}.</code></pre>\
          <p>The four numbers are priority, weight, port and target. Clients \
-         order by priority then weight, so a single host needs neither.</p>\
-         <h2>Keys</h2>\
-         <p>A client must be installed with the generic volume licence key \
-         for its edition before it will talk to a KMS host at all. \
-         <a href=\"/products\">The product list</a> has them.</p>"
+         order by ascending priority, then by weighted random choice within a \
+         priority (RFC 2782), so a single host needs neither and zero for both \
+         is the convention.</p>\
+         \
+         <h3>nsupdate</h3>\
+         <pre><code>nsupdate &lt;&lt;'EOF'\n\
+         update add _vlmcs._tcp.EXAMPLE.COM. 3600 SRV 0 0 {port} {address}.\n\
+         send\n\
+         EOF</code></pre>\
+         \
+         <h3>Windows DNS, in an Active Directory domain</h3>\
+         <pre><code>dnscmd . /RecordAdd EXAMPLE.COM _vlmcs._tcp SRV 0 0 {port} {address}</code></pre>\
+         <p>or the PowerShell equivalent:</p>\
+         <pre><code>Add-DnsServerResourceRecord -ZoneName EXAMPLE.COM ``\n\
+         &nbsp; -Name _vlmcs._tcp -Srv -Priority 0 -Weight 0 ``\n\
+         &nbsp; -Port {port} -DomainName {address}</code></pre>\
+         <p>Replace <code>EXAMPLE.COM</code> with the domain the clients \
+         search — their primary DNS suffix, which in a domain is the domain \
+         itself.</p>\
+         \
+         <h2>Checking it</h2>\
+         <pre><code>nslookup -type=srv _vlmcs._tcp.EXAMPLE.COM\nslmgr /dlv</code></pre>\
+         <p><code>/dlv</code> prints the host it used and the activation \
+         interval, which is the quickest way to tell &lsquo;the client never \
+         found a host&rsquo; from &lsquo;the client found one and did not like \
+         the answer&rsquo;.</p>"
     );
+
     page("Instructions", &body)
+}
+
+/// What the instructions say when the `Host` header did not survive filtering.
+///
+/// A placeholder rather than a guess. A host with several interfaces cannot
+/// know which one its clients route to, and on Hermit `bind()` does not record
+/// an address at all (`OS-009`, #260), so there is nothing honest to print.
+const HOST_PLACEHOLDER: &str = "KMS-HOST";
+
+/// Whether an address is one Windows clients refuse to activate against
+/// (`NET-014`, #163).
+///
+/// Text rather than a parsed address, because this is the string that came out
+/// of a `Host` header and it may be a name. `localhost` counts: it resolves to
+/// loopback everywhere that matters, and an operator who typed it is in exactly
+/// the situation this warning is for.
+fn is_loopback_text(address: &str) -> bool {
+    let bare = address.trim_start_matches('[').trim_end_matches(']');
+    bare.eq_ignore_ascii_case("localhost")
+        || bare == "::1"
+        || bare
+            .parse::<core::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// `/products` — what this host knows how to activate (`DB-013`, #137).
@@ -567,6 +649,133 @@ mod tests {
 
     fn request(target: &str) -> Vec<u8> {
         format!("GET {target} HTTP/1.1\r\nHost: k\r\n\r\n").into_bytes()
+    }
+
+    /// A request that names a particular `Host`, which is what the
+    /// instructions page renders its addresses from (`DISC-006`, #148).
+    fn request_from(target: &str, host: &str) -> Vec<u8> {
+        format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes()
+    }
+
+    /// Render one page and hand back its body.
+    fn render(fixture: &Fixture, target: &str, host: &str) -> String {
+        let raw = request_from(target, host);
+        let Parsed::Complete(parsed) = parse(&raw) else {
+            panic!("{target} did not parse");
+        };
+        route(&parsed, &fixture.snapshot()).body
+    }
+
+    /// `DISC-006` (#148): all three DNS forms are rendered, with this
+    /// instance's real address and port in them.
+    ///
+    /// The address is the one the operator's own browser reached the server
+    /// on, which is the only address this host can honestly claim its clients
+    /// can route to — a machine with three interfaces does not know which, and
+    /// on Hermit `bind()` records no address at all.
+    #[test]
+    fn the_instructions_render_every_dns_form_with_live_values() {
+        let fixture = Fixture::new();
+        let body = render(&fixture, "/instructions", "kms.example.net:8080");
+
+        // The web UI's port must not leak into instructions about the KMS one.
+        assert!(
+            body.contains("slmgr /skms kms.example.net:1688"),
+            "the slmgr line is missing or has the wrong port:\n{body}"
+        );
+        assert!(
+            !body.contains(":8080"),
+            "the web port reached the KMS advice"
+        );
+
+        // `DISC-007` (#149): the record shape, with priority and weight zero
+        // by convention and the port this host actually listens on.
+        assert!(
+            body.contains("_vlmcs._tcp  IN  SRV  0 0 1688  kms.example.net."),
+            "the zone snippet is missing:\n{body}"
+        );
+        assert!(body.contains("nsupdate"), "the nsupdate form is missing");
+        assert!(body.contains("dnscmd"), "the dnscmd form is missing");
+        assert!(
+            body.contains("Add-DnsServerResourceRecord"),
+            "the PowerShell form is missing"
+        );
+        // And the `slmgr /skms` fallback for a client that cannot use DNS.
+        assert!(body.contains("ospp.vbs"), "Office is not covered");
+    }
+
+    /// `NET-014` (#163): a page reached over loopback says so, loudly.
+    ///
+    /// Windows clients refuse to activate against 127.0.0.1 whatever the port.
+    /// That is the entire reason vlmcsd carries a 370-line TAP driver that
+    /// rewrites ip_src and ip_dst on every packet (declined item D21), and an
+    /// operator who has just browsed to localhost is about to spend an
+    /// afternoon on it.
+    #[test]
+    fn the_instructions_warn_when_reached_over_loopback() {
+        let fixture = Fixture::new();
+
+        for host in [
+            "127.0.0.1:8080",
+            "localhost:8080",
+            "[::1]:8080",
+            "127.9.9.9",
+        ] {
+            let body = render(&fixture, "/instructions", host);
+            assert!(
+                body.contains("will not activate against"),
+                "{host} produced no loopback warning:\n{body}"
+            );
+        }
+
+        for host in ["kms.example.net:8080", "10.0.0.5", "[2001:db8::1]:8080"] {
+            let body = render(&fixture, "/instructions", host);
+            assert!(
+                !body.contains("will not activate against"),
+                "{host} produced a loopback warning it should not have"
+            );
+        }
+    }
+
+    /// The `Host` header is client-controlled, so a hostile one produces a
+    /// placeholder rather than reaching the page.
+    ///
+    /// Two independent defences and this is the first: the value is filtered
+    /// down to a hostname or an IP literal before anything renders it, and
+    /// whatever survives is HTML-escaped. The page's
+    /// Content-Security-Policy has no `script-src` at all, which is the third.
+    #[test]
+    fn a_hostile_host_header_never_reaches_the_page() {
+        let fixture = Fixture::new();
+        for host in [
+            "<script>alert(1)</script>",
+            "a\"onmouseover=\"x",
+            "exa mple.net",
+            "kms.example.net/../..",
+        ] {
+            let body = render(&fixture, "/instructions", host);
+            assert!(
+                body.contains("KMS-HOST"),
+                "{host} did not fall back to the placeholder:\n{body}"
+            );
+            assert!(!body.contains("<script>"), "{host} reached the page");
+            assert!(!body.contains("onmouseover"), "{host} reached the page");
+        }
+    }
+
+    /// An absent `Host` is not an error — HTTP/1.0 does not require one — and
+    /// the page still renders, with the placeholder.
+    #[test]
+    fn the_instructions_render_without_a_host_header() {
+        let fixture = Fixture::new();
+        let raw = b"GET /instructions HTTP/1.0\r\n\r\n";
+        let Parsed::Complete(parsed) = parse(raw) else {
+            panic!("a HTTP/1.0 request without a Host did not parse");
+        };
+        assert_eq!(parsed.host, None);
+        let body = route(&parsed, &fixture.snapshot()).body;
+        assert!(body.contains("KMS-HOST"));
+        assert!(body.contains("1688"));
     }
 
     #[test]

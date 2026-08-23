@@ -360,6 +360,18 @@ itself a detection oracle.
 protocol version returns (`KMS-014`, #30) — so `kmsrs-client` can still name the code when a vlmcsd
 instance sends one for this reason instead.
 
+<a id="d39"></a>**D39 — A copy-to-clipboard button on the instructions page (`DISC-006`, #148).** The
+issue asks for one and it is the only part of #148 not built. `navigator.clipboard` needs script, and
+the web UI's Content-Security-Policy is `default-src 'none'; style-src 'unsafe-inline'` — no
+`script-src` at all, in any form. Adding the button means adding `script-src 'unsafe-inline'`, which
+is the single header change that converts every escaping bug on those pages from a rendering defect
+into script execution. One of those pages renders a client-supplied `Host` header and another renders
+client-supplied workstation names.
+
+That is a bad trade for a convenience the browser already provides: the snippets are in `<pre>`
+blocks, which double-click and triple-click select whole. Revisit only if the UI acquires script for
+some other reason, at which point the marginal cost is zero rather than the entire policy.
+
 ### What the panic-freedom gate actually found (`ARCH-009`, #9)
 
 Decision 3 pairs a lint policy with a symbol-level gate, and the pairing is the point: they catch
