@@ -41,20 +41,60 @@ pub const KMS_PORT: u16 = 1688;
 /// enough that the kernel refuses rather than queueing indefinitely.
 pub const BACKLOG: i32 = 128;
 
-/// Every address the KMS listener binds (`NET-001`, #150; `NET-002`, #151).
+/// Whether this target must bind exactly one socket (`OS-009`, #260).
+///
+/// True on Hermit, for two reasons taken from the kernel source rather than
+/// inferred:
+///
+/// * `bind()` records the address and then ignores it — `listen()` passes only
+///   the *port* to smoltcp. One `0.0.0.0` socket therefore already accepts on
+///   every local address, and two sockets on one port race with **no defined
+///   dispatch**: which one receives a connection is unspecified.
+/// * Hermit never gets an IPv6 address at all. smoltcp has v6 compiled in, but
+///   the kernel only ever assigns IPv4 and speaks DHCPv4 only — no SLAAC, no
+///   RA, no DHCPv6.
+///
+/// A single `bool` rather than a `cfg` on each list, so both shapes exist on
+/// every target and [`tests`] can check the one this host does not use. A
+/// `cfg`-selected item is only ever compiled on the platform that selects it,
+/// which is exactly the platform that cannot be tested here.
+pub const SINGLE_SOCKET_ONLY: bool = cfg!(target_os = "hermit");
+
+/// The dual-stack bind list: an IPv6 wildcard and an IPv4 wildcard.
 ///
 /// Two sockets rather than one dual-stack socket. That is more portable, not
 /// less: OpenBSD refuses `IPV6_V6ONLY=0` outright, so a single dual-stack
-/// socket cannot work there, and py-kms's fallback for exactly this case
+/// socket cannot work there, and py-kms's fallback for exactly that case
 /// triggers on one exact exception *string* — which stops matching the moment a
 /// platform words its error differently.
-///
-/// Each is bound independently and a failure on one is not fatal, so a
-/// host with no IPv6 stack serves IPv4 and vice versa (`NET-001`, #150).
-pub const KMS_BIND_ADDRESSES: [SocketAddr; 2] = [
+pub const DUAL_STACK_ADDRESSES: [SocketAddr; 2] = [
     SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), KMS_PORT),
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), KMS_PORT),
 ];
+
+/// The single-socket bind list: one IPv4 wildcard (`OS-009`, #260).
+pub const SINGLE_SOCKET_ADDRESSES: [SocketAddr; 1] =
+    [SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), KMS_PORT)];
+
+/// Every address the KMS listener binds (`NET-001`, #150; `NET-002`, #151;
+/// `OS-009`, #260).
+///
+/// Each is bound independently and a failure on one is not fatal, so a host
+/// with no IPv6 stack serves IPv4 and vice versa (`NET-001`, #150).
+///
+/// Before this was per-target, the IPv6 entry reached
+/// `setsockopt(IPV6_V6ONLY)` on Hermit — a stub that returns `EINVAL` — so the
+/// correct socket *count* came out of an **error path**, with a log line
+/// telling the operator IPv6 was unavailable rather than that it does not exist
+/// on this target.
+#[must_use]
+pub const fn bind_addresses() -> &'static [SocketAddr] {
+    if SINGLE_SOCKET_ONLY {
+        &SINGLE_SOCKET_ADDRESSES
+    } else {
+        &DUAL_STACK_ADDRESSES
+    }
+}
 
 /// Collapse an IPv4-mapped IPv6 address to its IPv4 form (`NET-012`, #161).
 ///
@@ -93,28 +133,78 @@ mod tests {
         reason = "test code: a failed expectation should abort loudly"
     )]
 
-    use super::{BACKLOG, KMS_BIND_ADDRESSES, KMS_PORT, normalise, normalise_socket};
+    use super::{
+        BACKLOG, DUAL_STACK_ADDRESSES, KMS_PORT, SINGLE_SOCKET_ADDRESSES, SINGLE_SOCKET_ONLY,
+        bind_addresses, normalise, normalise_socket,
+    };
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     /// `NET-002` (#151): the port is 1688 and is not negotiable.
     #[test]
     fn the_kms_port_is_1688() {
         assert_eq!(KMS_PORT, 1688);
-        for address in KMS_BIND_ADDRESSES {
+        for address in bind_addresses() {
             assert_eq!(address.port(), KMS_PORT);
         }
     }
 
     /// `NET-001` (#150): both stacks, as separate sockets.
     #[test]
-    fn both_stacks_are_bound_separately() {
-        assert_eq!(KMS_BIND_ADDRESSES.len(), 2);
-        assert!(KMS_BIND_ADDRESSES.iter().any(SocketAddr::is_ipv6));
-        assert!(KMS_BIND_ADDRESSES.iter().any(SocketAddr::is_ipv4));
-        // Wildcard on both, so a host with several interfaces serves all of
-        // them without anyone having to enumerate them.
-        for address in KMS_BIND_ADDRESSES {
-            assert!(address.ip().is_unspecified(), "{address}");
+    fn the_dual_stack_list_has_one_socket_per_family() {
+        assert_eq!(DUAL_STACK_ADDRESSES.len(), 2);
+        assert!(DUAL_STACK_ADDRESSES.iter().any(SocketAddr::is_ipv6));
+        assert!(DUAL_STACK_ADDRESSES.iter().any(SocketAddr::is_ipv4));
+    }
+
+    /// `OS-009` (#260): exactly one socket, and it is IPv4.
+    ///
+    /// Two sockets on one port race on Hermit with no defined dispatch,
+    /// because `bind()` ignores the address and `listen()` passes only the port
+    /// to smoltcp — and Hermit never gets an IPv6 address in the first place.
+    ///
+    /// Checked on **every** target, not only Hermit. That is the point of
+    /// selecting the list with a `bool` rather than with a `cfg` on each item:
+    /// a `cfg`-selected item is only compiled on the platform that selects it,
+    /// which is precisely the platform this test suite cannot run on.
+    #[test]
+    fn the_single_socket_list_is_one_ipv4_socket() {
+        assert_eq!(SINGLE_SOCKET_ADDRESSES.len(), 1);
+        assert!(SINGLE_SOCKET_ADDRESSES.iter().all(SocketAddr::is_ipv4));
+    }
+
+    /// The selector picks the list this target needs.
+    #[test]
+    fn the_selected_list_matches_the_target() {
+        if SINGLE_SOCKET_ONLY {
+            assert_eq!(bind_addresses(), SINGLE_SOCKET_ADDRESSES);
+        } else {
+            assert_eq!(bind_addresses(), DUAL_STACK_ADDRESSES);
+        }
+        assert_eq!(SINGLE_SOCKET_ONLY, cfg!(target_os = "hermit"));
+    }
+
+    /// Whatever the platform, every address is a wildcard on the KMS port, so
+    /// a host with several interfaces serves all of them without anyone having
+    /// to enumerate them — and no two entries collide on one port.
+    #[test]
+    fn every_bound_address_is_a_wildcard_on_one_port() {
+        for list in [
+            DUAL_STACK_ADDRESSES.as_slice(),
+            SINGLE_SOCKET_ADDRESSES.as_slice(),
+        ] {
+            assert!(!list.is_empty(), "a server must listen");
+            for address in list {
+                assert!(address.ip().is_unspecified(), "{address}");
+                assert_eq!(address.port(), KMS_PORT);
+            }
+
+            // No two entries share an address family. Two sockets of the same
+            // family on one port is the `OS-009` (#260) race in general form,
+            // not only on Hermit.
+            let ipv4 = list.iter().filter(|address| address.is_ipv4()).count();
+            let ipv6 = list.len().saturating_sub(ipv4);
+            assert!(ipv4 <= 1, "{ipv4} IPv4 sockets on one port");
+            assert!(ipv6 <= 1, "{ipv6} IPv6 sockets on one port");
         }
     }
 
@@ -123,10 +213,11 @@ mod tests {
     /// later makes the list runtime-derived.
     #[test]
     fn bind_addresses_are_compile_time_constants() {
-        const _: [SocketAddr; 2] = KMS_BIND_ADDRESSES;
+        const _: [SocketAddr; 2] = DUAL_STACK_ADDRESSES;
+        const _: [SocketAddr; 1] = SINGLE_SOCKET_ADDRESSES;
         const _: u16 = KMS_PORT;
         // Usable in a const context, which a resolved address could not be.
-        const FIRST_PORT: u16 = KMS_BIND_ADDRESSES[0].port();
+        const FIRST_PORT: u16 = DUAL_STACK_ADDRESSES[0].port();
         assert_eq!(FIRST_PORT, 1688);
     }
 
