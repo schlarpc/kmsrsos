@@ -115,7 +115,10 @@ doc_markdown = "allow"
 
 [profile.dev]
 opt-level = 0
-debug = true
+# Line tables rather than full DWARF. A panic backtrace still names the file
+# and line, which is all a failing test is ever read for; full debug info costs
+# compile time, link time and coverage-instrumentation time on every crate.
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3
@@ -130,4 +133,4 @@ panic = "abort"
 
 [profile.test]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
