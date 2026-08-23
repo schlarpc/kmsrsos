@@ -25,3 +25,4 @@ pub mod kms;
 pub mod sansio;
 pub mod time;
 pub mod types;
+pub mod wire;
