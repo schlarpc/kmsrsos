@@ -26,6 +26,7 @@
 )]
 
 use core::time::Duration;
+use kmsrs_policy::access::AccessList;
 use kmsrs_proto::types::Intervals;
 
 /// Microsoft's documented default activation interval, in minutes.
@@ -143,6 +144,12 @@ pub struct Compiled {
     pub refuse_preview: bool,
     /// Whether a clock-skewed request is refused (`POL-011`, #99).
     pub refuse_clock_skew: bool,
+    /// Who may connect at all (`POL-013`, #101).
+    ///
+    /// Compiled rather than runtime because whether this host answers is
+    /// observable to whoever asked, which is the test `CFG-001` (#166) applies.
+    /// Empty by default, which permits everything.
+    pub access: AccessList,
 }
 
 impl Compiled {
@@ -158,6 +165,7 @@ impl Compiled {
         refuse_non_volume: kmsrs_policy::gate::REFUSE_NON_VOLUME,
         refuse_preview: kmsrs_policy::gate::REFUSE_PREVIEW,
         refuse_clock_skew: kmsrs_policy::gate::REFUSE_CLOCK_SKEW,
+        access: AccessList::OPEN,
     };
 
     /// Whether this build's client-count behaviour is plausible

@@ -17,6 +17,7 @@
 
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::time::Duration;
+use kmsrs_policy::access::{AccessList, RateLimiter, Rule};
 use kmsrs_proto::entropy::Entropy;
 use kmsrs_proto::entropy::testing::DeterministicEntropy;
 use kmsrs_proto::kms::framing::{self, Ciphers};
@@ -24,6 +25,7 @@ use kmsrs_proto::kms::layout::{REQUEST_BODY_LEN, RequestBody};
 use kmsrs_proto::kms::version::Version;
 use kmsrs_proto::time::Instant;
 use kmsrs_proto::wire::header::{HEADER_LEN, PacketFlags, PacketType, RpcHeader};
+use kmsrs_server::config::operational::LogLevel;
 use kmsrs_server::net::driver::{Runtime, serve};
 use kmsrs_server::net::listener::bind_each;
 use kmsrs_server::{Compiled, Discovered, Operational, Server};
@@ -107,11 +109,20 @@ impl TestClock {
     }
 }
 
+/// A server that does not log, so the test output stays readable. The logging
+/// itself is covered in `tests/logging.rs`.
+fn quiet() -> Operational {
+    Operational {
+        log_level: LogLevel::Error,
+        ..Operational::default()
+    }
+}
+
 fn test_server() -> Server {
     let mut entropy = DeterministicEntropy::from_seed(0x11_22_33_44);
     Server::new(
         Compiled::BUILD,
-        Operational::default(),
+        quiet(),
         Discovered::default(),
         &mut entropy,
         kmsrs_db::Date::new(2026, 8, 1).unwrap(),
@@ -382,4 +393,203 @@ fn the_recorded_peer_is_normalised() {
         "a loopback client must be recorded as 127.0.0.1"
     );
     assert!(peer.address.is_ipv4(), "not as an IPv4-mapped IPv6 address");
+}
+
+/// `POL-012` (#100): a slowloris does not exhaust capacity.
+///
+/// The attack is connections that open and then never send a complete request,
+/// each holding a worker for as long as the server will wait. vlmcsd is
+/// vulnerable to it by design — its `-m` queues rather than refuses, so its own
+/// manual recommends a short timeout as the entire mitigation. py-kms has no
+/// worker cap and no timeout at all.
+///
+/// Here the pool refuses at accept, so a slowloris can occupy at most the pool
+/// and no more — and the connections it does hold are bounded by the
+/// connection deadline. What this test proves is the part that matters
+/// operationally: **the server stays responsive to everything except the
+/// attacker's own share.**
+#[test]
+fn a_slowloris_cannot_take_more_than_its_share() {
+    with_server(4, |address| {
+        // Three connections that open, send one byte of a PDU header, and then
+        // go quiet. A complete PDU never arrives, so the state machine keeps
+        // waiting for more.
+        let mut attackers = Vec::new();
+        for _ in 0..3 {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.write_all(&[0x05]).unwrap();
+            stream.flush().unwrap();
+            attackers.push(stream);
+        }
+
+        // The fourth slot is still there, and a real client gets a real answer
+        // through it while all three attackers are still connected.
+        let mut honest = TcpStream::connect(address).unwrap();
+        honest.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        honest
+            .write_all(&pdu(PacketType::Bind, 2, &bind_body()))
+            .unwrap();
+        let bind_ack = read_pdu(&mut honest);
+        assert_eq!(bind_ack[2], 12, "the honest client could not bind");
+
+        honest
+            .write_all(&pdu(
+                PacketType::Request,
+                3,
+                &request_body(&kms_payload(42)),
+            ))
+            .unwrap();
+        let response = read_pdu(&mut honest);
+        assert_eq!(
+            response[2], 2,
+            "the honest client was starved by the slowloris"
+        );
+
+        // The attackers are still holding their sockets — the point is that it
+        // did not matter.
+        assert_eq!(attackers.len(), 3);
+    });
+}
+
+/// `POL-013` (#101): a denied peer is closed before the RPC handshake, so it
+/// never reaches the parser.
+#[test]
+fn a_denied_peer_never_reaches_the_protocol() {
+    // Deny loopback, which is where the test client connects from.
+    const DENY: &[Rule] = &[
+        Rule::Address(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        Rule::Address(IpAddr::V6(core::net::Ipv6Addr::LOCALHOST)),
+    ];
+    let mut compiled = Compiled::BUILD;
+    compiled.access = AccessList {
+        allow: &[],
+        deny: DENY,
+    };
+
+    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
+    let address = bound[0].address;
+
+    let mut entropy = DeterministicEntropy::from_seed(0x11_22_33_44);
+    let server = Server::new(
+        compiled,
+        quiet(),
+        Discovered::default(),
+        &mut entropy,
+        kmsrs_db::Date::new(2026, 8, 1).unwrap(),
+    )
+    .unwrap();
+    let runtime = Runtime::new(server, 8);
+    let clock = TestClock(AtomicU64::new(1_000_000));
+
+    std::thread::scope(|scope| {
+        let runtime_ref = &runtime;
+        let clock_ref = &clock;
+        let handle = scope.spawn(move || {
+            let entropy: Box<dyn Entropy + Send> =
+                Box::new(DeterministicEntropy::from_seed(0x5A17));
+            serve(runtime_ref, bound, entropy, &|| clock_ref.now()).unwrap();
+        });
+
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // The bind may or may not be accepted into the socket buffer before the
+        // close; either way there must be no reply.
+        let _ = stream.write_all(&pdu(PacketType::Bind, 2, &bind_body()));
+
+        let mut buffer = [0_u8; 64];
+        match stream.read(&mut buffer) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("a denied peer got a reply: {other:?}"),
+        }
+
+        runtime.shutdown.request();
+        handle.join().unwrap();
+    });
+
+    // Nothing reached the protocol, so nothing was activated or refused — a
+    // denial happens before there is a request to have an opinion about.
+    let server = runtime.server.lock().unwrap();
+    assert_eq!(
+        server.host().events().len(),
+        0,
+        "a denied peer produced a protocol-level event"
+    );
+}
+
+/// And the default build lets that same client straight through, so the test
+/// above is about the rule rather than about loopback being special.
+#[test]
+fn the_default_build_admits_everyone() {
+    assert!(
+        Compiled::BUILD.access.is_open(),
+        "the shipped build must permit everything"
+    );
+    with_server(4, |address| {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        stream
+            .write_all(&pdu(PacketType::Bind, 2, &bind_body()))
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream)[2], 12);
+    });
+}
+
+/// `POL-014` (#102): a source that exceeds its budget is cut off, and the
+/// connections it already had keep working until then.
+///
+/// The burst is set to two here; the shipped value is 240, because a whole
+/// site behind NAT is one source address and a limit tuned for one machine
+/// would refuse a legitimate office (see `access::BURST`).
+#[test]
+fn a_source_over_its_budget_is_rate_limited() {
+    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
+    let address = bound[0].address;
+    let runtime = Runtime::with_limiter(test_server(), 8, RateLimiter::with(2, 1));
+    // A clock that does not advance, so no tokens are earned back mid-test.
+    let clock = || Instant::from_nanos(1_000_000);
+
+    std::thread::scope(|scope| {
+        let runtime_ref = &runtime;
+        let handle = scope.spawn(move || {
+            let entropy: Box<dyn Entropy + Send> =
+                Box::new(DeterministicEntropy::from_seed(0x5A17));
+            serve(runtime_ref, bound, entropy, &clock).unwrap();
+        });
+
+        // Each connection spends one token on its first read.
+        let mut answered = 0_u32;
+        let mut cut_off = 0_u32;
+        for _ in 0..6 {
+            let Ok(mut stream) = TcpStream::connect(address) else {
+                continue;
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            if stream
+                .write_all(&pdu(PacketType::Bind, 2, &bind_body()))
+                .is_err()
+            {
+                cut_off += 1;
+                continue;
+            }
+            let mut header = [0_u8; HEADER_LEN];
+            match stream.read_exact(&mut header) {
+                Ok(()) => answered += 1,
+                Err(_) => cut_off += 1,
+            }
+        }
+
+        assert_eq!(answered, 2, "exactly the budget was served");
+        assert!(cut_off >= 1, "and the rest were cut off");
+
+        runtime.shutdown.request();
+        handle.join().unwrap();
+    });
+
+    // The limiter is tracking exactly one source, since every connection came
+    // from loopback.
+    let limiter = runtime.limiter.lock().unwrap();
+    assert_eq!(limiter.tracked(), 1, "one source, one bucket");
 }

@@ -16,12 +16,14 @@
 
 extern crate alloc;
 
+pub mod access;
 pub mod counting;
 pub mod error;
 pub mod events;
 pub mod gate;
 pub mod identity;
 
+pub use access::{AccessList, Admission, Denial, RateLimiter, Rule, canonical};
 pub use counting::{ClientCounts, CountOutcome, CountView};
 pub use error::EntropyUnavailable;
 pub use events::{Event, EventLog, Outcome, Peer};
