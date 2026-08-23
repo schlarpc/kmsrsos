@@ -359,3 +359,88 @@ fn rust_sources(dir: &Path) -> Vec<String> {
     }
     out
 }
+
+/// Axiom A5, `OBS-001` (#177) and `OBS-015` (#191): a shipped binary performs
+/// no filesystem I/O at all.
+///
+/// No file sink, no rotation, no pidfile, no temp files — so there is nothing
+/// to configure a path for, nothing to run out of disk, and nothing for two
+/// instances on one host to collide over. py-kms's pretty-printer is the
+/// counter-example: it keeps newline bookkeeping in fixed paths under the
+/// system temp directory, so two instances silently corrupt each other's
+/// output.
+///
+/// Checked by naming the APIs rather than by reading a comment, because the
+/// property is easy to lose one call at a time. `kmsrs-dbgen` is exempt: it is
+/// a host-only tool whose entire job is reading artifacts, and
+/// `dbgen_is_unreachable_from_every_shipped_binary` is what keeps it out of the
+/// shipped closure.
+#[test]
+fn no_shipped_crate_touches_the_filesystem() {
+    /// Names that mean "this code opens something".
+    const FORBIDDEN: &[&str] = &[
+        "std::fs",
+        "File::open",
+        "File::create",
+        "OpenOptions",
+        "temp_dir",
+        "TempDir",
+        "NamedTempFile",
+        "read_to_string(",
+        "write(&path",
+    ];
+
+    let root = workspace_root();
+    let mut offences = Vec::new();
+
+    for (name, manifest_path) in crate_manifests(&root) {
+        if name == QUARANTINED_CRATE {
+            continue;
+        }
+        let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        if !source_dir.is_dir() {
+            continue;
+        }
+
+        for (path, text) in rust_sources_with_paths(&source_dir) {
+            for needle in FORBIDDEN {
+                if text.contains(needle) {
+                    offences.push(format!("{}: {needle}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "these shipped sources reach for the filesystem, which axiom A5 \
+         forbids: {offences:#?}"
+    );
+}
+
+/// Every `.rs` file under a directory, with its path.
+fn rust_sources_with_paths(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push((path, text));
+            }
+        }
+    }
+    out
+}
