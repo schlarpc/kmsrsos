@@ -44,6 +44,79 @@ impl Entropy for OsEntropy {
     }
 }
 
+/// Why the self-test failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTestFailure {
+    /// The source reported failure.
+    Unavailable,
+    /// Two independent draws were identical.
+    ///
+    /// The failure this test exists for. A source that *errors* is easy to
+    /// notice; one that succeeds while returning the same bytes every time is
+    /// what Hermit does on a seeding failure (`OS-012`, #263), and what
+    /// vlmcsd's `srand(tv_sec ^ tv_usec)` approximates on a machine whose clock
+    /// has not been set.
+    Repeating,
+    /// A draw came back entirely zero.
+    ///
+    /// Astronomically improbable from a working source, and the ordinary
+    /// result of a buffer nobody wrote to.
+    AllZero,
+}
+
+impl core::fmt::Display for SelfTestFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "the entropy source reported failure",
+            Self::Repeating => "two independent draws were identical",
+            Self::AllZero => "a draw came back entirely zero",
+        })
+    }
+}
+
+impl OsEntropy {
+    /// How many bytes each self-test draw takes.
+    ///
+    /// Enough that two identical draws cannot be coincidence, and small enough
+    /// that the test costs nothing at start-up.
+    const PROBE: usize = 32;
+
+    /// Check that the source is producing entropy, not merely returning
+    /// success (`OS-012`, #263; `OBS-008`, #184).
+    ///
+    /// Not a test of randomness *quality* — that belongs to the operating
+    /// system, and a userspace statistical test would only be able to reject
+    /// sources so broken that this catches them anyway. What it tests is the
+    /// specific failure that has bitten both existing implementations: a source
+    /// that reports success while repeating itself.
+    ///
+    /// The result reaches `/healthz` and the status page, so an operator finds
+    /// out from the host rather than from a client that will not activate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SelfTestFailure`] naming which of the three checks failed.
+    pub fn self_test(&self) -> Result<(), SelfTestFailure> {
+        let mut source = Self;
+        let mut first = [0_u8; Self::PROBE];
+        let mut second = [0_u8; Self::PROBE];
+        source
+            .fill(&mut first)
+            .map_err(|_| SelfTestFailure::Unavailable)?;
+        source
+            .fill(&mut second)
+            .map_err(|_| SelfTestFailure::Unavailable)?;
+
+        if first == second {
+            return Err(SelfTestFailure::Repeating);
+        }
+        if first.iter().all(|byte| *byte == 0) || second.iter().all(|byte| *byte == 0) {
+            return Err(SelfTestFailure::AllZero);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
