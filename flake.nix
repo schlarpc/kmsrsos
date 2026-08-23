@@ -44,8 +44,10 @@
 
       # `cleanCargoSource` keeps only Rust and Cargo files, which would drop the
       # generated product data that `kmsrs-db`'s build.rs compiles into static
-      # tables (DB-003, #127) and the committed golden wire vectors (TEST-002,
-      # #223). Both are inputs to the build, so both have to survive the filter.
+      # tables (DB-003, #127), the committed golden wire vectors (TEST-002,
+      # #223) and the committed fuzz seeds (TEST-006, #227). All three are
+      # inputs to the build — the seeds because `kmsrs-vectors`' replay test
+      # reads them from disk — so all three have to survive the filter.
       srcFor = system:
         let
           pkgs = pkgsFor system;
@@ -57,7 +59,8 @@
           filter = path: type:
             (craneLib.filterCargoSources path type)
             || (builtins.match ".*/crates/kmsrs-db/data(/.*)?" path != null)
-            || (builtins.match ".*/crates/kmsrs-vectors/vectors(/.*)?" path != null);
+            || (builtins.match ".*/crates/kmsrs-vectors/vectors(/.*)?" path != null)
+            || (builtins.match ".*/fuzz/seeds(/.*)?" path != null);
         };
 
       commonArgsFor = system:
@@ -261,6 +264,37 @@
 
             RUST_BACKTRACE = "1";
             RUST_LOG = "debug";
+          };
+
+          # `nix develop .#fuzz` — the one place a nightly toolchain is used
+          # (SEC-004, #196).
+          #
+          # `cargo fuzz` needs `-Zsanitizer=address`, which stable does not
+          # have. Rather than unpin the toolchain for everyone, the nightly is
+          # confined to this shell: nothing that ships is built with it, and the
+          # workspace's own MSRV assertion (ARCH-016, #16) is untouched.
+          #
+          # The date is not written down here because `rust-overlay` is a locked
+          # flake input, so `flake.lock` already pins exactly which nightly this
+          # resolves to — writing a date as well would give two sources of truth
+          # that drift apart on the first `nix flake update`.
+          #
+          #   nix develop .#fuzz -c cargo fuzz build
+          #   nix develop .#fuzz -c cargo fuzz run rpc_pdu -- -runs=100000
+          #
+          # The targets' bodies are ordinary workspace code and are compiled,
+          # linted and replayed against the committed corpus by the stable
+          # toolchain; see crates/kmsrs-vectors/src/targets.rs.
+          fuzz = pkgs.mkShell {
+            nativeBuildInputs = [
+              (pkgs.rust-bin.selectLatestNightlyWith
+                (toolchain: toolchain.default.override {
+                  extensions = [ "rust-src" "llvm-tools-preview" ];
+                }))
+              pkgs.cargo-fuzz
+            ];
+
+            RUST_BACKTRACE = "1";
           };
         });
 

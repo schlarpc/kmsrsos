@@ -444,6 +444,11 @@ dependencies = [
 [[package]]
 name = "kmsrs-vectors"
 version = "0.1.0"
+dependencies = [
+ "kmsrs-crypto",
+ "kmsrs-proto",
+ "zerocopy",
+]
 
 [[package]]
 name = "libc"

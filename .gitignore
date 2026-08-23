@@ -44,3 +44,12 @@ htmlcov/
 # republished artifact shows up as a changed digest rather than as a
 # 4 MB diff of Microsoft's files (DB-002, #126).
 crates/kmsrs-dbgen/artifacts/
+
+# The fuzzer's working corpus and its crash artifacts (SEC-004, #196).
+# `fuzz/seeds/` is the committed input set and is generated from the golden
+# vectors (TEST-006, #227); `fuzz/corpus/` is where libFuzzer accumulates the
+# inputs it discovers from those seeds, which grows without bound and is
+# machine-specific.
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

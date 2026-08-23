@@ -30,7 +30,17 @@
 //! Blessing is deliberately a separate, explicit step. A test that rewrote its
 //! own expectations on failure would assert nothing at all.
 
+//! # Fuzz targets
+//!
+//! [`targets`] holds the body of each `cargo fuzz` target as an ordinary
+//! function, for the reason documented there: a stable toolchain must be able
+//! to compile and lint them (`SEC-004`, #196).
+
 #![no_std]
+
+extern crate alloc;
+
+pub mod targets;
 
 /// One committed vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

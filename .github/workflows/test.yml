@@ -16,3 +16,52 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v14
       - run: nix build
       - run: nix flake check
+
+  # A short fuzzing run on every PR (SEC-004, #196).
+  #
+  # Separate from `tests` for two reasons. It needs the nightly toolchain that
+  # `-Zsanitizer=address` requires, which nothing that ships is built with; and
+  # it is the only job here that is not deterministic, so keeping it out of
+  # `nix flake check` means a flake in the fuzzer can never be mistaken for a
+  # broken build.
+  #
+  # Sixty seconds per target is a smoke test, not a campaign: it catches a
+  # target that no longer compiles, a seed set that no longer parses, and the
+  # shallow crashes. Finding the deep ones is what a long local run is for —
+  # see crates/kmsrs-vectors/src/targets.rs.
+  fuzz:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - rpc_pdu
+          - connection
+          - kms_payload
+          - decrypt_unpad
+          - epid
+          - response
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      # The working corpus is seeded from the committed set rather than being
+      # the committed set: libFuzzer writes back into the first directory it is
+      # given, and `fuzz/seeds/` is asserted byte-exact by a test.
+      - run: mkdir -p fuzz/corpus/${{ matrix.target }}
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          nix develop .#fuzz -c cargo fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} \
+            -- -max_total_time=60 -print_final_stats=1
+      # A crash is written to fuzz/artifacts/ and is the only thing worth
+      # keeping from a run: it is the reproducer.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

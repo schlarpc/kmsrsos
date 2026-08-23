@@ -9,7 +9,16 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# The fuzz-target bodies live in `src/targets.rs` so that a stable toolchain
+# type-checks, lints and runs them; only the three-line libFuzzer shims are
+# nightly-only (SEC-004, #196). That is what these dependencies are for, and it
+# is why the dependency edge from kmsrs-proto back to this crate is a
+# *dev*-dependency: a cycle through dev-dependencies is permitted, and nothing
+# that ships names this crate at all.
 [dependencies]
+kmsrs-proto = { workspace = true, features = ["testing"] }
+kmsrs-crypto.workspace = true
+zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 
