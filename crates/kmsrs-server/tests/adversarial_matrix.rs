@@ -499,12 +499,13 @@ fn mm03_the_reported_count_satisfies_the_clients_own_policy() {
 /// so there is nothing to poison and nothing to refuse for. `POL-006` (#94)
 /// then answers any demand with the minimum that activates.
 ///
-/// So what is asserted here is the mismatch the audit actually names — the
-/// doubling. Whether flooring at an absurd `N` is *itself* a detection vector
-/// is a separate question, raised by writing this test and tracked as
-/// `POL-019` (#313) rather than decided in one.
+/// So what is asserted here is the mismatch the audit names — the doubling —
+/// and the answer `POL-019` (#313) settled on: past what the model tracks, the
+/// count is the world rather than the demand. Reflecting 5000 back was itself
+/// a one-packet emulator test, because no genuine host tells a machine it has
+/// never seen that it is caching five thousand others.
 #[test]
-fn mm21_an_absurd_required_count_is_not_reflected_back_doubled() {
+fn mm21_an_absurd_required_count_is_neither_doubled_nor_reflected() {
     for required in [376_u32, 1_000, 5_000, 100_000] {
         let mut session = Session::new();
         session.bind(&ndr32_bind());
@@ -517,6 +518,12 @@ fn mm21_an_absurd_required_count_is_not_reflected_back_doubled() {
             decoded.count <= required,
             "a client asking for {required} was told {}, which is py-kms \
              reflecting N_Policy * 2",
+            decoded.count
+        );
+        assert!(
+            decoded.count <= 200,
+            "a client asking for {required} was told {}, which is this host \
+             reflecting the demand back (POL-019, #313)",
             decoded.count
         );
     }

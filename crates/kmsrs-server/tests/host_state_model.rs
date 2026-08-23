@@ -164,7 +164,10 @@ fn three_an_anomalous_demand_is_visible_to_nobody_else() {
     // The attack, run in full.
     for machine in 1_000..=1_671_u128 {
         let reported = activate(&mut host, machine, 400, 0);
-        assert_eq!(reported, 400, "the attacker gets what it asked for");
+        assert!(
+            reported <= 200,
+            "an absurd demand was reflected back (POL-019, #313): {reported}"
+        );
     }
 
     let honest_after = activate(&mut host, 1, 25, 0);
