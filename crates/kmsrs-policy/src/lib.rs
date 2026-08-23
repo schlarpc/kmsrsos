@@ -13,3 +13,11 @@
 //! mitigated (`POL-005`, #93).
 
 #![no_std]
+
+extern crate alloc;
+
+pub mod error;
+pub mod identity;
+
+pub use error::EntropyUnavailable;
+pub use identity::{GroupIdentity, HostIdentity};
