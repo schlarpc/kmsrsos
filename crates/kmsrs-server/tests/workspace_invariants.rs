@@ -213,6 +213,29 @@ fn every_crate_inherits_the_workspace_lint_table() {
     }
 }
 
+/// `ARCH-002` (#2) and axiom A7: the sans-io crates must stay `no_std`.
+///
+/// This is the cheapest possible enforcement of "the core performs no I/O" —
+/// with `std` unavailable there is no socket type to reach for, so the property
+/// is checked by the compiler on every build rather than by review. Deleting
+/// the attribute is the one edit that would quietly give it all back, so that
+/// is what this test watches for.
+#[test]
+fn the_sans_io_crates_are_no_std() {
+    let root = workspace_root();
+    for crate_name in ["kmsrs-proto", "kmsrs-policy", "kmsrs-crypto", "kmsrs-db"] {
+        let lib = root.join("crates").join(crate_name).join("src/lib.rs");
+        let source = std::fs::read_to_string(&lib)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", lib.display()));
+        assert!(
+            source.lines().any(|line| line.trim() == "#![no_std]"),
+            "{crate_name} has lost its #![no_std] attribute. The core crates take bytes and a \
+             clock reading and return events; with std available, nothing stops a socket \
+             appearing inside one (ARCH-002, #2)."
+        );
+    }
+}
+
 /// `ARCH-016` (#16): two files name a Rust version, and a build where they
 /// disagree is one where the MSRV claim is untested — Nix would use one and a
 /// rustup user the other.
