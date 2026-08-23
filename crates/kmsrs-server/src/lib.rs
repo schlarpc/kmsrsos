@@ -25,6 +25,7 @@ pub mod host;
 pub mod log;
 pub mod net;
 pub mod server;
+pub mod web;
 
 pub use config::{Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
