@@ -593,3 +593,78 @@ fn a_source_over_its_budget_is_rate_limited() {
     let limiter = runtime.limiter.lock().unwrap();
     assert_eq!(limiter.tracked(), 1, "one source, one bucket");
 }
+
+/// The client-side framing in `kmsrs-proto` talks to this server
+/// (`WIRE-027`, #85; `CLI-001`, #207).
+///
+/// The other tests in this file build PDUs by hand, which proves the server
+/// accepts *those* bytes. This proves the two halves of the protocol crate
+/// agree with each other, which is the thing a diagnostic client depends on.
+#[test]
+fn the_protocol_crates_own_client_can_activate() {
+    use kmsrs_proto::wire::client::{ClientAssociation, Reply};
+    use kmsrs_proto::wire::syntax::TransferSyntax;
+
+    with_server(8, |address| {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+
+        let mut association = ClientAssociation::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut out = [0_u8; 4096];
+
+        // Bind, offering both syntaxes and feature negotiation.
+        let (len, call_id) = association.bind(&mut out, true).unwrap();
+        assert_eq!(call_id, 2, "Microsoft's client starts at 2");
+        stream.write_all(&out[..len]).unwrap();
+
+        let reply = read_pdu(&mut stream);
+        let parsed = association
+            .read_reply(&reply, call_id, &mut |warning| {
+                warnings.push(warning.to_string());
+            })
+            .expect("the bind was accepted");
+        let Reply::BindAck { accepted, .. } = parsed else {
+            panic!("expected a bind_ack, got {parsed:?}");
+        };
+        // A host accepts exactly one syntax, and NDR64 wins when both are
+        // offered (`WIRE-029`, #87) — so the context to use comes from the
+        // acknowledgement, never from an assumption.
+        let accepted = accepted.expect("the server accepted a context");
+        assert_eq!(accepted.syntax, TransferSyntax::Ndr64);
+
+        // Activate, on the context the server actually accepted.
+        let (len, call_id) = association
+            .request(
+                &mut out,
+                accepted.context_id,
+                accepted.syntax,
+                &kms_payload(77),
+            )
+            .unwrap();
+        assert_eq!(call_id, 3, "and increments");
+        stream.write_all(&out[..len]).unwrap();
+
+        let reply = read_pdu(&mut stream);
+        let parsed = association
+            .read_reply(&reply, call_id, &mut |warning| {
+                warnings.push(warning.to_string());
+            })
+            .expect("the request was answered");
+        let Reply::Response { stub } = parsed else {
+            panic!("expected a response, got {parsed:?}");
+        };
+        assert!(
+            stub.len() > 100,
+            "a v6 response carries an ePID and a trailer, got {} bytes",
+            stub.len()
+        );
+
+        // `CLI-002` (#208): our own server must produce no warnings at all.
+        // That is the whole point of the client being the regression suite.
+        assert!(
+            warnings.is_empty(),
+            "our own server tripped detection warnings: {warnings:?}"
+        );
+    });
+}

@@ -11,6 +11,7 @@
 //! than duplicated.
 
 pub mod bind;
+pub mod client;
 pub mod connection;
 pub mod fault;
 pub mod header;

@@ -62,6 +62,44 @@ pub enum TransferSyntax {
     Unknown,
 }
 
+/// The wire encoding of a GUID that is stored in RFC 4122 order.
+///
+/// The first three fields go out little-endian and the last eight bytes go out
+/// as they are. This is the inverse of what [`TransferSyntax::classify`] does
+/// on the way in, and it exists as a named function because open-coding the
+/// swap is how a transfer syntax ends up silently unrecognised — the bytes look
+/// plausible either way round.
+#[must_use]
+pub fn guid_to_wire(guid: Guid) -> [u8; 16] {
+    let bytes = guid.to_bytes();
+    let mut wire = [0_u8; 16];
+    // data1: four bytes, reversed.
+    for (index, slot) in wire.iter_mut().take(4).enumerate() {
+        *slot = bytes
+            .get(3_usize.saturating_sub(index))
+            .copied()
+            .unwrap_or(0);
+    }
+    // data2 and data3: two bytes each, reversed.
+    for (pair, base) in [(4_usize, 4_usize), (6, 6)] {
+        for offset in 0..2 {
+            if let Some(slot) = wire.get_mut(pair.saturating_add(offset)) {
+                *slot = bytes
+                    .get(base.saturating_add(1).saturating_sub(offset))
+                    .copied()
+                    .unwrap_or(0);
+            }
+        }
+    }
+    // data4: unchanged.
+    for offset in 8..16 {
+        if let Some(slot) = wire.get_mut(offset) {
+            *slot = bytes.get(offset).copied().unwrap_or(0);
+        }
+    }
+    wire
+}
+
 impl TransferSyntax {
     /// Classify a context item's transfer syntax from its raw wire bytes.
     ///
@@ -149,6 +187,84 @@ impl FeatureBits {
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "test code: a failed expectation should abort loudly"
+    )]
+
+    use super::{BTFN_WIRE_PREFIX, KMS_INTERFACE, NDR32, NDR64, TransferSyntax, guid_to_wire};
+
+    /// `guid_to_wire` is the inverse of `classify`. This is the check that
+    /// matters, because the two byte orders look equally plausible and the
+    /// failure mode is a syntax that is silently unrecognised rather than one
+    /// that is loudly wrong.
+    #[test]
+    fn wire_encoding_round_trips_through_classify() {
+        assert_eq!(
+            TransferSyntax::classify(&guid_to_wire(NDR32)),
+            TransferSyntax::Ndr32
+        );
+        assert_eq!(
+            TransferSyntax::classify(&guid_to_wire(NDR64)),
+            TransferSyntax::Ndr64
+        );
+    }
+
+    /// The known wire bytes, written out. NDR32 on the wire begins `04 5d 88
+    /// 8a`, which is `8a885d04` byte-reversed — if this ever reads
+    /// `8a 88 5d 04` the conversion has been dropped.
+    #[test]
+    fn the_wire_bytes_are_the_documented_ones() {
+        assert_eq!(
+            guid_to_wire(NDR32),
+            [
+                0x04, 0x5d, 0x88, 0x8a, 0xeb, 0x1c, 0xc9, 0x11, 0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10,
+                0x48, 0x60,
+            ]
+        );
+        assert_eq!(
+            guid_to_wire(NDR64),
+            [
+                0x33, 0x05, 0x71, 0x71, 0xba, 0xbe, 0x37, 0x49, 0x83, 0x19, 0xb5, 0xdb, 0xef, 0x9c,
+                0xcc, 0x36,
+            ]
+        );
+        assert_eq!(
+            guid_to_wire(KMS_INTERFACE),
+            [
+                0x75, 0x21, 0xc8, 0x51, 0x4e, 0x84, 0x50, 0x47, 0xb0, 0xd8, 0xec, 0x25, 0x55, 0x55,
+                0xbc, 0x06,
+            ]
+        );
+    }
+
+    /// The last eight bytes are never reordered — only the first three fields
+    /// are little-endian.
+    #[test]
+    fn only_the_first_three_fields_are_swapped() {
+        let wire = guid_to_wire(NDR32);
+        assert_eq!(&wire[8..], &NDR32.to_bytes()[8..]);
+        assert_ne!(&wire[..8], &NDR32.to_bytes()[..8]);
+    }
+
+    /// Feature negotiation is not a GUID, so it must not go through this
+    /// conversion — its prefix is already wire bytes.
+    #[test]
+    fn feature_negotiation_is_recognised_from_its_raw_prefix() {
+        let mut wire = [0_u8; 16];
+        wire[..8].copy_from_slice(&BTFN_WIRE_PREFIX);
+        wire[8] = 0x03;
+        assert!(matches!(
+            TransferSyntax::classify(&wire),
+            TransferSyntax::FeatureNegotiation(_)
+        ));
     }
 }
 
