@@ -342,12 +342,26 @@ I/O anyway. Both are checked by `hermit-image-boot` on every change.
 
 #### On Proxmox
 
-Create a VM with **no disk**, machine type `q35`, BIOS **OVMF (UEFI)**, and an EFI disk for the
-variable store. Upload `kmsrsos-hermit.iso` to your ISO storage, attach it to the CD-ROM drive, and
-put the CD-ROM first in the boot order.
+Create a VM with **no disk**, machine type `q35`, and BIOS **OVMF (UEFI)**. Upload
+`kmsrsos-hermit.iso` to your ISO storage, attach it to the CD-ROM drive, and put the CD-ROM first in
+the boot order.
 
-Then read the rest of this section before you start it, because the serial port and the CPU type are
-not optional and the first boot is the one whose output matters.
+An EFI disk for the variable store is worth adding to silence the `no efidisk configured! Using
+temporary efivars disk.` warning, but this image does not need one: the loader sits at the default
+boot path, so nothing is ever written to NVRAM that the next boot has to find, and a VM without one
+boots identically every time.
+
+Then, before starting it — none of these three is optional, and the first boot is the one whose
+output matters:
+
+| | Why |
+|---|---|
+| **Hardware → Add → Serial Port**, port `0`, and **Options → Display → Serial terminal 0** | the guest's only console ([`OS-005`](#a-serial-port-is-mandatory-os-005-256)) |
+| **Options → Processors → Type: `host`** | RDSEED, or the CSPRNG silently falls back to an LCG ([below](#set-the-cpu-type-to-host)) |
+| `qm set <vmid> --args '-set device.net0.disable-legacy=on'` | otherwise virtio-net does not attach at all ([`OS-004`](#virtio-net-may-not-attach-at-all-os-004-255)) |
+
+The third has no GUI field and is the one that decides whether the VM has a network. A VM built from
+the web UI defaults alone boots, appears to run, and answers nothing.
 
 The disk-image route is `qm importdisk <vmid> kmsrsos-hermit.img <storage>`, then attach the
 resulting unused disk and set the boot order to it.
@@ -547,28 +561,41 @@ bridge even on q35 — and **never** emits `disable-legacy=on`; there are zero o
 `qemu-server`. QEMU therefore presents a *transitional* virtio-net device with PCI ID `0x1000`, and
 Hermit refuses anything below `0x1040`.
 
-That chain was solid link-by-link from the sources and had never been observed. It has now been
-observed — not on Proxmox, but on a QEMU given exactly the device topology `qemu-server` emits, which
-is what the `hermit-proxmox-topology` check in `nix flake check` runs on every change:
+This is what happens. The log below is off real hardware — Proxmox 8.2.7, QEMU 9.0.2, a q35 VM
+created in the web UI with one virtio NIC and nothing unusual about it:
 
 ```
-02:12 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1AF4:1000], IRQ 11, …
+06:03 Unclassified device [00FF]: Red Hat, Inc. Virtio memory balloon [1AF4:1002], IRQ 10, …
+06:12 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1AF4:1000], IRQ 11, …
+Found virtio device with device id 0x1002
+Legacy/transitional Virtio device, with id: 0x1002 is NOT supported, skipping!
+Could not initialize virtio-pci device: Virtio driver failed: DevNotSupported(4098)
 Found virtio device with device id 0x1000
 Legacy/transitional Virtio device, with id: 0x1000 is NOT supported, skipping!
 Could not initialize virtio-pci device: Virtio driver failed: DevNotSupported(4096)
+Try to initialize network!
 …
 {"level":"error","event":"bind","detail":"no address could be bound:
   0.0.0.0:1688: Network is down (os error 100)"}
 exit status 69
 ```
 
-Two things are worth reading twice. The device ID really is `0x1000` rather than `0x1041`, which is
-the whole prediction. And **the guest exits 69 and says why** rather than sitting there having bound
-nothing — a VM that looks up and answers nothing is the failure that costs an afternoon, and this
-one does not happen.
+The device ID really is `0x1000` rather than `0x1041`, which was the whole prediction, and the NIC
+really is at `06:12` — behind the bridge pair, exactly where reading `qemu-server` said it would be.
+The balloon device goes the same way for the same reason, which is harmless: nothing here wants it.
 
-#255 stays open until the same log comes off real Proxmox hardware, because a reproduction of the
-topology is not a reproduction of the product.
+The `hermit-proxmox-topology` check in `nix flake check` runs the same thing under a QEMU given that
+device topology by hand, so the day Hermit starts accepting transitional devices, the check fails and
+this section gets rewritten.
+
+**What Proxmox shows you while this is happening is a running VM.** QEMU is started with
+`-no-shutdown`, so when the guest powers itself off the process stays and the run state parks at
+`prelaunch`. `qm status <vmid>` reports `prelaunch`, but the API's `status` field — which is what the
+green dot in the web UI reads — still says `running`, and the uptime counter still climbs. So the
+guest does exit 69 and does say why, and on Proxmox specifically it says it to a serial port that a
+VM created in the web UI does not have. That is the failure that costs an afternoon, and it is the
+real reason [the serial port is mandatory](#a-serial-port-is-mandatory-os-005-256): without one the
+only symptom is a VM that looks healthy and answers nothing.
 
 #### The workaround
 
@@ -578,8 +605,23 @@ Proxmox has no GUI field for this, but `qm set` can append raw QEMU arguments:
 $ qm set <vmid> --args '-set device.net0.disable-legacy=on'
 ```
 
-That has been tested on the reproduced topology and it works: the device becomes `[1AF4:1041]`, the
-driver attaches, DHCP completes and the host serves. It is not pretty, and it is one line.
+Tested on the hardware the log above came from, and it works. The device becomes `[1AF4:1041]`, the
+driver attaches, and the same boot that had exited 69 now reads:
+
+```
+Found virtio device with device id 0x1041
+Features have been negotiated between virtio-net device and driver.
+virtio-net device has been initialized by driver!
+Virtio-net link is up after initialization!
+MAC address: bc-24-11-3c-a3-59
+{"level":"info","event":"listening","detail":"0.0.0.0:1688"}
+{"level":"info","event":"web-listening","detail":"0.0.0.0:8080"}
+DHCP config acquired!
+IP address:   10.42.1.75/22
+```
+
+It is not pretty, and it is one line. Note that `--args` replaces the whole string rather than
+appending to it, so anything already there has to be repeated.
 
 `rtl8139` is the other documented fallback and this build **cannot** use it: the kernel's feature set
 is pinned and does not include that driver (`OS-006`, #257). Taking it would mean a second kernel
