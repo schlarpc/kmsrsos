@@ -33,6 +33,7 @@ pub mod host;
 pub mod log;
 pub mod net;
 pub mod platform;
+pub mod sandbox;
 pub mod server;
 pub mod web;
 

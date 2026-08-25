@@ -179,6 +179,24 @@
             "-Lnative=${xwinSdk}/crt/lib/x86_64"
             "-Lnative=${xwinSdk}/sdk/lib/um/x86_64"
             "-Lnative=${xwinSdk}/sdk/lib/ucrt/x86_64"
+
+            # `SEC-005` (#197): Control Flow Guard. The compiler emits a check
+            # before every indirect call, against a bitmap of the addresses that
+            # are legitimate call targets — so an overwritten function pointer
+            # or vtable entry faults instead of transferring control.
+            #
+            # This is the one Windows mitigation `SEC-005` names that needs no
+            # `unsafe`, because it is a link-time property rather than a call.
+            # The other five go through `SetProcessMitigationPolicy`, which is
+            # raw FFI in every binding that exists, and this workspace forbids
+            # `unsafe` with no exception — see `SEC-019` (#356), where that
+            # conflict gets decided.
+            #
+            # Cheap for this program: the cost of CFG is proportional to how
+            # many indirect calls a program makes on a hot path, and the hot
+            # path here is one 384-byte request through a state machine of
+            # direct calls.
+            "-C control-flow-guard"
           ];
 
           CC_x86_64_pc_windows_msvc = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang-cl";
@@ -949,6 +967,58 @@
           disk uefi
         '';
 
+      # `SEC-005` (#197): Control Flow Guard is in the shipped Windows binaries.
+      #
+      # Read out of the PE optional header, not off the `RUSTFLAGS` line that is
+      # supposed to put it there. A flag in a build file is a statement about
+      # intent; `DllCharacteristics` is a statement about the artifact, and the
+      # two come apart exactly when somebody reorders a `concatStringsSep` list
+      # or a toolchain quietly stops honouring a flag.
+      #
+      # This is the same argument as `linux-iso-layout` counting kernel copies
+      # in the ISO bytes: the comment in `default.nix` said "twice" for the whole
+      # time it was three.
+      #
+      # CFG is the one Windows mitigation `SEC-005` asks for that needs no
+      # `unsafe`. The other five go through `SetProcessMitigationPolicy`, which
+      # is raw FFI in every binding that exists — see `SEC-019` (#356).
+      windowsMitigationsCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          windows = self.packages.${system}.windows;
+        in
+        pkgs.runCommand "windows-mitigations"
+          { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          mkdir -p $out
+          python3 - <<'PYTHON' | tee $out/report
+          import pathlib, struct, sys
+
+          # Bit 0x4000 of DllCharacteristics: IMAGE_DLLCHARACTERISTICS_GUARD_CF.
+          GUARD_CF = 0x4000
+          # Offset of DllCharacteristics inside the optional header. The field
+          # sits at the same place for PE32 and PE32+, because everything that
+          # differs in size comes after it.
+          DLL_CHARACTERISTICS = 70
+
+          binaries = sorted(pathlib.Path("${windows}/bin").glob("*.exe"))
+          assert binaries, "the Windows build produced no .exe, so this checks nothing"
+
+          for path in binaries:
+              data = path.read_bytes()
+              pe = struct.unpack_from("<I", data, 0x3C)[0]
+              assert data[pe:pe + 4] == b"PE\0\0", f"{path.name} is not a PE file"
+              flags = struct.unpack_from("<H", data, pe + 24 + DLL_CHARACTERISTICS)[0]
+              guarded = bool(flags & GUARD_CF)
+              print(f"{path.name:20} DllCharacteristics=0x{flags:04x} GUARD_CF={guarded}")
+              assert guarded, (
+                  f"{path.name} was built without Control Flow Guard. It is set by "
+                  "`-C control-flow-guard` in this flake's Windows RUSTFLAGS "
+                  "(SEC-005, #197); if that is still there, the toolchain has "
+                  "stopped honouring it"
+              )
+          PYTHON
+        '';
+
       containerFor = { pkgs, system, server, client }:
         pkgs.dockerTools.buildLayeredImage {
           name = "kmsrsos";
@@ -1353,6 +1423,10 @@
           # that the machine *serves* — plus the machine with no NIC at all,
           # which must say so rather than reporting `listening` and going quiet.
           linux-nics = nicBootCheckFor system;
+
+          # `SEC-005` (#197): the Windows binaries are built with Control Flow
+          # Guard, read off the PE header rather than off the recipe.
+          windows-mitigations = windowsMitigationsCheckFor system;
 
           # `OS-030` (#348): the kernel is in the ISO exactly once, counted,
           # and it boots as a raw disk on both firmwares.

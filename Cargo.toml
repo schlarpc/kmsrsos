@@ -85,6 +85,21 @@ socket2 = { version = "=0.6.5" }
 # `waitpid`, `mkdir`. Every one of them would otherwise be an `unsafe` libc
 # call, and axiom A1 is `forbid(unsafe_code)` with no exception since #334.
 # Features are named rather than defaulted, and each is one pid-1 duty.
+# `SEC-005` (#197): the Linux sandbox.
+#
+# `landlock` is the kernel's own filesystem LSM, applied to this process by
+# itself — no launcher, no privileged helper, no policy file. An empty ruleset
+# denies every path, which is what a program with axiom A5 wants: `no-file-access`
+# already proves nothing *opens* a file, and this makes the kernel enforce it.
+landlock = "=0.4.7"
+
+# `SEC-005` (#197): the syscall filter.
+#
+# `seccompiler` rather than `libseccomp`: pure Rust, no C library to link, and
+# it compiles a BPF program from a declarative rule set. The alternative would
+# put a C dependency in the one shipped crate that has none.
+seccompiler = "=0.5.0"
+
 rustix = { version = "=1.1.4", default-features = false, features = [
   # `mount` and `process`: mount(2) and waitpid(2) (`OS-021`, #337).
   # `fs`: mkdir(2), and open(2) for the /proc and /sys reads below. The
