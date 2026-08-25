@@ -86,7 +86,9 @@ socket2 = { version = "=0.6.5" }
 # call, and axiom A1 is `forbid(unsafe_code)` with no exception since #334.
 # Features are named rather than defaulted: this needs two of them.
 rustix = { version = "=1.1.4", default-features = false, features = [
-  "std", "fs", "mount", "process",
+  # `pipe` and `stdio` are `OS-028` (#345): pid 1 replaces its own fds 1 and 2
+  # with a pipe it pumps out to every registered console.
+  "std", "fs", "mount", "process", "pipe", "stdio",
 ] }
 
 tokio = { version = "=1.53.1", default-features = false, features = [

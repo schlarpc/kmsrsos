@@ -28,6 +28,11 @@
 //!   permanent zombies. This program spawns nothing today, so that is a latent
 //!   requirement rather than a live leak — and it is free to do now and
 //!   irritating to retrofit.
+//! * **There is one console, and the kernel picked it.** Fds 0, 1 and 2 are
+//!   `/dev/console`, which resolves to the *last* `console=` entry, while
+//!   kernel messages go to all of them. So the boot looks healthy on the serial
+//!   line and the program looks dead. [`console`] fixes that by teeing this
+//!   process's output to every console `/proc/consoles` lists (`OS-028`, #345).
 //!
 //! # No `unsafe`
 //!
@@ -36,6 +41,8 @@
 //! `OS-018` (#334) removed the Hermit boundary, and `rustix` is how it stays
 //! that way: safe bindings, checked by `workspace_invariants.rs`, which fails
 //! if the word `unsafe` appears anywhere in this workspace.
+
+mod console;
 
 use rustix::fs::Mode;
 use rustix::mount::MountFlags;
@@ -61,7 +68,10 @@ const MOUNTS: &[Mount] = &[
         source: "proc",
         target: "/proc",
         fstype: "proc",
-        why: "not needed to serve, and the first thing anyone wants when a \
+        why: "/proc/consoles is how OS-028 (#345) finds every console the \
+              kernel registered, so pid 1's own log is legible on a machine \
+              whose operator reads the serial port rather than the \
+              framebuffer; and it is the first thing anyone wants when a \
               guest misbehaves",
     },
     Mount {
@@ -90,9 +100,17 @@ struct Mount {
 }
 
 fn main() -> ExitCode {
-    // Before anything that might want to log: a failure here is reported on
-    // /dev/console, which exists because the kernel put it in the initramfs.
+    // Mounting comes first because everything else depends on it: /proc is
+    // where the console list lives and /dev is where the console nodes appear.
+    //
+    // The results are held rather than printed, because until the tee below is
+    // installed the only place a line can go is /dev/console — which on a
+    // machine with two consoles is precisely the one the operator may not be
+    // watching (`OS-028`, #345). Nothing is lost by waiting: if the tee cannot
+    // be installed, fds 1 and 2 are still what the kernel supplied and these
+    // lines go exactly where they would have gone anyway.
     let mut mounted = Vec::new();
+    let mut notes = Vec::new();
     for mount in MOUNTS {
         match mount_one(mount) {
             Ok(()) => mounted.push(mount.target),
@@ -100,19 +118,36 @@ fn main() -> ExitCode {
                 // Not fatal. A missing /proc is a worse debugging experience,
                 // not a host that cannot activate — and refusing to serve over
                 // it would trade a working KMS host for a tidy one.
-                eprintln!(
+                notes.push(format!(
                     "{{\"level\":\"warn\",\"event\":\"mount\",\"detail\":\"{} on {}: {error}\"}}",
                     mount.fstype, mount.target
-                );
+                ));
             }
         }
     }
 
+    // `OS-028` (#345): from here on, everything this process writes to stdout
+    // or stderr reaches every console the kernel registered, not just the last
+    // `console=` entry. That includes the KMS host's own log lines, since
+    // `serve` writes to the same descriptors, and a panic message, which on
+    // pid 1 is the last thing this machine will ever say.
+    notes.push(match console::tee_stdio() {
+        Ok(consoles) => format!(
+            "{{\"level\":\"info\",\"event\":\"console\",\"detail\":\"logging to {}\"}}",
+            consoles.join(" ")
+        ),
+        Err(reason) => format!(
+            "{{\"level\":\"info\",\"event\":\"console\",\"detail\":\"inherited stderr: {reason}\"}}"
+        ),
+    });
+
     // Stated positively, and on purpose. "No warning appeared" is not evidence
     // that anything mounted — it is equally consistent with this code never
     // running — so the boot check in `nix flake check` greps for this line
-    // rather than for the absence of the one above.
-    println_stderr(&format!(
+    // rather than for the absence of the one above. Since `OS-028` (#345) it
+    // is also the assertion that the tee works: the check looks for it on the
+    // *serial* console of a machine that also has a framebuffer.
+    notes.push(format!(
         "{{\"level\":\"info\",\"event\":\"pid1\",\"detail\":\"mounted {}\"}}",
         if mounted.is_empty() {
             "nothing".to_owned()
@@ -120,6 +155,10 @@ fn main() -> ExitCode {
             mounted.join(" ")
         }
     ));
+
+    for note in &notes {
+        println_stderr(note);
+    }
 
     reap_orphans_forever();
 

@@ -507,6 +507,25 @@
           (OS-021, #337)" >&2
               cat $out/$f.log >&2; exit 1; }
 
+            # `OS-028` (#345). Everything above this point is read out of the
+            # *serial* log of a machine whose command line ends `console=tty0`
+            # — so /dev/console is the framebuffer and, without the tee, not one
+            # of those lines would be here. That is what makes the greps above a
+            # regression test for this and not merely for OS-021.
+            #
+            # Asserted explicitly as well, because "the lines are present" would
+            # also hold if somebody reordered the command line back, and the
+            # point of this issue is that the order stopped mattering.
+            grep -q '"event":"console".*logging to.*ttyS0' $out/$f.log || {
+              echo "pid 1 did not tee its log to the serial console on $f; \
+          with tty0 last, every line above reached the framebuffer only \
+          (OS-028, #345)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q '"event":"console".*logging to.*tty0' $out/$f.log || {
+              echo "pid 1 found no framebuffer console on $f, so this check is \
+          not exercising the two-console case OS-028 (#345) is about" >&2
+              cat $out/$f.log >&2; exit 1; }
+
             if grep -qi 'unable to open an initial console' $out/$f.log; then
               echo "init had no stdio on $f: the /dev/console node is missing \
           from the initramfs manifest (OS-017, #333)" >&2

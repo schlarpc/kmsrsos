@@ -367,6 +367,34 @@ $ qemu-system-x86_64 -machine q35 -cpu qemu64 -enable-kvm \
 `nix flake check` runs exactly this on both firmwares, on the PCI topology `qemu-server` emits, with
 no `--args` — so the two conditions that defeated the unikernel are exercised on every change.
 
+### The console (`OS-028`, #345)
+
+**Every line this program writes goes to every console the kernel registered.** Not to one of them.
+Pid 1 reads `/proc/consoles` at boot, opens each console's device node, and tees its own stdout and
+stderr — which is also the KMS host's log, and a panic message — to all of them.
+
+That is worth stating because the consequence is visible: **an operator watching both the noVNC
+window and a serial port sees the same JSON twice.** That is correct, not a bug, and there is no
+setting to turn it off.
+
+The line that says which consoles were found comes first in the boot:
+
+```
+{"level":"info","event":"console","detail":"logging to tty0 ttyS0"}
+```
+
+If that says `inherited stderr: …` instead, the tee could not be installed and output goes to
+`/dev/console` alone, as it did before this change. The machine still serves; you may just be
+looking at the wrong console.
+
+Why it works this way: `/dev/console` — which the kernel hands pid 1 as fds 0, 1 and 2 — resolves to
+the **last** `console=` entry on the command line, while kernel messages go to all of them. So
+before this, whichever console came last got the program's log and the other showed a clean boot
+followed by silence, which reads exactly like a program that never started (`OS-005`, #256). Which
+console an operator can actually read is a property of the platform — the framebuffer on Proxmox,
+`ttyS0` and nothing else on EC2 (`OS-027`, #344) — so there was no ordering that was right
+everywhere. Now the ordering decides nothing.
+
 ### What is in the kernel, and what is not
 
 `os/linux/kernel.config` is checked in and is meant to be read. The base is `make tinyconfig`, so

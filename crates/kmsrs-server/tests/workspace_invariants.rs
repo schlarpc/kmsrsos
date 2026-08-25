@@ -33,6 +33,32 @@ const QUARANTINED_CRATE: &str = "kmsrs-dbgen";
 /// shipped artifact.
 const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client", "kmsrs-os"];
 
+/// The crate that is process 1 on the bare-metal target, and so the one crate
+/// that must open paths (`OS-021`, #337). It answers to
+/// `pid1_opens_nothing_but_pseudo_filesystems` instead of to
+/// `no_shipped_crate_touches_the_filesystem`.
+const PID1_CRATE: &str = "kmsrs-os";
+
+/// Names that mean "this code opens something".
+///
+/// `rustix::fs::open` is on the list because `OS-021` (#337) brought rustix
+/// into the tree for `mount(2)`, and a safe binding to `openat(2)` arrived in
+/// the same crate. Axiom A5 is about what the program reaches for, not about
+/// which crate spells the syscall, so leaving it off would have made the ban
+/// avoidable by import.
+const OPENS_SOMETHING: &[&str] = &[
+    "std::fs",
+    "File::open",
+    "File::create",
+    "OpenOptions",
+    "temp_dir",
+    "TempDir",
+    "NamedTempFile",
+    "read_to_string(",
+    "write(&path",
+    "rustix::fs::open",
+];
+
 // No crate is permitted to define its own lint table any more. `kmsrs-os` held
 // the single documented unsafe boundary (`SEC-001`, #193; `OS-013`, #264) and
 // set `deny` where the workspace sets `forbid`, so a boundary would have had to
@@ -542,27 +568,15 @@ fn rust_sources(dir: &Path) -> Vec<String> {
 /// property is easy to lose one call at a time. `kmsrs-dbgen` is exempt: it is
 /// a host-only tool whose entire job is reading artifacts, and
 /// `dbgen_is_unreachable_from_every_shipped_binary` is what keeps it out of the
-/// shipped closure.
+/// shipped closure. `kmsrs-os` is exempt for a different reason and under a
+/// narrower rule — see [`pid1_opens_nothing_but_pseudo_filesystems`].
 #[test]
 fn no_shipped_crate_touches_the_filesystem() {
-    /// Names that mean "this code opens something".
-    const FORBIDDEN: &[&str] = &[
-        "std::fs",
-        "File::open",
-        "File::create",
-        "OpenOptions",
-        "temp_dir",
-        "TempDir",
-        "NamedTempFile",
-        "read_to_string(",
-        "write(&path",
-    ];
-
     let root = workspace_root();
     let mut offences = Vec::new();
 
     for (name, manifest_path) in crate_manifests(&root) {
-        if name == QUARANTINED_CRATE {
+        if name == QUARANTINED_CRATE || name == PID1_CRATE {
             continue;
         }
         let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
@@ -573,7 +587,7 @@ fn no_shipped_crate_touches_the_filesystem() {
         }
 
         for (path, text) in rust_sources_with_paths(&source_dir) {
-            for needle in FORBIDDEN {
+            for needle in OPENS_SOMETHING {
                 if text.contains(needle) {
                     offences.push(format!("{}: {needle}", path.display()));
                 }
@@ -586,6 +600,92 @@ fn no_shipped_crate_touches_the_filesystem() {
         "these shipped sources reach for the filesystem, which axiom A5 \
          forbids: {offences:#?}"
     );
+}
+
+/// Axiom A5 for pid 1, which cannot be the blanket ban and is not weaker for it
+/// (`OS-021`, #337; `OS-028`, #345).
+///
+/// `kmsrs-os` is the one shipped crate that must open paths. Mounting `/proc`
+/// is an open; finding the consoles the kernel registered is a read of
+/// `/proc/consoles`; writing to them is an open of a node under `/dev`. None of
+/// that is storage, and on this target it *cannot* become storage: the kernel is
+/// built with `CONFIG_BLOCK` unset, so there is no block layer for a real
+/// filesystem to be mounted from.
+///
+/// So the rule for this crate is a whitelist of prefixes rather than a ban, and
+/// it is checked the same way — by reading the source for the paths it names.
+/// The failure this prevents is the one the blanket ban prevents everywhere
+/// else: a configuration file, a state file, a log file, arriving one call at a
+/// time in the only crate where `open` is unremarkable.
+#[test]
+fn pid1_opens_nothing_but_pseudo_filesystems() {
+    /// The only trees pid 1 may name. Every one is a kernel interface that
+    /// exists in RAM.
+    const PSEUDO: &[&str] = &["/proc/", "/sys/", "/dev/"];
+
+    /// Bare mount points, which are paths without a trailing separator and so
+    /// are not matched by the prefixes above.
+    const MOUNT_POINTS: &[&str] = &["/proc", "/sys", "/dev"];
+
+    let root = workspace_root();
+    let source_dir = root.join("crates").join(PID1_CRATE).join("src");
+    assert!(
+        source_dir.is_dir(),
+        "{PID1_CRATE} has no src/; this test would pass vacuously"
+    );
+
+    let mut named = Vec::new();
+    let mut offences = Vec::new();
+    for (path, text) in rust_sources_with_paths(&source_dir) {
+        for literal in absolute_path_literals(&text) {
+            named.push(literal.clone());
+            let allowed = PSEUDO.iter().any(|prefix| literal.starts_with(prefix))
+                || MOUNT_POINTS.contains(&literal.as_str());
+            if !allowed {
+                offences.push(format!("{}: {literal}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        !named.is_empty(),
+        "no absolute path literal was found in {PID1_CRATE}; this test is not \
+         looking at the right tree and would pass if a state file were added"
+    );
+    assert!(
+        offences.is_empty(),
+        "pid 1 named a path outside /proc, /sys and /dev. Axiom A5 says this \
+         machine has no storage, and the kernel it runs on has no block layer \
+         to give it any (`OS-021`, #337): {offences:#?}"
+    );
+}
+
+/// Every double-quoted string literal in `text` that looks like an absolute
+/// Unix path.
+///
+/// Crude on purpose. It over-collects — a doc comment's example path is a
+/// string to nobody — and over-collecting is the safe direction, because a
+/// false positive is an argument at review and a false negative is the state
+/// file this is here to catch. Doc comments are excluded for exactly that
+/// reason: this tree's prose is full of `/dev/console` and `/nix/store`.
+fn absolute_path_literals(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        // Splitting on the quote character puts the quoted pieces at the odd
+        // indices, which is the whole parser. An escaped quote inside a literal
+        // shifts that parity and yields nonsense pieces; none of them starts
+        // with a separator, so they fall out below rather than needing a real
+        // lexer here.
+        for literal in line.split('"').skip(1).step_by(2) {
+            if literal.starts_with('/') && literal.len() > 1 {
+                found.push(literal.to_owned());
+            }
+        }
+    }
+    found
 }
 
 /// `SEC-013` (#205): nothing secret is embedded in the shipped artifact.

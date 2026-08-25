@@ -27,12 +27,24 @@
   # and never renews it. `OS-019` (#335) replaces it with a real client in
   # `kmsrs-os` and drops `CONFIG_IP_PNP_DHCP`.
   #
-  # `console=` order is load-bearing. Kernel messages go to every console
-  # listed, but /dev/console — which the kernel hands init as fds 0/1/2 —
-  # resolves to the LAST one. With tty0 last, the program's own log lines go to
-  # the framebuffer and the serial console shows a clean boot followed by
-  # silence, which reads exactly like a program that never started.
-, cmdline ? "console=tty0 console=ttyS0,115200 ip=dhcp panic=-1 loglevel=6"
+  # `console=` order no longer decides anything (`OS-028`, #345).
+  #
+  # It used to. Kernel messages go to every console listed, but /dev/console —
+  # which the kernel hands init as fds 0/1/2 — resolves to the LAST one, so
+  # whichever console came last got the program's own log lines and the other
+  # showed a clean boot followed by silence. That reads exactly like a program
+  # that never started (`OS-005`, #256), and which console it happened to was a
+  # property of the platform: the framebuffer is what a Proxmox operator has,
+  # `ttyS0` is all EC2's `GetConsoleOutput` can read.
+  #
+  # Pid 1 now reads /proc/consoles and writes to all of them, so there is no
+  # ordering left to get wrong. `tty0` is last deliberately anyway, for two
+  # reasons that agree: it is the better fallback if the tee ever fails to
+  # install, since Proxmox is the supported platform and noVNC is the console
+  # its operator has; and it is the ordering that would silence the serial log
+  # without the tee, which is what makes the boot check in `nix flake check` a
+  # real regression test rather than a formality.
+, cmdline ? "console=ttyS0,115200 console=tty0 ip=dhcp panic=-1 loglevel=6"
 , base ? pkgs.linux_6_12
 }:
 
