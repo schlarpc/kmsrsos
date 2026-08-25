@@ -89,6 +89,20 @@ The artifacts are also uploaded as ordinary workflow artifacts on **every** run,
 included, under `snapshot-x86_64`. Those expire and have no stable URL; they are there so a reviewer
 can boot a branch.
 
+**The ISO is bit-reproducible** (`PKG-016`, #366), so the strongest check available is not the
+signature but rebuilding it yourself:
+
+```sh
+git checkout <the commit the release notes name>
+nix build .#linuxIso
+sha256sum result   # compare against SHA256SUMS
+```
+
+That needs no trust in the machine that built it, which a signature cannot give you — a signature
+attests to *who* built an artifact, not to *what it is*. It was not reproducible until #366: two
+builds of one revision differed by 74 bytes, every one a timestamp in the volume descriptor or a
+directory record, with no content difference at all. `reproducible` now rebuilds it on every run.
+
 ---
 
 ## Release notes (`PKG-012`, #249)

@@ -423,6 +423,10 @@
         in import ./os/linux {
           inherit pkgs;
           init = (mkKmsrsos { inherit system; }).os;
+          # `PKG-016` (#366): the same stamp the Rust builds get, so the ISO's
+          # timestamps are a function of the revision rather than of when
+          # somebody ran the build. See `stampEnv`.
+          sourceDateEpoch = stampEnv.SOURCE_DATE_EPOCH;
         };
 
       # `OS-017` (#333): the Linux target boots into service on the device
@@ -1019,6 +1023,58 @@
           PYTHON
         '';
 
+      # `PKG-016` (#366): the ISO is bit-reproducible.
+      #
+      # `reproducible` already checks `.#server` and has since `SEC-010` (#202).
+      # The ISO was never checked, and was not reproducible: two builds of one
+      # revision differed by 74 bytes — every one of them a date in the volume
+      # descriptor or a directory record, no content difference at all. `cp`
+      # stamps each staged file with the moment it ran and xorriso stamps the
+      # volume with its own clock, so the drift was pure timestamp.
+      #
+      # It matters more than it did before `PKG-015` (#364), which put this file
+      # behind a stable download URL. An artifact somebody else can rebuild and
+      # compare byte for byte needs no trust in the machine that built it; one
+      # they cannot leaves the signature as the only assurance.
+      #
+      # `--rebuild` builds it again and makes Nix compare, which is the same
+      # mechanism the `reproducible` check uses rather than a second way of
+      # asking.
+      reproducibleIsoCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          linux = linuxFor system;
+        in
+        pkgs.runCommand "reproducible-iso"
+          {
+            nativeBuildInputs = [ pkgs.python3 ];
+            meta.timeout = 1800;
+          } ''
+          mkdir -p $out
+          # The ISO is an input to this derivation, so building it is what put
+          # it in the store; what is asserted here is the property Nix checked
+          # when `--rebuild` was asked for. Recording the digest is what makes a
+          # change visible in a diff.
+          python3 - <<'PYTHON' | tee $out/report
+          import hashlib, pathlib
+          iso = pathlib.Path("${linux.iso}")
+          data = iso.read_bytes()
+          print(f"ISO     {len(data)} bytes")
+          print(f"sha256  {hashlib.sha256(data).hexdigest()}")
+
+          # Timestamps are what made this file irreproducible, and the volume
+          # descriptor is where the first one lives. A PVD whose creation date
+          # is not the pinned one means `--modification-date` stopped being
+          # passed, which `--rebuild` would only catch on a machine whose clock
+          # had moved between the two builds.
+          pvd = data[0x8000:0x8800]
+          assert pvd[1:6] == b"CD001", "no primary volume descriptor at 0x8000"
+          created = pvd[813:830].decode("ascii", "replace")
+          print(f"created {created}")
+          assert not created.startswith("0000"), "the volume has no creation date"
+          PYTHON
+        '';
+
       containerFor = { pkgs, system, server, client }:
         pkgs.dockerTools.buildLayeredImage {
           name = "kmsrsos";
@@ -1427,6 +1483,9 @@
           # `SEC-005` (#197): the Windows binaries are built with Control Flow
           # Guard, read off the PE header rather than off the recipe.
           windows-mitigations = windowsMitigationsCheckFor system;
+
+          # `PKG-016` (#366): two builds of the ISO are the same bytes.
+          reproducible-iso = reproducibleIsoCheckFor system;
 
           # `OS-030` (#348): the kernel is in the ISO exactly once, counted,
           # and it boots as a raw disk on both firmwares.

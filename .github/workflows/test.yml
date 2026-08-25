@@ -201,6 +201,20 @@ jobs:
       - run: nix build .#server --print-build-logs
       - run: nix build .#server --rebuild --print-build-logs
 
+      # `PKG-016` (#366): the ISO too, and this one had never been asked.
+      #
+      # It was not reproducible. Two builds of one revision differed by 74
+      # bytes, every one a date in the volume descriptor or a directory record
+      # — `cp` stamps each staged file with the moment it ran and xorriso
+      # stamps the volume with its own clock. No content differed, which is
+      # exactly why nobody noticed.
+      #
+      # It matters more since `PKG-015` (#364) put this file behind a stable
+      # download URL: an artifact somebody else can rebuild and compare needs
+      # no trust in the machine that built it.
+      - run: nix build .#linuxIso --print-build-logs --no-link
+      - run: nix build .#linuxIso --rebuild --print-build-logs --no-link
+
   # Proof that the sans-io core cannot panic (ARCH-009, #9).
   #
   # Its own job for the same reason as `fuzz`: it needs the nightly that

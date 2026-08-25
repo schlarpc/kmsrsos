@@ -52,6 +52,24 @@
   # real regression test rather than a formality.
 , cmdline ? "console=ttyS0,115200 console=tty0 panic=-1 loglevel=6"
 , base ? pkgs.linux_6_12
+  # `PKG-016` (#366): what every timestamp in the ISO is set to.
+  #
+  # Without it the image is **not reproducible**, and the failure is invisible:
+  # two builds of one revision differed by 74 bytes, every one of them a date in
+  # the volume descriptor or a directory record, with no content difference at
+  # all. `nix build .#linuxIso --rebuild` said so on the same machine.
+  #
+  # Two sources of drift, and both need closing:
+  #
+  #   * `cp` gives every file in the staging tree the mtime of *now*, and
+  #     xorriso copies those into the directory records.
+  #   * xorriso stamps the volume descriptor with the current time unless told
+  #     otherwise.
+  #
+  # The default is the Unix epoch so that a direct `import` of this file is
+  # reproducible too; the flake passes `self.lastModified`, which is the same
+  # stamp `SOURCE_DATE_EPOCH` gives the Rust builds.
+, sourceDateEpoch ? "0"
 }:
 
 let
@@ -284,6 +302,10 @@ let
     # pointed at the appended partition, so a copy in the tree would be a
     # megabyte nothing reads (`OS-029`, #347).
 
+    # `PKG-016` (#366): every file's mtime, before xorriso reads them into the
+    # directory records. `cp` above set them all to the moment this ran.
+    find iso -exec touch -h -d "@${sourceDateEpoch}" {} +
+
     # `-isohybrid-mbr` and `-appended_part_as_gpt` are `OS-027` (#344), and
     # they fix something that was silently doing nothing.
     #
@@ -314,7 +336,13 @@ let
     # Cost: 145 408 bytes, from 13 826 048 to 13 971 456. Almost none of that is
     # the 446-byte bootstrap — it is the two GPT tables plus the ESP moving to a
     # 2048-sector boundary.
+    # `--modification-date` is the volume descriptor's own timestamp, which is
+    # separate from the file dates above and drifts on its own
+    # (`PKG-016`, #366). `date -u` because the field has no zone.
+    stamp=$(date -u -d "@${sourceDateEpoch}" +%Y%m%d%H%M%S00)
+
     xorriso -as mkisofs -V KMSRSOS \
+      --modification-date="$stamp" \
       -b isolinux/isolinux.bin -c isolinux/boot.cat \
       -no-emul-boot -boot-load-size 4 -boot-info-table \
       -eltorito-alt-boot \
