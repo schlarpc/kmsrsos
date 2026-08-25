@@ -95,7 +95,10 @@ rustix = { version = "=1.1.4", default-features = false, features = [
   # `system`: reboot(2), so a hypervisor's shutdown request ends in an ACPI
   #   power-off rather than in pid 1 returning, which is a kernel panic
   #   (`OS-026`, #343).
-  "std", "fs", "mount", "process", "pipe", "stdio", "system",
+  # `time`: clock_settime(2), so `OS-020` (#336) can step the realtime clock
+  #   without an `unsafe` libc call. CLOCK_MONOTONIC is untouched by it, which
+  #   is why no deadline in this program can observe the step.
+  "std", "fs", "mount", "process", "pipe", "stdio", "system", "time",
 ] }
 
 # `OS-019` (#335): the DHCPv4 wire format. Parser and encoder only, sans-io by

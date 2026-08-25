@@ -495,6 +495,16 @@
               return 1
             fi
 
+            # `OS-020` (#336): wait for the clock task to have tried and
+            # reported, which it does within a few seconds of the lease. Waited
+            # for rather than assumed, because the healthcheck above can succeed
+            # before the DNS lookup for the pool has timed out — and then the
+            # assertion below would be racing rather than checking.
+            for attempt in $(seq 1 30); do
+              grep -q '"event":"clock"' "$serial" && break
+              sleep 1
+            done
+
             # `OS-026` (#343): the shutdown half. `system_powerdown` is exactly
             # what `qm shutdown` and the Proxmox web UI's Shutdown button send —
             # an ACPI power-button event — and until this issue the guest
@@ -583,6 +593,27 @@
               echo "the host stopped without draining on $f (NET-007, #157; \
           OS-026, #343)" >&2
               cat $out/$f.log >&2; exit 1; }
+            # `OS-020` (#336). The clock task must have run and said something —
+            # a task that failed quietly is the failure mode this whole target
+            # keeps producing.
+            #
+            # *Which* thing it said is not asserted here, because it is not this
+            # check's to decide: whether `pool.ntp.org` resolves depends on
+            # whether the build sandbox has a route out. Both outcomes are
+            # correct, and the one that matters — that an unreachable time
+            # server does not stop the host serving — is already proven above by
+            # the healthcheck having succeeded, and its wording is asserted by
+            # `an_unreachable_time_server_is_not_a_reason_to_stop_serving`.
+            grep -q '"event":"clock"' $out/$f.log || {
+              echo "the clock task never reported on $f, so either it did not \
+          run or it failed quietly (OS-020, #336)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # Whichever branch it took, it must be one of the two.
+            grep -qE '"event":"clock".*(no time server answered|stepped)' $out/$f.log || {
+              echo "the clock task said something on $f that is neither a step \
+          nor a report of no answer (OS-020, #336)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
             # An ACPI power-off, not `Attempted to kill init!`. Both stop the
             # machine; only one of them looks like a clean stop to the operator
             # who pressed the button.
@@ -715,6 +746,52 @@
           # this machine's TCB; generating it from an unpinned input is exactly
           # the `OS-006` (#257) mistake in a new place.
           linux-config = import ./os/linux/config.nix { inherit pkgs; };
+
+          # `nix build .#linux-deltas && cat result/report` — what each driver
+          # in the `OS-025` (#342) matrix costs, measured on the built bzImage
+          # with the initramfs held constant. That last part is the whole
+          # point: the initramfs is *inside* the bzImage, so measuring a 40 kB
+          # driver against the shipped kernel compares two numbers that differ
+          # for two reasons.
+          #
+          # Each variant is the checked-in allowlist plus the symbols named,
+          # run through the same `olddefconfig` the real build uses — so a
+          # symbol that drags a subsystem in is measured with the subsystem,
+          # which is the mistake `OS-026` (#343) found the hard way.
+          linux-deltas = import ./os/linux/delta.nix {
+            inherit pkgs;
+            variants = {
+              # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
+              # for a modern Linux guest on ESXi and Workstation.
+              vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
+              # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
+              rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
+              # VirtualBox's older adapter choices.
+              pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
+              # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
+              tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
+              # EC2 Nitro (`OS-027`, #344).
+              ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
+              # Hyper-V and Azure. The one item `OS-025` calls "genuinely
+              # large", and the reason this output exists rather than an
+              # estimate in a comment.
+              hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
+              # Xen PV networking on XCP-ng and Citrix Hypervisor.
+              xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
+              # Everything at once, which is what the shipped kernel becomes if
+              # the whole matrix is taken. Not the sum of the rows: enabling two
+              # drivers that share a vendor gate pays for it once.
+              everything = [
+                "NET_VENDOR_VMWARE" "VMXNET3"
+                "NET_VENDOR_REALTEK" "8139CP" "8139TOO"
+                "NET_VENDOR_AMD" "PCNET32"
+                "NET_VENDOR_DEC" "NET_TULIP" "TULIP"
+                "NET_VENDOR_AMAZON" "ENA_ETHERNET"
+                "HYPERV" "HYPERV_NET" "HYPERV_TIMER"
+                "XEN" "XEN_NETDEV_FRONTEND"
+              ];
+            };
+          };
 
           # --- OS packages (PKG-009, #246) ---
           #

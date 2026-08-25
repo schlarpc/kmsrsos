@@ -118,6 +118,38 @@ every existing Rust client welds INIT/SELECTING/REQUESTING/BOUND/RENEWING/REBIND
 netlink. That is the part axiom A7 wants sans-io anyway, so it takes a `Duration` and a message and
 returns actions, and the whole of it is exercised against captured exchanges with no network.
 
+### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
+
+Two decisions this issue asked to be made explicitly rather than by default.
+
+**Why SNTP.** The difference that matters is the discipline loop: full NTP estimates the local
+oscillator's frequency error and *slews* continuously, so the clock stays right between polls and
+never jumps. Three things rule it out here, in descending order of finality.
+
+1. **There is nothing to slew with.** `adjtimex` has no safe binding in rustix, so axiom A1 leaves
+   `clock_settime` as the only move available. "SNTP with slewing" is not on the menu, and a
+   discipline loop with nothing to drive is not a discipline loop.
+2. **There is nothing to reuse.** `ntpd-rs` is a daemon, not a crate to embed. A hand-written PLL
+   would be a far larger A8 exception than the lease state machine, for a clock that feeds a ±4 hour
+   tolerance.
+3. **The platform already handles drift.** Every hypervisor in `OS-025` (#342)'s matrix gives the
+   guest kvmclock, the Hyper-V reference TSC or an equivalent that tracks the host continuously. The
+   case SNTP helps is the RTC-only one, where a step every seventeen minutes is ample.
+
+What is given up, stated rather than glossed: **falseticker rejection**. The first usable answer is
+taken rather than several compared, so a lying option-42 server is believed. Acceptable because the
+DHCP server that named it already controls this host's address and routing.
+
+**Why an unreachable time server is not fatal.** The issue asks for "serve with the unsynchronised
+clock, or refuse — decided explicitly". It serves, because the clock turns out to reach almost
+nothing: nothing in a response derives from it, every deadline is monotonic, and the one wall-clock
+read happens once at start-up. A KMS host that refused to activate anything because it could not
+reach an NTP server would be trading its whole function for a log field.
+
+That last point deserves an asterisk found while doing the work: **the skew check does not run at
+all today**, because `driver.rs` passes `host_time: None` on every request. `POL-011` (#99) is inert
+and `strict-clock-skew` changes nothing. Filed as #346 (`POL-020`) rather than fixed here.
+
 ### Hermit was removed rather than kept (`OS-018`, #334)
 
 Both targets worked. The question was never which one *ran*, it was which one an operator could

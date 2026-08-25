@@ -36,6 +36,8 @@ use tokio::net::UdpSocket;
 
 use super::lease::{Action, Config, Lease};
 use super::link::{self, Interface};
+use super::sntp::Sources;
+use tokio::sync::watch;
 
 /// The port a DHCP client listens on.
 const CLIENT_PORT: u16 = 68;
@@ -69,9 +71,9 @@ const RETRY_INTERFACE: Duration = Duration::from_secs(5);
 /// `seed` is entropy from the caller. Axiom A7 keeps the state machine free of
 /// both clocks and generators, so the transaction ID and the retransmission
 /// jitter are supplied rather than read.
-pub(crate) fn spawn(facts: Facts, seed: u32) {
+pub(crate) fn spawn(facts: Facts, seed: u32, sources: watch::Sender<Sources>) {
     tokio::spawn(async move {
-        run(facts, seed).await;
+        run(facts, seed, sources).await;
     });
 }
 
@@ -132,7 +134,7 @@ where
     clippy::integer_division_remainder_used,
     reason = "tokio::select! expands to a modulo over its own branch count"
 )]
-async fn run(facts: Facts, seed: u32) {
+async fn run(facts: Facts, seed: u32, sources: watch::Sender<Sources>) {
     let (interface, socket) = loop {
         match acquire_interface().await {
             Some(ready) => break ready,
@@ -167,7 +169,7 @@ async fn run(facts: Facts, seed: u32) {
 
     loop {
         for action in pending.drain(..) {
-            perform(action, &socket, &interface, &facts, &mut applied).await;
+            perform(action, &socket, &interface, &facts, &sources, &mut applied).await;
         }
 
         // Every RFC 2131 transition, once each. This is the trace an operator
@@ -307,6 +309,7 @@ async fn perform(
     socket: &UdpSocket,
     interface: &Interface,
     facts: &Facts,
+    sources: &watch::Sender<Sources>,
     applied: &mut Option<(Ipv4Addr, u8)>,
 ) {
     match action {
@@ -315,8 +318,8 @@ async fn perform(
             send(socket, &message, SocketAddrV4::new(server, SERVER_PORT)).await;
         }
         Action::Note(text) => say("info", &text),
-        Action::Configure(config) => apply(&config, interface, facts, applied).await,
-        Action::Deconfigure => withdraw(interface, facts, applied).await,
+        Action::Configure(config) => apply(&config, interface, facts, sources, applied).await,
+        Action::Deconfigure => withdraw(interface, facts, sources, applied).await,
     }
 }
 
@@ -344,6 +347,7 @@ async fn apply(
     config: &Config,
     interface: &Interface,
     facts: &Facts,
+    sources: &watch::Sender<Sources>,
     applied: &mut Option<(Ipv4Addr, u8)>,
 ) {
     // The address that is on the interface now, if it is not the one arriving.
@@ -383,7 +387,7 @@ async fn apply(
                     )
                 ),
             );
-            publish(facts, Some(config));
+            publish(facts, sources, Some(config));
         }
         Err(error) => say(
             "error",
@@ -397,7 +401,12 @@ async fn apply(
 }
 
 /// Take the address off, because the lease is gone.
-async fn withdraw(interface: &Interface, facts: &Facts, applied: &mut Option<(Ipv4Addr, u8)>) {
+async fn withdraw(
+    interface: &Interface,
+    facts: &Facts,
+    sources: &watch::Sender<Sources>,
+    applied: &mut Option<(Ipv4Addr, u8)>,
+) {
     let Some((address, prefix)) = applied.take() else {
         return;
     };
@@ -411,7 +420,7 @@ async fn withdraw(interface: &Interface, facts: &Facts, applied: &mut Option<(Ip
             &format!("withdrawing the address panicked: {error}"),
         ),
     }
-    publish(facts, None);
+    publish(facts, sources, None);
 }
 
 /// Tell the rest of the program what the lease said (`DISC-007`, #149).
@@ -419,13 +428,25 @@ async fn withdraw(interface: &Interface, facts: &Facts, applied: &mut Option<(Ip
 /// The `/instructions` page renders the search domain into the SRV record it
 /// tells an operator to publish, which it could not do before this issue
 /// because the kernel's own DHCP client discarded options 15 and 119.
-fn publish(facts: &Facts, config: Option<&Config>) {
+fn publish(facts: &Facts, sources: &watch::Sender<Sources>, config: Option<&Config>) {
     facts.publish(match config {
         Some(config) => Network {
             search_domains: config.search.clone(),
             address: Some(config.address),
         },
         None => Network::default(),
+    });
+
+    // `OS-020` (#336) wants option 42, and option 6 to resolve the pool with
+    // when there is no option 42. Sent whether or not it changed: a `watch`
+    // holds one value, so a renewal that says the same thing is a no-op the
+    // reader never notices.
+    let _: Result<(), watch::error::SendError<Sources>> = sources.send(match config {
+        Some(config) => Sources {
+            ntp: config.ntp.clone(),
+            dns: config.dns.clone(),
+        },
+        None => Sources::default(),
     });
 }
 

@@ -528,6 +528,96 @@ fn there_is_one_driver_and_no_patched_dependencies() {
     }
 }
 
+/// `OS-007` (#258), and what makes `OS-020` (#336) safe: the wall clock is read
+/// in exactly two places, and neither is on the request path.
+///
+/// The rule is usually stated as an efficiency one — a syscall per request that
+/// answers a question nothing needs. It is really a correctness one, and
+/// `OS-020` is where that becomes visible. That issue's definition of done says
+/// **"a step is applied in a way `kmsrs-policy` cannot observe as time
+/// reversal"**, and the reason it is satisfied is not that the SNTP client is
+/// careful:
+///
+/// * `clock_settime(CLOCK_REALTIME)` does not move `CLOCK_MONOTONIC`.
+/// * Every deadline in this program is monotonic — tokio's for connections, an
+///   injected reading for the activation interval (`ARCH-004`, #4).
+/// * So there is no path by which a step can be seen as time going backwards.
+///
+/// That property survives only while the second bullet holds. One
+/// `SystemTime::now()` in the request path would break it silently, and the
+/// symptom would be a host that miscounts activations for a few hours after a
+/// clock correction — which is not a symptom anybody traces back to here. So it
+/// is asserted rather than left to the comment above.
+///
+/// The two permitted readers, and why each is not the request path:
+///
+/// | Where | Why |
+/// |---|---|
+/// | `entry.rs` | once at start-up, to bound the randomised activation date in the ePID (`ID-007`, #112). Stable for the life of the process, which `ID-001` (#106) requires |
+/// | `net/sntp.rs` | the thing whose job is the clock (`OS-020`, #336) |
+#[test]
+fn the_wall_clock_is_read_in_exactly_two_places() {
+    /// Names that mean "this reads or writes the wall clock".
+    ///
+    /// `FileTime::UNIX_EPOCH` in `kmsrs-proto` is a constant, not a read — the
+    /// needle is the `std` path and the `rustix` realtime clock, not the words.
+    const READS_THE_WALL_CLOCK: &[&str] = &[
+        "SystemTime::now",
+        "std::time::UNIX_EPOCH",
+        "ClockId::Realtime",
+    ];
+
+    /// The files that may. Everything else in every shipped crate may not.
+    const PERMITTED: &[&str] = &["entry.rs", "sntp.rs"];
+
+    let root = workspace_root();
+    let mut offences = Vec::new();
+    let mut found = Vec::new();
+
+    for (name, manifest_path) in crate_manifests(&root) {
+        if name == QUARANTINED_CRATE {
+            continue;
+        }
+        let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        if !source_dir.is_dir() {
+            continue;
+        }
+        for (path, text) in rust_sources_with_paths(&source_dir) {
+            for needle in READS_THE_WALL_CLOCK {
+                if !text.contains(needle) {
+                    continue;
+                }
+                let file = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                found.push(file.to_owned());
+                if !PERMITTED.contains(&file) {
+                    offences.push(format!("{}: {needle}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "these read the wall clock, and only {PERMITTED:?} may (`OS-007`, #258). \
+         Every deadline in this program is monotonic, which is the whole reason \
+         `OS-020` (#336) can step the clock without `kmsrs-policy` observing \
+         time reversal: {offences:#?}"
+    );
+    for permitted in PERMITTED {
+        assert!(
+            found.iter().any(|file| file == permitted),
+            "{permitted} no longer reads the wall clock, so this test is not \
+             looking at the right tree and would pass if the request path grew a \
+             `SystemTime::now()`"
+        );
+    }
+}
+
 /// Every `.rs` file under a directory, read into memory.
 fn rust_sources(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();

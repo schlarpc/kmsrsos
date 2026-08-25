@@ -149,6 +149,108 @@ pub(crate) fn interfaces() -> Result<Vec<Interface>, Failure> {
     Ok(found)
 }
 
+/// One address on one interface, as the guest agent reports it
+/// (`OS-022`, #338).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Address {
+    /// The interface it is on.
+    pub(crate) index: u32,
+    /// The address itself.
+    pub(crate) address: std::net::IpAddr,
+    /// Its prefix length.
+    pub(crate) prefix: u8,
+}
+
+/// Every address the kernel has, on every interface (`OS-022`, #338).
+///
+/// A dump rather than a query per interface: `RTM_GETADDR` returns the lot in
+/// one exchange, and the guest agent wants all of them anyway.
+///
+/// # Errors
+///
+/// Returns [`Failure`] if the dump could not be performed.
+pub(crate) fn addresses() -> Result<Vec<Address>, Failure> {
+    let mut socket = open()?;
+    let mut request = AddressMessage::default();
+    // Both families. `Unspec` is how netlink is asked for everything, and the
+    // agent reports IPv6 as readily as IPv4 — this host binds both
+    // (`NET-001`, #150).
+    request.header.family = AddressFamily::Unspec;
+
+    let mut found = Vec::new();
+    for reply in exchange(
+        &mut socket,
+        RouteNetlinkMessage::GetAddress(request),
+        NLM_F_REQUEST | NLM_F_DUMP,
+        "list addresses",
+    )? {
+        let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(message)) = reply else {
+            continue;
+        };
+        for attribute in &message.attributes {
+            // `Local` rather than `Address`: on a point-to-point link the
+            // second is the *peer's*, and reporting a peer's address as this
+            // machine's is how a hypervisor UI ends up showing the wrong one.
+            if let AddressAttribute::Local(address) = attribute {
+                found.push(Address {
+                    index: message.header.index,
+                    address: *address,
+                    prefix: message.header.prefix_len,
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Every interface, including loopback, for the guest agent (`OS-022`, #338).
+///
+/// [`interfaces`] filters to Ethernet and drops `lo`, because it is answering
+/// "where could a DHCP lease go". This one answers "what has this machine got",
+/// which is a different question and includes the answer `lo`.
+///
+/// # Errors
+///
+/// Returns [`Failure`] if the link dump could not be performed.
+pub(crate) fn all_interfaces() -> Result<Vec<Interface>, Failure> {
+    let mut socket = open()?;
+    let mut request = LinkMessage::default();
+    request.header.interface_family = AddressFamily::Unspec;
+
+    let mut found = Vec::new();
+    for reply in exchange(
+        &mut socket,
+        RouteNetlinkMessage::GetLink(request),
+        NLM_F_REQUEST | NLM_F_DUMP,
+        "list interfaces",
+    )? {
+        let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) = reply else {
+            continue;
+        };
+        let mut name = None;
+        let mut mac = None;
+        for attribute in &link.attributes {
+            match attribute {
+                LinkAttribute::IfName(text) => name = Some(text.clone()),
+                LinkAttribute::Address(bytes) => {
+                    mac = <[u8; 6]>::try_from(bytes.as_slice()).ok();
+                }
+                _ => {}
+            }
+        }
+        let Some(name) = name else { continue };
+        found.push(Interface {
+            name,
+            index: link.header.index,
+            // Loopback has no hardware address, and the agent reports an
+            // all-zero one for it exactly as `qemu-ga` does.
+            mac: mac.unwrap_or([0; 6]),
+        });
+    }
+    found.sort_by_key(|interface| interface.index);
+    Ok(found)
+}
+
 /// Which interface to take a lease on, and what to say about the choice.
 ///
 /// This host binds `0.0.0.0` and does not read its own address (`NET-001`,

@@ -412,8 +412,7 @@ every filesystem but ramfs, tmpfs, proc and sysfs.
 
 Present because something needs them: PCI and ACPI (the NIC is on a PCI bus), the 8250 UART **and** a
 framebuffer console, virtio-net plus `e1000`/`e1000e` for hypervisors that do not offer virtio,
-`seccomp`, and `kvmclock` — which is doing NTP's job until `OS-020` (#336) lands, and matters because
-this host validates client timestamps against a band.
+`seccomp`, and `kvmclock` — which keeps the clock close between the SNTP polls of `OS-020` (#336).
 
 ### Addressing (`OS-003`, #254; `OS-019`, #335)
 
@@ -469,13 +468,51 @@ The failure mode is worth knowing: this program is PID 1, the kernel refuses to 
 console rather than a silent restart — loud, which is the right direction, and the reason the budget
 is a compile-time assertion rather than a runtime check.
 
+### The clock (`OS-020`, #336)
+
+**Nothing in a KMS response derives from this host's clock.** The v6 key schedule derives from the
+*client's* timestamp, every deadline in the program is monotonic, and the wall clock is read exactly
+once at start-up. So the clock matters for the log, and for the ±4 hour skew band a future strict
+build would compare a client against — not for whether anything activates.
+
+That decides the two questions an operator would ask:
+
+- **Where the time comes from.** DHCP option 42 if the lease supplies it, because that is your own
+  infrastructure and on an isolated LAN the only thing reachable. Otherwise `pool.ntp.org`, resolved
+  through the lease's own DNS servers — there is no `/etc/resolv.conf` here to configure, and no
+  resolver that would read one. The pool hostname is a build-time constant like every other setting
+  (`CFG-001`, #166).
+- **What happens when nothing answers.** **The host serves anyway, with the clock it booted with**,
+  and says so once. Refusing to activate because an NTP server was unreachable would trade this
+  machine's entire function for a log field. On every platform in the matrix above the clock is
+  already close — kvmclock, the Hyper-V reference TSC, or a real RTC.
+
+It steps rather than slews, once every seventeen minutes, when the offset exceeds a second:
+
+```
+{"level":"info","event":"clock","detail":"stepped -3s from a stratum 2 server (round trip 4ms)."}
+```
+
+A correction larger than a day is logged at `warn` — that is a VM restored from a snapshot or a dead
+RTC battery, not drift.
+
+**A step cannot disturb anything in flight**, and not because this code is careful about it:
+`clock_settime` moves `CLOCK_REALTIME` and never `CLOCK_MONOTONIC`, and every deadline this program
+has is monotonic. `the_wall_clock_is_read_in_exactly_two_places` in
+`crates/kmsrs-server/tests/workspace_invariants.rs` is what keeps that true — it fails if the request
+path ever grows a `SystemTime::now()`.
+
+This is SNTP (RFC 4330), not NTP. No discipline loop, no peer selection: a `pool.ntp.org` answer is
+taken from the first server that gives a usable one, so a lying time server is believed. That is
+acceptable only because the DHCP server that named it already controls this host's address and
+routing and can do considerably worse — it is a property, not an oversight.
+
 ### What still needs doing
 
-The userland is one program, and several things a normal userland provides are not there yet:
+The userland is one program, and one thing a normal userland provides is not there yet:
 
 | | |
 |---|---|
-| Clock discipline (NTP) | `OS-020` (#336) — kvmclock only, today |
 | Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
 
 What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
