@@ -421,7 +421,7 @@ The userland is one program, and several things a normal userland provides are n
 **`qm shutdown` does nothing; use `qm stop`.** The button sends an ACPI event, which the kernel turns
 into an input event on `/dev/input/eventN` that `acpid` would normally consume. There is no userland
 here to consume it. Fixing that means adding the input subsystem to the kernel's allowlist as well as
-code, so it is `OS-025` (#343) rather than something done quietly.
+code, so it is `OS-026` (#343) rather than something done quietly.
 
 What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
 orphaned children. It reports what it mounted on the console at boot —
