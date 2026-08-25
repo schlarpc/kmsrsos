@@ -507,6 +507,45 @@ taken from the first server that gives a usable one, so a lying time server is b
 acceptable only because the DHCP server that named it already controls this host's address and
 routing and can do considerably worse — it is a property, not an oversight.
 
+### Telling the hypervisor about itself (`OS-022`, #338)
+
+**Memory** needs nothing: `virtio-balloon` reports statistics with no guest userland at all, and
+`CONFIG_VIRTIO_BALLOON` is in the kernel. Attach the device and the hypervisor sees them.
+
+**The address** needs an agent, and there is one. On Proxmox: **Hardware → Add → QEMU Agent**, or
+`qm set <id> --agent 1`. The console says whether it found the channel:
+
+```
+{"level":"info","event":"agent","detail":"answering on vport0p1"}
+```
+
+or, on a VM without it:
+
+```
+{"level":"info","event":"agent","detail":"no org.qemu.guest_agent.0 channel is attached
+ to this VM, so the hypervisor will show no address for it. On Proxmox: Hardware -> Add ->
+ QEMU Agent, or `qm set <id> --agent 1`"}
+```
+
+**Seven commands are implemented and everything else is refused**, which is the more interesting
+half of the surface. `qemu-ga` has about forty; most of them are things this program must not do:
+
+| Command | |
+|---|---|
+| `guest-ping`, `guest-sync`, `guest-sync-delimited` | liveness, and the handshake libvirt and Proxmox send before anything else |
+| `guest-info` | what a client asks before deciding which commands to offer |
+| `guest-network-get-interfaces` | the one that fills the IP column |
+| `guest-get-osinfo` | so the summary page says `kmsrsos` rather than `unknown`. Honest rather than flattering: claiming to be a distribution would invite a management tool to try running a package manager |
+| `guest-shutdown` | the same drain the ACPI power button reaches (`OS-026`, #343), not a second one |
+| **`guest-exec`, `guest-exec-status`** | **refused.** Remote code execution by design, over a channel with no authentication. There is no shell here to exec into, and `qm guest exec` failing should be a decision rather than an accident of packaging |
+| **`guest-file-*`** | **refused.** Disk I/O, which axiom A5 forbids and this kernel has no block layer for |
+| **`guest-fsfreeze-*`** | **refused.** Meaningless without a filesystem — and worth knowing before you schedule a backup that expects a quiesced guest |
+| **`guest-suspend-*`** | **refused.** `CONFIG_SUSPEND` is unset; a KMS host that suspends is a KMS host that is down |
+| everything else | **refused**, with `CommandNotFound` and a reason |
+
+Every refusal is a *reply*. A hypervisor that gets silence waits for a timeout and an operator reads
+that as a hung guest, so "not supported" is said rather than implied.
+
 ### What still needs doing
 
 The userland is one program, and one thing a normal userland provides is not there yet:

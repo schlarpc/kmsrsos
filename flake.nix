@@ -467,6 +467,9 @@
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$serial" \
               -monitor "unix:$monitor,server,nowait" \
+              -device virtio-serial-pci \
+              -chardev "socket,path=$PWD/$firmware.agent,server=on,wait=off,id=ga" \
+              -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \
               $fw \
               -drive file=${linux.iso},media=cdrom,readonly=on \
               ${proxmoxTopology} &
@@ -504,6 +507,36 @@
               grep -q '"event":"clock"' "$serial" && break
               sleep 1
             done
+
+            # `OS-022` (#338): the guest agent, spoken to over the channel a
+            # hypervisor would use. Not a unit test of the JSON — that is in
+            # `agent.rs` — but the whole path: virtio-serial attached, the port
+            # found by name in sysfs rather than by guessing `vport0p1`, the
+            # node opened, a request read and a reply written.
+            #
+            # `guest-network-get-interfaces` is the one that matters. It is what
+            # populates the IP column on a Proxmox summary page, and the whole
+            # reason #338 exists.
+            local agent="$PWD/$firmware.agent"
+            for attempt in $(seq 1 30); do
+              grep -q '"event":"agent"' "$serial" && break
+              sleep 1
+            done
+
+            # The `sleep` keeps stdin open, and that is not padding. With an
+            # immediate EOF socat shuts the socket down as soon as it has
+            # written, qemu reports the client gone, and the guest's reply is
+            # written to a channel with nobody on it. A guest agent client that
+            # hangs up before the answer is one that concludes there is no
+            # agent — which is what this looked like the first time.
+            ask() {
+              { printf '%s\n' "$1"; sleep 5; } \
+                | socat -T8 - "UNIX-CONNECT:$agent" 2>/dev/null || true
+            }
+            ask '{"execute":"guest-network-get-interfaces"}' > "$PWD/$firmware.ifaces"
+            ask '{"execute":"guest-exec","arguments":{"path":"/bin/sh"}}' > "$PWD/$firmware.exec"
+            cp "$PWD/$firmware.ifaces" $out/$firmware.ifaces 2>/dev/null || true
+            cp "$PWD/$firmware.exec" $out/$firmware.exec 2>/dev/null || true
 
             # `OS-026` (#343): the shutdown half. `system_powerdown` is exactly
             # what `qm shutdown` and the Proxmox web UI's Shutdown button send —
@@ -574,6 +607,35 @@
               echo "pid 1 found no framebuffer console on $f, so this check is \
           not exercising the two-console case OS-028 (#345) is about" >&2
               cat $out/$f.log >&2; exit 1; }
+
+            # `OS-022` (#338). The channel was found — by matching its name in
+            # sysfs, since there is no udev here to make
+            # /dev/virtio-ports/org.qemu.guest_agent.0.
+            grep -q '"event":"agent".*answering on vport' $out/$f.log || {
+              echo "the guest agent found no channel on $f, so a hypervisor \
+          would show no address for this VM (OS-022, #338)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
+            # And it answered the question Proxmox asks, with the address the
+            # DHCP client took.
+            grep -q '"hardware-address"' $out/$f.ifaces || {
+              echo "guest-network-get-interfaces was not answered on $f. That \
+          is the command that fills the IP column (OS-022, #338)" >&2
+              cat $out/$f.ifaces >&2 || true; exit 1; }
+            grep -q '"ip-address": "10.0.2.15"' $out/$f.ifaces || {
+              echo "the agent did not report the leased address on $f, so the \
+          hypervisor would show the wrong one or none (OS-022, #338)" >&2
+              cat $out/$f.ifaces >&2 || true; exit 1; }
+
+            # The refusals are the other half of the surface, and the one worth
+            # a check: `guest-exec` is remote code execution over a channel with
+            # no authentication, and its absence must be an answer rather than
+            # a silence a client waits out.
+            grep -q 'CommandNotFound' $out/$f.exec || {
+              echo "guest-exec was not refused with an error on $f. Silence is \
+          not a refusal — a client waits for a timeout and an operator reads \
+          that as a hung guest (OS-022, #338)" >&2
+              cat $out/$f.exec >&2 || true; exit 1; }
 
             # `OS-026` (#343). The guest stopping is asserted above, by qemu
             # having exited without being killed. These four lines are the

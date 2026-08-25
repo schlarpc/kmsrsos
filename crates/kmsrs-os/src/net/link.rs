@@ -156,7 +156,7 @@ pub(crate) struct Address {
     /// The interface it is on.
     pub(crate) index: u32,
     /// The address itself.
-    pub(crate) address: std::net::IpAddr,
+    pub(crate) ip: std::net::IpAddr,
     /// Its prefix length.
     pub(crate) prefix: u8,
 }
@@ -194,7 +194,7 @@ pub(crate) fn addresses() -> Result<Vec<Address>, Failure> {
             if let AddressAttribute::Local(address) = attribute {
                 found.push(Address {
                     index: message.header.index,
-                    address: *address,
+                    ip: *address,
                     prefix: message.header.prefix_len,
                 });
             }

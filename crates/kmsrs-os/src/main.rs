@@ -42,6 +42,7 @@
 //! that way: safe bindings, checked by `workspace_invariants.rs`, which fails
 //! if the word `unsafe` appears anywhere in this workspace.
 
+mod agent;
 mod console;
 mod net;
 mod power;
@@ -179,6 +180,19 @@ fn main() -> ExitCode {
              button is not being watched, so a hypervisor's shutdown request \
              will do nothing: {reason}\"}}"
         ),
+    });
+
+    // `OS-022` (#338): the channel a hypervisor asks this guest about itself
+    // on. Said either way — a VM created without the agent enabled is the
+    // ordinary case, and an operator wondering why the summary page shows no
+    // address should find the reason here rather than guessing.
+    println_stderr(&match agent::serve() {
+        Ok(node) => {
+            format!("{{\"level\":\"info\",\"event\":\"agent\",\"detail\":\"answering on {node}\"}}")
+        }
+        Err(reason) => {
+            format!("{{\"level\":\"info\",\"event\":\"agent\",\"detail\":\"{reason}\"}}")
+        }
     });
 
     // `OS-019` (#335) and `OS-020` (#336): the userland duties that need a timer
