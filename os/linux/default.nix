@@ -102,60 +102,165 @@ let
     allowImportFromDerivation = true;
   };
 
-  # UEFI reads only FAT, so the firmware path needs the image in an ESP.
+  # The UEFI bootloader (`OS-030`, #348).
   #
-  # Sized from the kernel plus a measured margin, not a round number. This used
-  # to be `bzImage / 1 MiB + 3`, which had two problems (`OS-029`, #347):
+  # # Why there is one at all, when there was none
   #
-  #   * **The 3 MiB was 85 times what FAT needs.** Measured by binary search on
-  #     the real kernel: the smallest image `mkfs.vfat` will take the file in is
-  #     3488 KiB against a 3457 KiB kernel, so the overhead is **31 KiB**.
-  #   * **The division truncated**, so the margin shrank as the kernel grew
-  #     towards the next megabyte. Harmless at +3 and a latent failure at +1,
-  #     which is where this is going.
+  # `CONFIG_EFI_STUB` makes the `bzImage` its own EFI executable, so until now
+  # the UEFI path had *no bootloader*: the ESP held the kernel as
+  # `\EFI\BOOT\BOOTX64.EFI` and firmware ran it directly. That is the cleanest
+  # thing this image ever did, and it cost a whole second copy of the kernel —
+  # UEFI reads only FAT and isolinux reads only ISO9660, so each firmware path
+  # needed the kernel in its own filesystem.
   #
-  # So: round the kernel up to a megabyte having first added 256 KiB, which is
-  # eight times the measured overhead and leaves the result monotonic in the
-  # kernel size. Today that is 4 MiB for a 3.38 MiB kernel, against 6 MiB before.
+  # `OS-023` (#339) declined to spend a bootloader on collapsing that, against a
+  # saving recorded as "~2.7 MB" which was arithmetic on a three-copy image.
+  # `OS-029` (#347) removed the third copy for free, and `OS-030` (#348)
+  # re-took the decision against the measured number. See `docs/decisions.md`.
   #
-  # The filesystem is **FAT12** either way — checked, because the obvious worry
-  # is that shrinking crosses a FAT12/16 boundary and changes what firmware will
-  # accept. It does not: `mkfs.vfat` picks FAT12 for everything up to 8 MiB, so
-  # 6 MiB was already FAT12 and this changes no compatibility variable. (The
-  # UEFI specification asks for FAT32 on a *fixed* system partition and FAT12 or
-  # FAT16 on removable media; this image has been FAT12 since `OS-017` (#333)
-  # and boots OVMF, but see #347 for the note that EC2's fixed-disk path is
-  # still unobserved.)
+  # # What makes this one acceptable
+  #
+  # The objection to GRUB was never its size — it was that GRUB is a program
+  # with a configuration language, a module loader and a filesystem stack, in an
+  # image whose contents are otherwise enumerable in a sentence. Every part of
+  # that is answered by *how* this is built rather than by accepting it:
+  #
+  #   * **`grub-mkimage`, not `grub-mkrescue` or `grub-install`.** The module
+  #     list below is the complete set of modules that exist in the artefact.
+  #     There is no `/boot/grub/x86_64-efi` directory in the ESP and no module
+  #     path to load from, so the module loader has nothing it *can* load. A
+  #     module that is not named here is not present.
+  #   * **The configuration is inside the image, not on the filesystem.** `-c`
+  #     embeds it in the PE file. There is no `grub.cfg` in the ESP to edit,
+  #     which is axiom A3 — the build decides — applied to the bootloader in the
+  #     same way `CONFIG_CMDLINE_OVERRIDE` applies it to the kernel command
+  #     line.
+  #   * **No `normal` module, so there is no menu and no scripting.** The
+  #     embedded config is executed by the rescue parser, which runs a list of
+  #     commands and has no `if`, no functions and no `menuentry`. The
+  #     "configuration language" objection is answered by not shipping the
+  #     interpreter for it.
+  #   * **No `configfile`, and no shell.** Nothing here can be talked into
+  #     reading a config from disk, and there is no interactive path: the last
+  #     command boots, and the one after it halts.
+  #
+  # So what is added is a fixed, auditable blob that runs four commands. That is
+  # a larger trusted computing base than "none", which is the honest cost, and
+  # it is a much smaller one than the word "GRUB" implies.
+  #
+  # # The modules, and why each is here
+  #
+  # | module | why |
+  # |---|---|
+  # | `part_gpt`, `part_msdos` | find the partitions on a raw-disk import (`OS-027`, #344); the image is both |
+  # | `iso9660` | read the one copy of the kernel, which is what this is all for |
+  # | `search`, `search_label` | find the ISO9660 volume by its label instead of guessing a device name |
+  # | `linux` | load a `bzImage` through the EFI handover protocol |
+  # | `halt` | stop, rather than fall through to a rescue prompt, if the search fails |
+  #
+  # Notably absent: `fat`. The ESP holds this file and nothing else, so nothing
+  # ever reads it — firmware loads `BOOTX64.EFI` itself, and everything after
+  # that is in ISO9660.
+  grubModules = [
+    "part_gpt"
+    "part_msdos"
+    "iso9660"
+    "search"
+    "search_label"
+    "linux"
+    "halt"
+  ];
+
+  # Four commands, and the last two are the failure path.
+  #
+  # `--set=root` rather than a hardcoded `(cd0)` or `(hd0)`: the same file boots
+  # as a CD-ROM and as a raw disk, and the device name differs between them.
+  # Searching by the volume label is the one form that is correct for both.
+  #
+  # No `APPEND` and no `initrd`, for the same reason isolinux has neither: both
+  # are inside the `bzImage`, and `CONFIG_CMDLINE_OVERRIDE` means a command line
+  # passed here would be ignored.
+  grubCfg = pkgs.writeText "kmsrsos-grub.cfg" ''
+    search --no-floppy --set=root --label KMSRSOS
+    linux /bzImage
+    boot
+    halt
+  '';
+
+  # An empty `--prefix` is deliberate and is the last part of the argument
+  # above. The prefix is where GRUB looks for modules and for a `grub.cfg` at
+  # run time; leaving it empty means there is nowhere for it to look, so the
+  # only modules that can ever be loaded are the ones linked in here and the
+  # only configuration is the one embedded by `--config`.
+  grub = pkgs.runCommand "kmsrsos-grubx64.efi"
+    { nativeBuildInputs = [ pkgs.grub2_efi ]; } ''
+    grub-mkimage \
+      --format=x86_64-efi \
+      --output=$out \
+      --config=${grubCfg} \
+      --prefix="" \
+      ${pkgs.lib.concatStringsSep " " grubModules}
+  '';
+
+  # UEFI reads only FAT, so the firmware path needs its loader in an ESP.
+  #
+  # Sized from the loader plus a measured margin, not a round number
+  # (`OS-029`, #347): round up to a megabyte having first added 256 KiB, which
+  # is eight times the 31 KiB `mkfs.vfat` was measured to need and leaves the
+  # result monotonic in the file size.
+  #
+  # Since `OS-030` (#348) what goes in is a ~1 MiB `grubx64.efi` rather than a
+  # 3.4 MiB kernel, so this is 2 MiB rather than 4 MiB — and the kernel is no
+  # longer in here at all.
+  #
+  # The filesystem is FAT12 either way, which is what the UEFI specification
+  # asks for on removable media and what this image has been since `OS-017`
+  # (#333). `mkfs.vfat` picks FAT12 for everything up to 8 MiB, so shrinking
+  # does not cross a boundary and changes no compatibility variable.
   esp = pkgs.runCommand "kmsrsos-linux-esp"
     { nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ]; } ''
-    bytes=$(stat -Lc %s ${kernel}/bzImage)
+    bytes=$(stat -Lc %s ${grub})
     sz=$(( (bytes + 262144 + 1048575) / 1048576 ))
     truncate -s "''${sz}M" esp.img
     mkfs.vfat -n ESP esp.img
     mmd -i esp.img ::/EFI ::/EFI/BOOT
-    mcopy -i esp.img ${kernel}/bzImage ::/EFI/BOOT/BOOTX64.EFI
+    mcopy -i esp.img ${grub} ::/EFI/BOOT/BOOTX64.EFI
     cp esp.img $out
   '';
 
-  # The bzImage appears **twice**, and that is now the floor without a
-  # bootloader (`OS-029`, #347):
+  # The bzImage appears **once** (`OS-030`, #348).
   #
-  #   1. `/bzImage` in ISO9660, which isolinux boots — BIOS, from a CD.
-  #   2. inside the appended FAT ESP, which serves *both* remaining firmware
-  #      paths: El Torito for UEFI-from-CD, and the GPT EFI System Partition
-  #      for UEFI-from-disk that `OS-027` (#344) needs.
+  # `/bzImage` in ISO9660 is the only copy, and all four boot combinations reach
+  # it there:
   #
-  # It used to appear three times. `-e efi.img` pointed El Torito at a copy of
-  # the ESP inside the ISO9660 tree while `-append_partition` appended a second,
-  # byte-identical copy for the GPT — six megabytes of the same kernel twice, in
-  # a 16.3 MB image. `-e --interval:appended_partition_2:all::` points El Torito
-  # at the appended partition instead, so the file in the tree is not needed at
-  # all. This is the recipe Debian and Arch build with.
+  #   | | BIOS | UEFI |
+  #   |---|---|---|
+  #   | **CD-ROM** | isolinux, El Torito no-emul | `grubx64.efi`, El Torito pointed at the appended ESP |
+  #   | **raw disk** | isolinux via the isohybrid MBR | `grubx64.efi` from the GPT EFI System Partition |
   #
-  # 1 and 2 cannot be collapsed without a bootloader that reads ISO9660: the two
-  # firmware paths read different filesystems and neither reads the other's.
-  # `OS-023` (#339) declined to spend a GRUB on that, and #348 re-examines the
-  # decision against the corrected numbers. See `docs/decisions.md`.
+  # Both bootloaders read ISO9660, so neither needs its own copy. The ESP now
+  # holds a ~1 MiB loader instead of a 3.4 MiB kernel, which is where the saving
+  # comes from — not from removing a partition, since `OS-027` (#344) needs the
+  # ESP to exist for the raw-disk import either way.
+  #
+  # The count has gone 3 → 2 → 1 across three issues, and each step was a
+  # different mistake or trade:
+  #
+  #   * **Three** was a bug. `-e efi.img` pointed El Torito at a copy of the ESP
+  #     inside the ISO9660 tree while `-append_partition` appended a second,
+  #     byte-identical copy for the GPT — the same kernel twice over, 10.6 MB of
+  #     a 16.3 MB image. `OS-029` (#347) fixed it with
+  #     `-e --interval:appended_partition_2:all::`, which is the recipe Debian
+  #     and Arch build with, and cost nothing.
+  #   * **Two** was the floor without a bootloader that reads ISO9660, because
+  #     UEFI reads only FAT and isolinux reads only ISO9660.
+  #   * **One** is what `OS-030` (#348) bought, by putting a deliberately
+  #     minimal GRUB in the ESP. See the `grub` derivation above for what makes
+  #     it minimal, and `docs/decisions.md` for the argument.
+  #
+  # `linux-iso-layout` counts the copies in the bytes rather than reading them
+  # off this recipe, which is the only form of the claim that cannot drift —
+  # the comment here said "twice" for the whole time it was three.
   iso = pkgs.runCommand "kmsrsos-linux.iso"
     { nativeBuildInputs = [ pkgs.xorriso pkgs.syslinux ]; } ''
     mkdir -p iso/isolinux
@@ -176,8 +281,8 @@ let
     sed -i 's/^ *//' iso/isolinux/isolinux.cfg
 
     # No `cp ${esp} iso/efi.img`: the ESP is *appended* below and El Torito is
-    # pointed at the appended partition, so a copy in the tree would be six
-    # megabytes nothing reads (`OS-029`, #347).
+    # pointed at the appended partition, so a copy in the tree would be a
+    # megabyte nothing reads (`OS-029`, #347).
 
     # `-isohybrid-mbr` and `-appended_part_as_gpt` are `OS-027` (#344), and
     # they fix something that was silently doing nothing.
@@ -221,4 +326,4 @@ let
       -o $out iso/
   '';
 in
-{ inherit kernel esp iso configfile; }
+{ inherit kernel esp iso configfile grub; }

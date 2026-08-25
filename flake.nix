@@ -827,18 +827,26 @@
             cat $out/no-nic.log >&2; exit 1; }
         '';
 
-      # `OS-029` (#347): the kernel appears exactly twice in the ISO, and the
+      # `OS-030` (#348): the kernel appears exactly **once** in the ISO, and the
       # image boots as a raw disk on both firmwares.
       #
-      # Counted in the bytes, not read off the recipe. It was three for two
-      # issues — `-e efi.img` pointed El Torito at a copy of the ESP inside the
-      # ISO9660 tree while `-append_partition` appended a byte-identical second
-      # copy for the GPT — and the comment in `default.nix` said "twice" the
-      # whole time. A count is the only form of this claim that cannot drift.
+      # Counted in the bytes, not read off the recipe. The count was three for
+      # two issues while `default.nix` said "twice" the whole time, which is
+      # exactly why it is asserted here: a count is the only form of this claim
+      # that cannot drift.
       #
-      # Two is the floor without a bootloader that reads ISO9660: isolinux reads
-      # ISO9660, UEFI reads only FAT, and neither reads the other's. #348 is
-      # where spending a GRUB to reach one gets re-argued.
+      # The history, because the assertion is meaningless without it:
+      #
+      #   * **three** was a bug — El Torito read a copy of the ESP from the
+      #     ISO9660 tree while `-append_partition` appended another
+      #     (`OS-029`, #347)
+      #   * **two** was the floor without a bootloader that reads ISO9660,
+      #     since UEFI reads only FAT and isolinux reads only ISO9660
+      #   * **one** is what a deliberately minimal GRUB in the ESP bought
+      #     (`OS-030`, #348)
+      #
+      # A regression to two means a firmware path has grown its own copy back;
+      # zero means one of them has lost its kernel entirely.
       isoLayoutCheckFor = system:
         let
           pkgs = pkgsFor system;
@@ -868,18 +876,18 @@
           print(f"bzImage  {len(kernel)} bytes")
           print(f"copies   {len(hits)} at {[hex(h) for h in hits]}")
 
-          assert len(hits) == 2, (
+          assert len(hits) == 1, (
               f"the kernel appears {len(hits)} times in the ISO and should appear "
-              "twice: once in ISO9660 for isolinux, once in the appended FAT ESP "
-              "for both UEFI paths. Three means El Torito is reading a copy of "
-              "the ESP from the ISO tree instead of the appended partition "
-              "(OS-029, #347); one means a firmware path lost its kernel"
+              "once, in ISO9660, read there by isolinux for BIOS and by GRUB for "
+              "UEFI (OS-030, #348). More than one means a firmware path has grown "
+              "its own copy back — which is what the ESP held before GRUB went "
+              "into it; zero means a path has lost its kernel entirely"
           )
 
-          # And the ISO must not have quietly grown back. 12 MB is generous
-          # against the 8.3 MB it is, and tight enough to notice a third copy
-          # of anything.
-          assert len(iso) < 12_000_000, f"the ISO is {len(iso)} bytes"
+          # And the ISO must not have quietly grown back. 7 MB is generous
+          # against the 5.3 MB it is, and tight enough that a second copy of a
+          # 3.4 MB kernel cannot hide under it.
+          assert len(iso) < 7_000_000, f"the ISO is {len(iso)} bytes"
           PYTHON
 
           # And the layout is not just counted, it is booted — **as a raw
@@ -1346,7 +1354,7 @@
           # which must say so rather than reporting `listening` and going quiet.
           linux-nics = nicBootCheckFor system;
 
-          # `OS-029` (#347): the kernel is in the ISO exactly twice, counted,
+          # `OS-030` (#348): the kernel is in the ISO exactly once, counted,
           # and it boots as a raw disk on both firmwares.
           linux-iso-layout = isoLayoutCheckFor system;
         });
