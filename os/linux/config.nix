@@ -63,13 +63,24 @@ let
     "DRM_FBDEV_EMULATION" "FB_CORE" "FRAMEBUFFER_CONSOLE"
 
     # --- net ---
-    # PACKET is for the DHCP client of `OS-019` (#335), which needs raw sockets.
+    # `IP_PNP` and `IP_PNP_DHCP` are gone as of `OS-019` (#335). The kernel's
+    # built-in client took a lease and never renewed it, and it discarded
+    # options 15, 42 and 119 — which are the ones this host most needs, since
+    # they are the domain the SRV record goes in (`DISC-007`, #149) and the time
+    # servers `OS-020` (#336) prefers. `kmsrs-os` speaks DHCP itself now, so
+    # there is one implementation rather than two that can disagree.
+    #
+    # PACKET stays: a DHCP client that has no address yet is the classic user of
+    # a packet socket. This one does not need it — every message it sends before
+    # it is bound sets the broadcast flag, so an ordinary UDP socket on
+    # 0.0.0.0:68 receives the reply — but `OS-023` (#339) is where removing it
+    # gets argued and measured, not here.
+    #
     # E1000 is one driver for very broad reach: every hypervisor can emulate an
     # Intel NIC, so it is the difference between "boots on Proxmox" and "boots
     # wherever someone tries it". hv_netvsc is deliberately absent — it drags in
     # the whole VMBus stack, which is not a driver-sized cost.
     "NET" "INET" "IPV6" "PACKET" "UNIX" "SYSVIPC"
-    "IP_PNP" "IP_PNP_DHCP"
     "NETDEVICES" "ETHERNET" "NET_CORE"
     "VIRTIO_NET" "NET_VENDOR_INTEL" "E1000" "E1000E"
 
@@ -135,6 +146,11 @@ let
     "SCSI" "ATA" "NVME_CORE" "MD" "BLK_DEV"
     "EXT4_FS" "OVERLAY_FS" "FUSE_FS" "ISO9660_FS" "VFAT_FS" "NFS_FS"
     "9P_FS" "VIRTIO_FS" "VIRTIO_BLK" "DEBUG_KERNEL"
+    # `OS-019` (#335). Asserted rather than merely omitted: `olddefconfig`
+    # answers `y` to IP_PNP as a dependency of things that have nothing to do
+    # with it, and two DHCP clients in one machine is exactly the disagreement
+    # this issue removed.
+    "IP_PNP" "IP_PNP_DHCP" "IP_PNP_BOOTP" "IP_PNP_RARP"
   ];
 in
 pkgs.runCommand "kmsrsos-kernel-config"

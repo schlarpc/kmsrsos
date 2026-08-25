@@ -90,6 +90,10 @@ pub struct Snapshot<'a> {
     pub entropy_healthy: bool,
     /// The ports the KMS listener is bound to.
     pub kms_ports: &'a [u16],
+    /// What pid 1 learned from the DHCP lease (`OS-019`, #335). Empty
+    /// everywhere but bare metal, and the pages render the same as they always
+    /// did when it is.
+    pub network: &'a crate::facts::Network,
     /// The host identity this process drew.
     pub identity: &'a kmsrs_policy::identity::HostIdentity,
     /// The event log.
@@ -448,6 +452,11 @@ fn describe_outcome(outcome: &kmsrs_policy::events::Outcome) -> String {
 /// The audit's MM22: neither implementation tells an operator what to do, and
 /// the answer is always a manual `slmgr /skms` or a hand-made DNS record. The
 /// least this host can do is say so, with its own ports filled in.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one page of prose in one function; splitting it would put the \
+              text further from the reasoning that decides what it says"
+)]
 fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
     let port = snapshot.kms_ports.first().copied().unwrap_or(KMS_PORT);
     // The address the operator's own browser reached this server on. Escaped
@@ -455,6 +464,19 @@ fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
     // `plausible_host` has already reduced it to a hostname or an IP literal.
     let address = host.map_or_else(|| String::from(HOST_PLACEHOLDER), escape);
     let loopback = is_loopback_text(&address);
+
+    // `DISC-007` (#149), delivered by `OS-019` (#335). The SRV record has to go
+    // in the zone the clients *search*, and until pid 1 owned the DHCP client
+    // this page could not know which that was — the kernel's `ip=dhcp` reads
+    // neither option 15 nor option 119. When the lease says, the commands below
+    // are ones an operator can paste; when it does not, they are the same
+    // placeholder they always were.
+    let zone = snapshot
+        .network
+        .search_domains
+        .first()
+        .map_or_else(|| String::from(ZONE_PLACEHOLDER), |domain| escape(domain));
+    let zone_is_known = !snapshot.network.search_domains.is_empty();
 
     let mut body = String::new();
 
@@ -477,7 +499,48 @@ fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
              switch. The commands below will work once <code>{HOST_PLACEHOLDER}</code> \
              is one of those.</p>"
         );
+        // On bare metal the lease knows the answer, so the page says it rather
+        // than listing the places it might be (`OS-019`, #335).
+        if let Some(leased) = snapshot.network.address {
+            let _: core::fmt::Result = write!(
+                body,
+                "<p>This machine's DHCP lease says its address is \
+                 <code>{leased}</code>. That is very likely the one you want.</p>"
+            );
+        }
     }
+
+    // Either "substitute this" or "this came from your lease", never both, and
+    // never a bare placeholder presented as if it were an answer.
+    let substitute = if zone_is_known {
+        let extra = snapshot.network.search_domains.get(1..).unwrap_or_default();
+        let mut note = format!(
+            "<p>The zone above is <code>{zone}</code> because that is what \
+             this machine's DHCP lease says the clients on this network \
+             search. Change it if the clients you mean to activate search \
+             something else.</p>"
+        );
+        if !extra.is_empty() {
+            let rest = extra
+                .iter()
+                .map(|domain| format!("<code>{}</code>", escape(domain)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _: core::fmt::Result = write!(
+                note,
+                "<p>The lease lists further search domains: {rest}. A client \
+                 tries each in turn, so publishing the record in any one of \
+                 them works — the first is simply the one it tries first.</p>"
+            );
+        }
+        note
+    } else {
+        format!(
+            "<p>Replace <code>{ZONE_PLACEHOLDER}</code> with the domain the \
+             clients search — their primary DNS suffix, which in a domain is \
+             the domain itself.</p>"
+        )
+    };
 
     let _: core::fmt::Result = write!(
         body,
@@ -506,22 +569,20 @@ fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
          \
          <h3>nsupdate</h3>\
          <pre><code>nsupdate &lt;&lt;'EOF'\n\
-         update add _vlmcs._tcp.EXAMPLE.COM. 3600 SRV 0 0 {port} {address}.\n\
+         update add _vlmcs._tcp.{zone}. 3600 SRV 0 0 {port} {address}.\n\
          send\n\
          EOF</code></pre>\
          \
          <h3>Windows DNS, in an Active Directory domain</h3>\
-         <pre><code>dnscmd . /RecordAdd EXAMPLE.COM _vlmcs._tcp SRV 0 0 {port} {address}</code></pre>\
+         <pre><code>dnscmd . /RecordAdd {zone} _vlmcs._tcp SRV 0 0 {port} {address}</code></pre>\
          <p>or the PowerShell equivalent:</p>\
-         <pre><code>Add-DnsServerResourceRecord -ZoneName EXAMPLE.COM ``\n\
+         <pre><code>Add-DnsServerResourceRecord -ZoneName {zone} ``\n\
          &nbsp; -Name _vlmcs._tcp -Srv -Priority 0 -Weight 0 ``\n\
          &nbsp; -Port {port} -DomainName {address}</code></pre>\
-         <p>Replace <code>EXAMPLE.COM</code> with the domain the clients \
-         search — their primary DNS suffix, which in a domain is the domain \
-         itself.</p>\
+         {substitute}\
          \
          <h2>Checking it</h2>\
-         <pre><code>nslookup -type=srv _vlmcs._tcp.EXAMPLE.COM\nslmgr /dlv</code></pre>\
+         <pre><code>nslookup -type=srv _vlmcs._tcp.{zone}\nslmgr /dlv</code></pre>\
          <p><code>/dlv</code> prints the host it used and the activation \
          interval, which is the quickest way to tell &lsquo;the client never \
          found a host&rsquo; from &lsquo;the client found one and did not like \
@@ -537,6 +598,15 @@ fn instructions_page(snapshot: &Snapshot<'_>, host: Option<&str>) -> String {
 /// know which one its clients route to, and on Hermit `bind()` does not record
 /// an address at all (`OS-009`, #260), so there is nothing honest to print.
 const HOST_PLACEHOLDER: &str = "KMS-HOST";
+
+/// What the instructions call the zone when the lease has not said.
+///
+/// The two hosted builds never learn it, and on bare metal a machine that has
+/// not got a lease yet has not either. A placeholder that is obviously one is
+/// better than a guess: `DISC-007` (#149) is about telling an operator where to
+/// put the record, and a plausible-looking wrong zone is worse than an
+/// obviously blank one.
+const ZONE_PLACEHOLDER: &str = "EXAMPLE.COM";
 
 /// Whether an address is one Windows clients refuse to activate against
 /// (`NET-014`, #163).
@@ -721,6 +791,9 @@ mod tests {
     struct Fixture {
         identity: HostIdentity,
         events: EventLog,
+        /// What pid 1 published (`OS-019`, #335). Empty unless a test says
+        /// otherwise, which is the state every hosted build is always in.
+        network: crate::facts::Network,
     }
 
     impl Fixture {
@@ -733,6 +806,7 @@ mod tests {
                 )
                 .unwrap(),
                 events: EventLog::new(4096, core::time::Duration::from_hours(24)),
+                network: crate::facts::Network::default(),
             }
         }
 
@@ -741,6 +815,7 @@ mod tests {
                 listening: true,
                 entropy_healthy: true,
                 kms_ports: &[1688],
+                network: &self.network,
                 identity: &self.identity,
                 events: &self.events,
             }
@@ -782,6 +857,80 @@ mod tests {
     /// on, which is the only address this host can honestly claim its clients
     /// can route to — a machine with three interfaces does not know which, and
     /// on Hermit `bind()` records no address at all.
+    /// `DISC-007` (#149), which could not be finished until `OS-019` (#335):
+    /// when pid 1's DHCP lease says what domain the clients search, every DNS
+    /// form on the page names *that* zone rather than a placeholder an operator
+    /// has to substitute in four places.
+    #[test]
+    fn the_instructions_name_the_zone_the_lease_supplied() {
+        let mut fixture = Fixture::new();
+        fixture.network = crate::facts::Network {
+            search_domains: vec!["corp.example.net".to_owned(), "example.net".to_owned()],
+            address: Some(std::net::Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        let body = render(&fixture, "/instructions", "kms.example.net");
+
+        assert!(
+            !body.contains("EXAMPLE.COM"),
+            "the placeholder survived even though the lease said otherwise:\n{body}"
+        );
+        for form in [
+            "_vlmcs._tcp.corp.example.net. 3600 SRV",
+            "/RecordAdd corp.example.net _vlmcs._tcp",
+            "-ZoneName corp.example.net",
+            "nslookup -type=srv _vlmcs._tcp.corp.example.net",
+        ] {
+            assert!(body.contains(form), "{form} is missing:\n{body}");
+        }
+        assert!(
+            body.contains("DHCP lease"),
+            "the page should say where the zone came from:\n{body}"
+        );
+        // The rest of the search list is offered, because a client tries each
+        // in turn and any of them would work.
+        assert!(
+            body.contains("<code>example.net</code>"),
+            "the other search domains are worth naming:\n{body}"
+        );
+    }
+
+    /// And with no lease — every hosted build, forever — the page is exactly
+    /// what it was before `OS-019` (#335): a placeholder and an instruction to
+    /// replace it.
+    #[test]
+    fn the_instructions_keep_the_placeholder_when_no_lease_said_otherwise() {
+        let fixture = Fixture::new();
+        let body = render(&fixture, "/instructions", "kms.example.net");
+
+        assert!(body.contains("_vlmcs._tcp.EXAMPLE.COM."));
+        assert!(
+            body.contains("Replace <code>EXAMPLE.COM</code>"),
+            "an operator has to be told to substitute it:\n{body}"
+        );
+        assert!(
+            !body.contains("DHCP lease"),
+            "nothing was learned, so nothing should be claimed:\n{body}"
+        );
+    }
+
+    /// The loopback warning names this machine's own address when the lease
+    /// supplied one, instead of listing the places it might be found.
+    #[test]
+    fn the_loopback_warning_names_the_leased_address_when_it_is_known() {
+        let mut fixture = Fixture::new();
+        fixture.network = crate::facts::Network {
+            search_domains: Vec::new(),
+            address: Some(std::net::Ipv4Addr::new(10, 0, 0, 5)),
+        };
+        let body = render(&fixture, "/instructions", "127.0.0.1:8080");
+
+        assert!(body.contains("reached over loopback"));
+        assert!(
+            body.contains("<code>10.0.0.5</code>"),
+            "the lease knows the answer, so the page should say it:\n{body}"
+        );
+    }
+
     #[test]
     fn the_instructions_render_every_dns_form_with_live_values() {
         let fixture = Fixture::new();

@@ -38,6 +38,21 @@ use kmsrs_proto::entropy::{Entropy, EntropyUnavailable};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsEntropy;
 
+/// Four bytes of entropy, for a caller that has no reason to hold an
+/// [`Entropy`] (`OS-019`, #335).
+///
+/// The DHCP client's transaction ID and retransmission jitter. Deliberately
+/// *not* fallible in the way [`OsEntropy::self_test`] is: a predictable xid is
+/// a client two machines might collide on, not a predictable server identity,
+/// so `None` here is a reason for the caller to fall back rather than a reason
+/// to refuse to serve (`OS-012`, #263 is about the other case).
+#[must_use]
+pub fn random_u32() -> Option<u32> {
+    let mut bytes = [0_u8; 4];
+    OsEntropy.fill(&mut bytes).ok()?;
+    Some(u32::from_ne_bytes(bytes))
+}
+
 impl Entropy for OsEntropy {
     fn fill(&mut self, destination: &mut [u8]) -> Result<(), EntropyUnavailable> {
         getrandom::fill(destination).map_err(|_| EntropyUnavailable)

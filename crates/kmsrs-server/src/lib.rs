@@ -27,6 +27,7 @@ pub mod budget;
 pub mod config;
 pub mod entropy;
 pub mod entry;
+pub mod facts;
 pub mod host;
 pub mod log;
 pub mod net;
@@ -36,6 +37,7 @@ pub mod web;
 
 pub use config::{BuildStamp, Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
+pub use facts::{Facts, Network};
 pub use host::{Host, RequestContext};
 pub use log::{Logger, Severity};
 pub use server::{Handled, Server};

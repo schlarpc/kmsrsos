@@ -43,6 +43,7 @@
 //! if the word `unsafe` appears anywhere in this workspace.
 
 mod console;
+mod net;
 mod power;
 
 use rustix::fs::Mode;
@@ -180,7 +181,15 @@ fn main() -> ExitCode {
         ),
     });
 
-    let outcome = kmsrs_server::entry::serve();
+    // `OS-019` (#335) and `OS-020` (#336): the userland duties that need a timer
+    // and a socket. They run on the one runtime `serve_with` builds, rather than
+    // on a second one this crate would otherwise have to make (`OS-024`, #340),
+    // and they start after the listeners are bound — this host binds 0.0.0.0 and
+    // reads its own address for nothing, so waiting for a lease before serving
+    // would turn a DHCP outage into a KMS outage.
+    let outcome = kmsrs_server::entry::serve_with(|facts| {
+        net::client::spawn(facts, dhcp_seed());
+    });
 
     // `OS-026` (#343): the drain has finished, so stop the machine rather than
     // returning. Pid 1 returning is `Attempted to kill init!` — the machine
@@ -194,6 +203,28 @@ fn main() -> ExitCode {
         ));
     }
     outcome
+}
+
+/// A transaction ID and jitter seed for the DHCP client (`OS-019`, #335).
+///
+/// Axiom A7 keeps [`net::lease`] free of generators, so the entropy is drawn
+/// here and passed in. It comes from the same source as everything else that
+/// must be unpredictable — and unlike the identity material this is not
+/// security-sensitive, so a failure to seed is not a reason to refuse to serve
+/// (`OS-012`, #263 is about the other case). Falling back to a constant would
+/// put two machines booted from one image in lockstep, so the fallback is the
+/// address of a heap allocation, which at least differs per boot.
+fn dhcp_seed() -> u32 {
+    kmsrs_server::entropy::random_u32().unwrap_or_else(|| {
+        // Not reachable in practice — `serve` refuses to start at all if the
+        // entropy self-test fails (`OS-012`, #263) — and a constant here would
+        // put every machine booted from this image in retransmission lockstep,
+        // so the fallback is at least per-boot: the address of a fresh heap
+        // allocation, which ASLR makes differ.
+        let marker = Box::new(0_u8);
+        let address = std::ptr::from_ref::<u8>(&*marker).addr();
+        u32::try_from(address & 0xFFFF_FFFF).unwrap_or(1)
+    })
 }
 
 /// One line to stderr, which on this target is `/dev/console`.

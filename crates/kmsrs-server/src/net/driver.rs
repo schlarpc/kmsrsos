@@ -256,6 +256,8 @@ pub struct Driver {
     listeners: Vec<(std::net::TcpListener, Role, u16)>,
     /// The ports the KMS listeners are on, for the web UI to report.
     kms_ports: Arc<Vec<u16>>,
+    /// The slot pid 1 publishes lease facts into (`OS-019`, #335).
+    facts: crate::facts::Facts,
     permits: Arc<Semaphore>,
     web_permits: Arc<Semaphore>,
     in_flight: Arc<AtomicUsize>,
@@ -334,6 +336,7 @@ impl Driver {
             })),
             listeners: adopted,
             kms_ports: Arc::new(kms_ports),
+            facts: crate::facts::Facts::new(),
             permits: Arc::new(Semaphore::new(limit)),
             web_permits: Arc::new(Semaphore::new(Self::web_limit(limit))),
             in_flight: Arc::new(AtomicUsize::new(0)),
@@ -398,6 +401,15 @@ impl Driver {
         self.in_flight.load(Ordering::Acquire)
     }
 
+    /// The slot pid 1 publishes lease facts into (`OS-019`, #335).
+    ///
+    /// Handed out rather than passed in: on the two hosted targets nothing ever
+    /// writes it, and a parameter would make every caller state that.
+    #[must_use]
+    pub fn facts(&self) -> crate::facts::Facts {
+        self.facts.clone()
+    }
+
     /// Serve until [`ShutdownHandle::request`] is called and every in-flight
     /// connection has finished.
     ///
@@ -414,6 +426,7 @@ impl Driver {
             let ctx = Context {
                 shared: Arc::clone(&self.shared),
                 kms_ports: Arc::clone(&self.kms_ports),
+                facts: self.facts.clone(),
                 permits: Arc::clone(&self.permits),
                 web_permits: Arc::clone(&self.web_permits),
                 in_flight: Arc::clone(&self.in_flight),
@@ -471,6 +484,9 @@ impl Driver {
 struct Context {
     shared: Arc<Mutex<Shared>>,
     kms_ports: Arc<Vec<u16>>,
+    /// What pid 1 has learned about this machine's network (`OS-019`, #335).
+    /// Empty on every target but bare metal.
+    facts: crate::facts::Facts,
     permits: Arc<Semaphore>,
     web_permits: Arc<Semaphore>,
     in_flight: Arc<AtomicUsize>,
@@ -753,10 +769,14 @@ fn serve_web(
     }
     inbound.extend_from_slice(input);
 
+    // Read once per request rather than per page: it is a lock, and two
+    // sections of one page must not disagree about what the domain is.
+    let network = ctx.facts.read();
     let snapshot = crate::web::routes::Snapshot {
         listening: !ctx.kms_ports.is_empty(),
         entropy_healthy: shared.entropy_healthy,
         kms_ports: &ctx.kms_ports,
+        network: &network,
         identity: shared.server.host().identity(),
         events: shared.server.host().events(),
     };

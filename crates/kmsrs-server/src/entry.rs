@@ -13,6 +13,7 @@
 //! that cannot change a byte on the wire (`CFG-002`, #167).
 
 use crate::config::{Compiled, Discovered, Operational};
+use crate::facts::Facts;
 use crate::log::{Logger, Severity};
 use crate::net::driver::{Driver, MAX_CONNECTIONS, Role, ShutdownHandle};
 use crate::net::listener::bind_all;
@@ -43,6 +44,35 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 /// "what the program does at start-up" has one definition (`OS-001`, #252).
 #[must_use]
 pub fn serve() -> ExitCode {
+    serve_with(|_| {})
+}
+
+/// The same, with work process 1 wants running alongside (`OS-019`, #335).
+///
+/// # One runtime, and this is how it stays one
+///
+/// On the bare-metal target the userland is this process, so DHCP renewal,
+/// SNTP polling and the guest-agent channel have nowhere else to live. Each of
+/// them is a timer and a socket, and `ARCH-005` (#5) as superseded by `OS-024`
+/// (#340) says there is one scheduler deciding when work runs — so they run as
+/// tasks on the runtime this function builds, not on a second one `kmsrs-os`
+/// builds for itself.
+///
+/// `housekeeping` is called **inside** `block_on`, after the listeners are bound
+/// and before the driver accepts, so it may [`tokio::spawn`] freely. It is
+/// handed a [`Facts`] slot to publish what it learns into; the web UI reads the
+/// same slot. On Linux and Windows nothing calls this and the slot stays empty,
+/// which is what every page already renders.
+///
+/// Binding does not wait for it. This host binds `0.0.0.0` and reads its own
+/// address for nothing (`NET-001`, #150), so there is no ordering requirement
+/// between having an address and being able to serve — and making one would
+/// mean a DHCP server outage was a KMS outage.
+#[must_use]
+pub fn serve_with<F>(housekeeping: F) -> ExitCode
+where
+    F: FnOnce(Facts) + Send + 'static,
+{
     // `CFG-007` (#172): this binary takes no arguments. Silently ignoring them
     // is worse than refusing — an operator who typed something expects it to
     // have had an effect. vlmcsd documents `-h` and `-?` that are not in its
@@ -73,14 +103,17 @@ pub fn serve() -> ExitCode {
         }
     };
 
-    match run(operational) {
+    match run(operational, housekeeping) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
     }
 }
 
 /// Start up and serve until asked to stop.
-fn run(operational: Operational) -> Result<(), u8> {
+fn run<F>(operational: Operational, housekeeping: F) -> Result<(), u8>
+where
+    F: FnOnce(Facts) + Send + 'static,
+{
     let discovered = Discovered::observe();
     let compiled = Compiled::BUILD;
 
@@ -231,6 +264,10 @@ fn run(operational: Operational) -> Result<(), u8> {
         let shutdown = driver.shutdown_handle();
 
         arrange_to_stop_politely(logger, &shutdown);
+
+        // Inside `block_on` and before `run`, so anything it spawns is on this
+        // runtime and starts before the first connection (`OS-019`, #335).
+        housekeeping(driver.facts());
 
         driver.run().await.map_err(|error| {
             logger.message(Severity::Error, "serve", &error.to_string());

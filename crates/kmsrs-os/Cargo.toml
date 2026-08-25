@@ -19,5 +19,18 @@ kmsrs-server.workspace = true
 # reason that stayed true when the duties became `mount(2)` and `waitpid(2)`.
 rustix.workspace = true
 
+# `OS-019` (#335) and `OS-020` (#336): the DHCP client, what applies its lease
+# to the interface, and the resolver the NTP pool fallback needs. Every one is
+# in the workspace dependency table with the argument for it; none of them is
+# reachable from `kmsrsos` or `kmsrs-client`, because nothing there names this
+# crate.
+dhcproto.workspace = true
+hickory-resolver.workspace = true
+netlink-packet-core.workspace = true
+netlink-packet-route.workspace = true
+netlink-sys.workspace = true
+socket2.workspace = true
+tokio.workspace = true
+
 [lints]
 workspace = true

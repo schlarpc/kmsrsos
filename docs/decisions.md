@@ -64,13 +64,59 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 29 | Upstream proxy / chaining | Declined → [D12](#d12) |
 | 30 | Build-time identity harvesting | Out of scope → [D13](#d13) |
 | 31 | C library API | Declined → [D8](#d8) |
-| 32 | Bare-metal addressing | DHCPv4. Kernel `ip=dhcp` today, a real client with lease renewal in #335 (#254) |
+| 32 | Bare-metal addressing | DHCPv4, spoken by `kmsrs-os` itself. `CONFIG_IP_PNP_DHCP` removed, so one implementation rather than two, [see below](#the-bare-metal-target-speaks-dhcp-and-dns-itself-os-019-335-os-020-336) (#254, #335) |
 | 33 | ePID day-of-year / LCID / channel | 1-based / unpadded / always `03` (#109–#111) |
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
 | 37 | ~~Hermit build~~ | Removed with the target (#334). Kept in history because `PKG-013`/`PKG-014` (#250, #251) are cited in commits |
 | 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
+
+### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
+
+The kernel's `ip=dhcp` was a stopgap for one stated reason — it takes a lease and never renews it —
+and for a second that turned out to matter more: **it discards every option this host actually
+wants.** Option 15 and option 119 are the domain the clients search, which is the zone an SRV record
+has to go in and which `/instructions` had no way to know (`DISC-007`, #149). Option 42 is the time
+source `OS-020` prefers over anything on the internet.
+
+So `kmsrs-os` owns the client, `CONFIG_IP_PNP_DHCP` is gone, and there is one implementation rather
+than two that can disagree.
+
+**The crate choices changed during the work, and the reason is worth recording.** `OS-019` nominated
+`dhcproto` — correctly: it is a sans-io parser and encoder, actively maintained, and nothing else in
+the field is both. What the issue did not check is that it depends on `hickory-proto`
+**unconditionally**, for the DNS name type option 119 is made of. That is a complete DNS protocol
+implementation, and `url`, `idna` and the ICU data crates arrive with it: about forty crates for a
+236-byte header and a TLV list, in the boot path of a machine whose TCB claim is a checked-in
+config a reviewer can read. One of them is `tracing`, which `deny.toml` bans.
+
+That very nearly settled it against `dhcproto`. What reversed it was noticing that **`OS-020` needs
+a resolver anyway**. Its pool fallback is a *hostname*, this machine has no `/etc/resolv.conf` for a
+libc resolver to read (axiom A5), and nothing in the tree resolved a name before this. So the choice
+was never "a DNS library or not" — it was "one, or two implementations of half of one". The library
+is paid for once and both issues spend it.
+
+Consequences worth stating:
+
+- **`hickory-resolver`'s `system-config` feature is off.** That feature is what reads
+  `/etc/resolv.conf`. The resolver is configured from DHCP option 6 instead, in memory, which is an
+  observation about the network rather than configuration (`CFG-001`, #166). Turning it off also
+  drops the macOS and Windows system-configuration crates.
+- **The `tracing` ban gains a `wrappers` list**, as `log` right above it already had. The stated
+  reason for both — stop a facade with a pluggable file sink appearing in *our* code, because axiom
+  A5 forbids the file — applies identically, and a transitive `tracing` with no subscriber installed
+  is as inert as a transitive `log` with no logger. The asymmetry was an oversight. It did useful
+  work while it lasted: the ban is what forced the look at the dependency tree that found the DNS
+  library in the first place.
+- **None of this is reachable from `kmsrsos` or `kmsrs-client`.** Nothing they depend on names
+  `kmsrs-os`, which is the same property the `kmsrs-dbgen` split relies on and which
+  `dbgen_is_unreachable_from_every_shipped_binary` is the pattern for.
+
+**The lease state machine is still written out**, because no crate offers RFC 2131 §4.4 separately —
+every existing Rust client welds INIT/SELECTING/REQUESTING/BOUND/RENEWING/REBINDING to sockets or to
+netlink. That is the part axiom A7 wants sans-io anyway, so it takes a `Duration` and a message and
+returns actions, and the whole of it is exercised against captured exchanges with no network.
 
 ### Hermit was removed rather than kept (`OS-018`, #334)
 

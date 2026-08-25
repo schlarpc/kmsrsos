@@ -98,6 +98,42 @@ rustix = { version = "=1.1.4", default-features = false, features = [
   "std", "fs", "mount", "process", "pipe", "stdio", "system",
 ] }
 
+# `OS-019` (#335): the DHCPv4 wire format. Parser and encoder only, sans-io by
+# construction, which is what makes the lease state machine testable against
+# captured exchanges without a socket.
+#
+# It depends on `hickory-proto` unconditionally, for the DNS name type option
+# 119 is made of — about forty crates for a packet format. That was very nearly
+# disqualifying, and stopped being so when `OS-020` (#336) turned out to need a
+# real resolver anyway: the pool fallback is a *hostname*, and this machine has
+# no `/etc/resolv.conf` for a libc resolver to read (axiom A5). The DNS library
+# is paid for once and both issues spend it.
+dhcproto = { version = "=0.15.0", default-features = false }
+
+# `OS-020` (#336): resolving the NTP pool.
+#
+# `system-config` is deliberately off. That feature is what reads
+# /etc/resolv.conf, and axiom A5 says there is no such file — the resolver is
+# configured from DHCP option 6 instead, which is an observation about the
+# network rather than configuration (`CFG-001`, #166). Turning it off also drops
+# the macOS and Windows system-configuration crates, which this target has no
+# use for.
+hickory-resolver = { version = "=0.26.1", default-features = false, features = [
+  "tokio",
+] }
+
+# `OS-019` (#335): applying a lease to an interface — address, prefix, default
+# route, and bringing the link up.
+#
+# `netlink-packet-route` is message types only, built on `zerocopy`, which
+# decision 2 already chose for this project's framing. `netlink-sys` supplies a
+# blocking socket; its `tokio` feature is off because the lease is applied from
+# a task that is already awaiting elsewhere, and three netlink round trips at
+# lease time do not earn a second reactor registration.
+netlink-packet-core = { version = "=0.9.0" }
+netlink-packet-route = { version = "=0.33.0" }
+netlink-sys = { version = "=0.9.0" }
+
 tokio = { version = "=1.53.1", default-features = false, features = [
   "rt", "net", "time", "io-util", "sync", "macros", "signal",
 ] }

@@ -415,15 +415,48 @@ framebuffer console, virtio-net plus `e1000`/`e1000e` for hypervisors that do no
 `seccomp`, and `kvmclock` — which is doing NTP's job until `OS-020` (#336) lands, and matters because
 this host validates client timestamps against a band.
 
-### Addressing (`OS-003`, #254)
+### Addressing (`OS-003`, #254; `OS-019`, #335)
 
 The guest takes its address from DHCP and there is nothing to configure. The server binds `0.0.0.0`
 and `[::]`, and no part of this program reads its own IP to decide anything.
 
-**Today that is the kernel's built-in client (`ip=dhcp`), which takes a lease and never renews it.**
-That is a stopgap, not a design — `OS-019` (#335) replaces it with a real client in the program.
-Until then, reserve the address on your DHCP server. You want to anyway: the SRV record has to point
-somewhere.
+**The DHCP client is part of the program.** `CONFIG_IP_PNP_DHCP` — the kernel's built-in client — is
+gone, because it took a lease and never renewed it, and because it discarded the three options this
+host most wants. What it does now:
+
+| | |
+|---|---|
+| Renews at T1 and rebinds at T2 | So a lease that expires does not silently take the host off the network hours after a boot that looked fine |
+| Reads **option 15** and **option 119** | The domain your clients search, which is the zone the `_vlmcs._tcp` SRV record has to go in. The `/instructions` page fills it in for you instead of printing `EXAMPLE.COM` |
+| Reads **option 42** | The NTP servers, which the clock discipline below prefers over anything on the internet |
+| Says so when there is no interface | A NIC model with no driver in this kernel used to produce a machine that booted, reported `listening`, and served nobody forever. It now says that on the console |
+
+The client's whole conversation is on the console, at `"event":"dhcp"`:
+
+```
+{"level":"info","event":"dhcp","detail":"using eth0 (52:54:00:12:34:56)"}
+{"level":"info","event":"dhcp","detail":"Init -> Selecting"}
+{"level":"info","event":"dhcp","detail":"192.168.1.1 offered 192.168.1.50"}
+{"level":"info","event":"dhcp","detail":"192.168.1.50/24 on eth0, lease 3600s"}
+{"level":"info","event":"dhcp","detail":"Requesting -> Bound"}
+```
+
+Every RFC 2131 state transition appears once, which is the trace to look at when a lease is not
+being renewed — the alternative symptom is an address that stops working in the middle of the night.
+
+**Reserve the address on your DHCP server anyway.** Not because the lease will lapse — it will not —
+but because the SRV record and every `slmgr /skms` your clients hold have to point somewhere stable.
+If a renewal ever comes back with a *different* address, the host takes the old one off, uses the new
+one, and says this on the console:
+
+```
+{"level":"info","event":"dhcp","detail":"the lease moved from 192.168.1.50 to 192.168.1.77;
+ anything pointing at 192.168.1.50 — an SRV record, a client's slmgr /skms — is now wrong"}
+```
+
+**A machine with more than one NIC takes a lease on the lowest-numbered one and says which.** The KMS
+port is bound on all of them regardless; the choice only decides where the DHCP conversation happens
+and which address the page suggests you publish.
 
 ### Memory (`OS-011`, #262)
 
@@ -442,7 +475,6 @@ The userland is one program, and several things a normal userland provides are n
 
 | | |
 |---|---|
-| DHCP lease renewal | `OS-019` (#335) |
 | Clock discipline (NTP) | `OS-020` (#336) — kvmclock only, today |
 | Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
 
