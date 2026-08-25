@@ -72,6 +72,24 @@ pub enum ClientError {
         /// The NCA status it reported.
         status: u32,
     },
+    /// The reply was a well-formed RPC response whose stub is not a KMS one
+    /// (`CLI-016`, #360).
+    ///
+    /// Distinct from [`ClientError::TooShort`], which is about the RPC header
+    /// itself. This is "the transport worked and the payload is something
+    /// else", and it is what a host answering with an error rather than an
+    /// activation looks like — vlmcsd refuses an absurd `N_Policy` with a
+    /// 20-byte stub, which is a legitimate answer and not a malformed reply.
+    ///
+    /// Every one of these used to be reported as `TooShort`, which produced
+    /// messages that contradicted themselves: "a reply needs 16 bytes, got 28".
+    NotAKmsResponse {
+        /// Why the stub could not be read as a KMS response.
+        reason: crate::wire::stub::StubError,
+        /// How long the response body was.
+        body_len: usize,
+    },
+
     /// The output buffer was too small.
     BufferTooSmall {
         /// Bytes needed.
@@ -93,6 +111,10 @@ impl core::fmt::Display for ClientError {
             } => write!(
                 f,
                 "the reply declared {declared} bytes but {available} arrived"
+            ),
+            Self::NotAKmsResponse { reason, body_len } => write!(
+                f,
+                "the reply is a {body_len}-byte RPC response but not a KMS one: {reason}"
             ),
             Self::UnexpectedPacketType { raw } => {
                 write!(f, "the server replied with packet type {raw}")
@@ -356,9 +378,15 @@ impl ClientAssociation {
                 Err(ClientError::Faulted { status })
             }
             Some(PacketType::Response) => {
-                let parsed = crate::wire::stub::parse_response(body, syntax).map_err(|_| {
-                    ClientError::TooShort {
-                        available: body.len(),
+                // `CLI-016` (#360): the reason survives. Flattening every
+                // parse failure onto `TooShort` produced a message that
+                // contradicted itself — it printed the 16 bytes an RPC header
+                // needs beside a body that was longer than that — and threw
+                // away the one thing an operator could act on.
+                let parsed = crate::wire::stub::parse_response(body, syntax).map_err(|reason| {
+                    ClientError::NotAKmsResponse {
+                        reason,
+                        body_len: body.len(),
                     }
                 })?;
 
@@ -916,6 +944,79 @@ mod tests {
         assert!(
             seen.contains(&Warning::Ndr64WithoutFeatureNegotiation),
             "{seen:?}"
+        );
+    }
+    /// **A real host's refusal, captured from vlmcsd** (`CLI-016`, #360).
+    ///
+    /// vlmcsd answers the absurd-`N_Policy` probe (`POL-019`, #313) with a
+    /// well-formed RPC response carrying a 20-byte stub that ends in
+    /// `0x8007000D` — `E_INVALIDARG`. These are the bytes off the wire.
+    ///
+    /// # The contrast is the point
+    ///
+    /// Read as **NDR32** the stub parses and the refusal is legible: an empty
+    /// payload and an HRESULT. Read as **NDR64** it does not, because the
+    /// length fields are twice the width and there are not enough bytes for
+    /// them.
+    ///
+    /// So the same reply is a clean refusal or a parse failure depending on the
+    /// syntax the association negotiated, and vlmcsd sends this shape either
+    /// way. That is worth knowing on its own — it means its error path does not
+    /// re-encode for NDR64 — and it is why the failure was intermittent when
+    /// this was found: only the runs that negotiated NDR64 tripped it.
+    ///
+    /// What this test pins is the *client's* half. Whichever way the parse
+    /// goes, the outcome must be legible; it must never claim the reply is
+    /// shorter than a header it is plainly longer than.
+    #[test]
+    fn a_hosts_refusal_is_legible_in_both_syntaxes() {
+        // 16-byte common header, then the 28-byte body captured from vlmcsd.
+        let mut reply = vec![
+            0x05, 0x00, 0x02, 0x03, 0x10, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x00,
+        ];
+        reply.extend_from_slice(&[
+            // alloc_hint = 20, p_cont_id = 1, cancel_count = 0, reserved = 0
+            0x14, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, //
+            // 20-byte stub: sixteen zero bytes, then 0x8007000D little-endian.
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x0d, 0x00, 0x07, 0x80,
+        ]);
+
+        // NDR32: the refusal is readable, and the HRESULT survives.
+        let mut association = ClientAssociation::new();
+        let reply32 = association
+            .read_reply(&reply, 3, TransferSyntax::Ndr32, &mut |_| {})
+            .expect("vlmcsd's refusal parses as NDR32");
+        match reply32 {
+            Reply::Response { result, .. } => {
+                assert_eq!(result, 0x8007_000D, "the HRESULT must survive");
+            }
+            other @ Reply::BindAck { .. } => panic!("expected a response, got {other:?}"),
+        }
+
+        // NDR64: it does not parse — and the message must say *that*, rather
+        // than claiming the reply is too short. The old one read "a reply needs
+        // 16 bytes, got 28", which is both wrong and impossible.
+        let mut association = ClientAssociation::new();
+        let error = association
+            .read_reply(&reply, 3, TransferSyntax::Ndr64, &mut |_| {})
+            .expect_err("a 20-byte stub is not an NDR64 KMS response");
+
+        assert!(
+            matches!(error, super::ClientError::NotAKmsResponse { .. }),
+            "expected NotAKmsResponse, got {error:?}"
+        );
+
+        let rendered = alloc::format!("{error}");
+        assert!(
+            rendered.contains("not a KMS one"),
+            "the message should say what the reply is: {rendered}"
+        );
+        assert!(
+            !rendered.contains("needs 16 bytes"),
+            "the message still claims the reply is too short: {rendered}"
         );
     }
 }

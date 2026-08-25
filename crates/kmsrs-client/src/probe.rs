@@ -61,6 +61,19 @@ pub const SUSPICIOUS_HARDWARE_IDS: [[u8; 8]; 3] = [
 /// succeeded. What it means is that an observer could tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
+    /// The host refused a probe rather than answering it (`CLI-016`, #360).
+    ///
+    /// **Recorded, not fatal.** A refusal is an answer: vlmcsd meets the
+    /// absurd-`N_Policy` probe with an `E_INVALIDARG` payload rather than an
+    /// activation, which is a perfectly reasonable thing for a host to do and
+    /// is exactly the sort of observation this suite exists to make. Ending the
+    /// run on it would mean one host's one refusal cost every check after it.
+    ProbeRefused {
+        /// What the probe was asking.
+        about: &'static str,
+        /// What reading the reply produced.
+        detail: String,
+    },
     /// A response property a genuine host always has was wrong.
     ResponseCheckFailed {
         /// Which property.
@@ -121,6 +134,12 @@ pub enum Finding {
 impl core::fmt::Display for Finding {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ProbeRefused { about, detail } => write!(
+                f,
+                "the host refused the probe for {about}: {detail}. That is an \
+                 answer rather than a failure — it is recorded and the run \
+                 continues (CLI-016, #360)"
+            ),
             Self::ResponseCheckFailed { check, version } => write!(
                 f,
                 "{:?}: the response failed {}, which a genuine host always passes",
@@ -247,11 +266,22 @@ impl Probe {
 
         // `POL-019` (#313): and one that answers an absurd demand with the
         // demand has said something no real host says.
-        if let Some(reported) = self.reflects_an_absurd_required_count(entropy, &mut report)? {
-            report.findings.push(Finding::AbsurdCountReflected {
+        //
+        // A host that *refuses* the demand is recorded rather than fatal
+        // (`CLI-016`, #360). vlmcsd answers with an `E_INVALIDARG` payload, and
+        // treating that as the end of the run would mean one host's one refusal
+        // cost every check that comes after — the opposite of what a detection
+        // suite is for.
+        match self.reflects_an_absurd_required_count(entropy, &mut report) {
+            Ok(Some(reported)) => report.findings.push(Finding::AbsurdCountReflected {
                 demanded: ABSURD_REQUIRED_CLIENTS,
                 reported,
-            });
+            }),
+            Ok(None) => {}
+            Err(error) => report.findings.push(Finding::ProbeRefused {
+                about: "an absurd required-client count",
+                detail: format!("{error}"),
+            }),
         }
 
         Ok(report)
