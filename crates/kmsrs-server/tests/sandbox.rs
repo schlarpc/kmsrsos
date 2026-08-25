@@ -58,9 +58,16 @@ fn is_the_child() -> bool {
 #[test]
 fn the_filesystem_is_denied_after_the_sandbox_is_applied() {
     if is_the_child() {
-        // A path that exists on every Linux and needs no privileges.
-        let path = "/proc/self/cmdline";
-        let before = std::fs::read(path).is_ok();
+        // This binary's own path: it exists on every platform, is readable
+        // without privileges, and is guaranteed to be there because something
+        // is currently executing it. `/proc/self/cmdline` was the obvious
+        // choice and is Linux-only, which made this fail on the Windows runner
+        // at the *before* assertion rather than at the one it is about.
+        let path = std::env::current_exe().expect("this binary's own path");
+        // `File::open`, not `read`: opening is precisely what Landlock
+        // governs, and reading the whole binary to learn that would be several
+        // megabytes to answer a yes/no question.
+        let before = std::fs::File::open(&path).is_ok();
         let report = sandbox::apply();
         let after = std::fs::read(path).is_ok();
 
