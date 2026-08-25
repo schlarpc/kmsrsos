@@ -38,8 +38,14 @@ fn workspace_root() -> PathBuf {
 
 fn read(root: &Path, relative: &str) -> String {
     let path = root.join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    // Line endings are a property of the checkout, not of the file. A Windows
+    // runner with `core.autocrlf` produces `\r\n`, which makes every
+    // structural search below miss — and the failure reads as "the workflow
+    // moved" rather than as "this test is Unix-only". `command_line.rs` does
+    // the same for the same reason.
+    text.replace("\r\n", "\n")
 }
 
 /// Every job in the gate, by name.
