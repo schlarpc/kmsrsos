@@ -437,6 +437,142 @@ fn every_host_build_row_that_is_not_drawable_says_so() {
     );
 }
 
+/// Preview SKUs and placeholder rows (`DB-016`, #140; `DB-017`, #141).
+///
+/// Both issues are the same worry from two directions: the incumbents' product
+/// catalogues carry rows that are not products. py-kms ships 14 preview
+/// `KmsItem` records "most with placeholder GUIDs of the form
+/// `0N000000-0000-0000-0000-000000000000`", and Py-KMS-Organization's cleanup
+/// took the SKU count from 296 to 257 while *raising* the number of usable keys
+/// — because most of what it deleted had no key at all.
+///
+/// Neither is representable here, and the reason is the pipeline rather than
+/// care: a row exists because a Microsoft artifact contained it (`DB-002`,
+/// #126). These tests are what turns "cannot happen" into "checked".
+mod preview_and_placeholders {
+    use kmsrs_db::{KeyKind, PRODUCTS};
+
+    /// **`DB-017` (#141): no row is a placeholder.**
+    ///
+    /// The shape py-kms uses is the tell — a GUID that is structured enough to
+    /// pass a glance and is mostly zeroes. An all-zero activation ID would also
+    /// collide with the `Guid::ZERO` sentinel the rate limiter uses for "the
+    /// application is not known yet", which is a second reason it must not be a
+    /// real row.
+    #[test]
+    fn no_product_is_a_placeholder() {
+        for product in PRODUCTS {
+            assert_ne!(
+                product.activation_id,
+                kmsrs_db::Guid::ZERO,
+                "{product:?} has the all-zero activation ID, which is a sentinel \
+                 rather than a product"
+            );
+            assert!(
+                !product.description.is_empty(),
+                "{product:?} has no description, so nothing can say what it is"
+            );
+            assert!(
+                !product.description.eq_ignore_ascii_case("unknown"),
+                "{product:?} is vlmcsd's shared \"Unknown\" string rather than a \
+                 product name"
+            );
+            assert!(
+                product.group_id > 0,
+                "{product:?} has group 0, which no real key configuration has"
+            );
+        }
+    }
+
+    /// **`DB-017` (#141): a preview SKU is a real SKU or it is not here.**
+    ///
+    /// The issue asks for "no zero-GVLK preview entries". The shipped data has
+    /// five preview rows, all of them genuine `pkeyconfig` configurations of
+    /// `Windows Server Next Beta ServerRdsh`, and **one of them is a real
+    /// `Volume:GVLK`** — which is exactly why `POL-010` (#98) names
+    /// `REFUSE_PREVIEW` separately from `REFUSE_NON_VOLUME` rather than folding
+    /// them together: refusing a retail SKU cannot affect a real client, and
+    /// refusing this one can.
+    ///
+    /// So the property is not "drop the preview rows". It is that a preview row
+    /// is indistinguishable in kind from any other row, because it came through
+    /// the same pipeline.
+    #[test]
+    fn every_preview_product_is_a_real_configuration() {
+        let previews: Vec<_> = PRODUCTS
+            .iter()
+            .filter(|product| product.is_preview())
+            .collect();
+
+        assert!(
+            !previews.is_empty(),
+            "no preview products at all, which means `is_preview` has stopped \
+             matching Microsoft's descriptions rather than that the data changed"
+        );
+
+        for product in &previews {
+            assert!(
+                !product.key_type.is_empty(),
+                "{product:?} is a preview row with no key type, which is the \
+                 placeholder shape `DB-017` (#141) is about"
+            );
+        }
+
+        assert!(
+            previews
+                .iter()
+                .any(|product| product.kind == KeyKind::KmsClient),
+            "no preview SKU carries a GVLK any more. That is not a failure, but \
+             it is the fact `POL-010` (#98) rests on when it argues that \
+             `REFUSE_PREVIEW` has a real compatibility cost — so it should be \
+             rechecked rather than silently assumed"
+        );
+    }
+
+    /// **`DB-016` (#140): the Office 2013 Preview entry does not exist here.**
+    ///
+    /// vlmcsd carries KMS counted ID `aa4c7968-…` mapped to CSVLK group index
+    /// 0, and its own audit calls the entry "redundant, since index 0 is also
+    /// the unknown-product fallback". That redundancy is the bug: the table
+    /// cannot express the difference between "this product resolves to key 0"
+    /// and "I have never heard of this product, so it gets key 0".
+    ///
+    /// Two things close it here, and this asserts the first. The GUID is simply
+    /// not in Microsoft's artifacts, so it is not in our table — nothing had to
+    /// decide to leave it out. The second is `ARCH-007` (#7), which makes the
+    /// conflation unrepresentable even for a GUID that *is* unknown;
+    /// `kmsrs-proto`'s
+    /// `a_fallback_selection_is_not_the_same_value_as_resolving_to_index_zero`
+    /// is where that is checked.
+    #[test]
+    fn the_preview_counted_id_vlmcsd_carries_is_not_in_the_shipped_data() {
+        // `aa4c7968-f83a-4c11-b21e-6e0d0d6e15c9`, in the little-endian layout a
+        // GUID has on the wire: the first three fields byte-swapped, the last
+        // two as written.
+        let office_2013_preview = kmsrs_db::Guid::from_bytes([
+            0x68, 0x79, 0x4c, 0xaa, 0x3a, 0xf8, 0x11, 0x4c, 0xb2, 0x1e, 0x6e, 0x0d, 0x0d, 0x6e,
+            0x15, 0xc9,
+        ]);
+
+        assert!(
+            !kmsrs_db::is_known_counted_id(office_2013_preview),
+            "the Office 2013 Preview counted ID is in the shipped data. It is \
+             not in any Microsoft artifact, so it arrived by hand — which is the \
+             practice declined item D19 forbids"
+        );
+
+        // And nothing else claims to be a preview *counted* ID either: a
+        // counted ID exists because a CSVLK licence listed it.
+        for counted in kmsrs_db::COUNTED_IDS {
+            assert!(
+                !counted.csvlks.is_empty(),
+                "{counted:?} is counted by no host key, so it is a row with \
+                 nothing behind it"
+            );
+        }
+    }
+}
+
 /// The client setup keys (`DB-013`, #137; `DB-009`, #133; `DB-016`, #140;
 /// `DB-017`, #141).
 ///
