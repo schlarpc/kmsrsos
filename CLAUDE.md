@@ -17,7 +17,7 @@ comments**, because it survives even if an issue is closed and superseded.
 
 Two documents hold what a tracker holds badly:
 
-- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 41
+- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 42
   decisions taken and why, and 41 things deliberately *not* built. Declined items have no issue by
   definition, so this is the only record that they were considered. **Read this before proposing
   anything that looks obviously missing.**

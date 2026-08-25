@@ -74,6 +74,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 39 | Host clock in the request path | One start-up reading, projected by the monotonic clock and re-anchored when SNTP corrects it, [see below](#the-host-clock-is-projected-and-re-anchored-pol-020-346) (#346) |
 | 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
 | 41 | SRV weighting | RFC 2782's running-sum selection, **not** the `isqrt` formula `DISC-001` quoted from vlmcsd, [see below](#the-srv-weighting-is-the-specifications-not-vlmcsds-disc-001-143) (#143) |
+| 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -392,6 +393,66 @@ The weight-zero case is also the specification's rather than the common shortcut
 zero-weight record "a small chance of being selected", which the running-sum method produces for
 free; implementations that sort zero-weight records last never try them first, and since the
 recommended zone has *every* record at weight zero, that difference is the whole ordering.
+
+### The sandbox is what could be verified (`SEC-005`, #197)
+
+`SEC-005` asks for three Linux measures and five Windows ones. **Two shipped.** The rest were split
+into `SEC-018` (#355) and `SEC-019` (#356) rather than approximated, and the split is the decision
+worth recording.
+
+**What ships:** Landlock with an empty ruleset and `no_new_privs`, applied after the listeners are
+bound and before the first connection is accepted. Binding a port is the last thing this program does
+that a sandbox would have to permit, so that is the first moment there is nothing left to give up.
+
+The Landlock ruleset handles the newest ABI's rights and grants none of them, which denies opening
+any path **and** opening any socket — ABI 4 added `BindTcp` and `ConnectTcp`, and a KMS host needs
+neither once it is listening (`NET-001`, #150 says it does not even read its own address). Best-effort
+compatibility means an older kernel denies what it can rather than refusing to start.
+
+**Why Landlock is worth having when `no-file-access` already exists.** That invariant proves no
+shipped crate *calls* `open`. Landlock decides what happens when something else does — a dependency, a
+panic handler writing a core file, a future change nobody reviewed against axiom A5. One is a
+statement about the source; the other is a statement about the process.
+
+**Why the bare-metal target is deliberately not sandboxed.** There this process *is* the userland: it
+mounts `devtmpfs`, `/proc` and `/sys`, speaks netlink, steps `CLOCK_REALTIME`, reaps orphans and calls
+`reboot(2)`. A policy permissive enough for all of that permits most of what a policy is for, and one
+that is not kills pid 1 — a kernel panic, not a failed request. The value is also lower: a sandbox
+limits what a compromised process can reach, and on a machine whose entire userland is this process
+there is nothing else to reach. So `sandbox::apply` is called from `serve` and not from `serve_with`.
+
+#### Why seccomp was split out rather than written
+
+The two that shipped are verifiable in a way a syscall filter is not. Landlock either denies
+`/proc/self/cmdline` or it does not, and `tests/sandbox.rs` checks exactly that in a real sandboxed
+subprocess. A seccomp allowlist is a claim about *every syscall this process will ever make*, across
+every libc, allocator, kernel and tokio version it ships against — and the cost of getting it wrong is
+the process being killed on something nobody predicted, under load, in production, with no log line
+because the process is gone. That list has to be measured, on both libc targets, which is #355.
+
+#### Why the Windows mitigations were split out
+
+`SetProcessMitigationPolicy` is self-applicable and would close a great deal —
+`DisallowWin32kSystemCalls` alone removes the largest source of Windows kernel escalations, and this
+is a console service with no GUI. It is not called because **it cannot be**: every binding is raw FFI,
+and this workspace sets `unsafe_code = "forbid"` at the root with a test that fails on the word
+appearing anywhere in a shipped crate. That is a real conflict between two things the project wants,
+and `no_shipped_crate_contains_unsafe` says in its own doc comment that reopening the boundary is a
+decision for a review. #356 is where it gets taken.
+
+Control Flow Guard, the sixth mitigation, *is* purely a compile flag and needed no such decision, so
+it is on.
+
+#### Reporting
+
+`Applied::Failed` and `Applied::NotOnThisTarget` are separate variants because they are different
+facts — "Windows has no Landlock" and "Landlock is here and refused" call for different responses, and
+collapsing them would hide the second. Windows reports `process_mitigations: Failed` rather than
+`NotOnThisTarget`, because the capability exists on that platform and is not being used.
+
+A measure that cannot be applied is never fatal. A host that refused to activate anything because it
+could not sandbox itself would be trading its entire function for a hardening measure — the same shape
+of mistake as [D35], and as `POL-011`'s clock-skew tolerance.
 
 ### Notes on the three decisions that took the most argument
 

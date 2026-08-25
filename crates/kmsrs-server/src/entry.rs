@@ -72,7 +72,7 @@ pub struct Housekeeping {
 /// "what the program does at start-up" has one definition (`OS-001`, #252).
 #[must_use]
 pub fn serve() -> ExitCode {
-    serve_with(|_| {})
+    serve_inner(|_| {}, true)
 }
 
 /// The same, with work process 1 wants running alongside (`OS-019`, #335).
@@ -100,6 +100,18 @@ pub fn serve() -> ExitCode {
 /// mean a DHCP server outage was a KMS outage.
 #[must_use]
 pub fn serve_with<F>(housekeeping: F) -> ExitCode
+where
+    F: FnOnce(Housekeeping) + Send + 'static,
+{
+    // `SEC-005` (#197): pid 1 is not sandboxed. It mounts, speaks netlink,
+    // steps the clock and calls `reboot(2)` for the life of the machine, and a
+    // policy permissive enough for all of that would permit most of what a
+    // policy is for. `serve` below opts in; this does not.
+    serve_inner(housekeeping, false)
+}
+
+/// The hosted entry point's body, with the sandbox decision made explicit.
+fn serve_inner<F>(housekeeping: F, sandboxed: bool) -> ExitCode
 where
     F: FnOnce(Housekeeping) + Send + 'static,
 {
@@ -133,14 +145,14 @@ where
         }
     };
 
-    match run(operational, housekeeping) {
+    match run(operational, housekeeping, sandboxed) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
     }
 }
 
 /// Start up and serve until asked to stop.
-fn run<F>(operational: Operational, housekeeping: F) -> Result<(), u8>
+fn run<F>(operational: Operational, housekeeping: F, sandboxed: bool) -> Result<(), u8>
 where
     F: FnOnce(Housekeeping) + Send + 'static,
 {
@@ -280,6 +292,18 @@ where
 
         arrange_to_stop_politely(logger, &shutdown);
 
+        // `SEC-005` (#197): after binding, before accepting. Binding a port is
+        // the last thing this program does that a sandbox would have to permit,
+        // so this is the first moment there is nothing left to give up.
+        //
+        // Not on the bare-metal target: `sandbox` is applied here and `serve`
+        // is the hosted entry point, while pid 1 comes through `serve_with` and
+        // needs mounts, netlink and `reboot(2)` for the life of the machine.
+        // See `crate::sandbox` for the argument.
+        if sandboxed {
+            report_sandbox(logger, crate::sandbox::apply());
+        }
+
         // Inside `block_on` and before `run`, so anything it spawns is on this
         // runtime and starts before the first connection (`OS-019`, #335).
         housekeeping(Housekeeping {
@@ -363,6 +387,31 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
             "shutdown",
             &format!("no handler installed: {error}"),
         ),
+    }
+}
+
+/// Say what the sandbox did, once, at start-up (`SEC-005`, #197).
+///
+/// Every measure gets a line, including the ones that were not applied. A
+/// hardening step that fails silently is worse than one that is absent: an
+/// operator reading the log would believe a restriction is in place that is
+/// not, and the whole point of `Applied::Failed` being distinct from
+/// `Applied::NotOnThisTarget` is that the two are different facts.
+fn report_sandbox(logger: Logger, report: crate::sandbox::Report) {
+    for (measure, applied) in report.each() {
+        let severity = match applied {
+            // Not fatal, and not a warning either on a target that never had
+            // the feature — that is a fact about the platform, not a problem.
+            crate::sandbox::Applied::Yes | crate::sandbox::Applied::NotOnThisTarget => {
+                Severity::Debug
+            }
+            crate::sandbox::Applied::Failed => Severity::Warn,
+        };
+        logger.message(
+            severity,
+            "sandbox",
+            &format!("{measure}: {}", applied.as_text()),
+        );
     }
 }
 

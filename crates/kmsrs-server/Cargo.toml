@@ -31,6 +31,23 @@ tokio.workspace = true
 ctrlc.workspace = true
 socket2.workspace = true
 
+# `SEC-005` (#197): the Linux sandbox, and the one place the exception above
+# comes back.
+#
+# Landlock and seccomp are Linux kernel interfaces. Neither crate builds
+# anywhere else — not "does nothing there", does not compile — so no runtime
+# `bool` can select around them, which is exactly the argument that target-gated
+# `ctrlc` while Hermit existed.
+#
+# What that costs is contained on purpose: everything in `src/sandbox.rs` above
+# these two calls compiles on every target, and `SANDBOX_IS_AVAILABLE` is an
+# ordinary `const bool` whose branches are both compiled and tested everywhere.
+# The `cfg` reaches two functions, not a module.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+seccompiler.workspace = true
+rustix = { workspace = true, features = ["thread"] }
+
 [dev-dependencies]
 # `test-util` is what provides `#[tokio::test(start_paused = true)]` and
 # `time::advance`, which is how a deadline test drives a deadline now that
