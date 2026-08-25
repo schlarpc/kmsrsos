@@ -595,13 +595,38 @@ pub struct AckParameters<'a> {
 impl AckParameters<'_> {
     /// The flags this acknowledgement will carry.
     ///
-    /// `FIRST_FRAG | LAST_FRAG` always, plus `PFC_CONC_MPX` if and only if the
-    /// client asked for it. Nothing else from the client's header survives —
-    /// vlmcsd `memcpy`s the whole request header, so it would reflect
-    /// `PFC_PENDING_CANCEL` back as well (`WIRE-014`, #72).
+    /// `FIRST_FRAG | LAST_FRAG` always. Nothing else from the client's header
+    /// survives — vlmcsd `memcpy`s the whole request header, so it would
+    /// reflect `PFC_PENDING_CANCEL` back as well (`WIRE-014`, #72).
+    ///
+    /// # `PFC_CONC_MPX` is echoed on a `bind_ack` and **only** there
+    /// (`WIRE-031`, #358)
+    ///
+    /// [MS-RPCE] 2.2.2.3 says the flag is meaningful in the `bind` and
+    /// `bind_ack` PDUs, and multiplexing is negotiated once — an
+    /// `alter_context` renegotiates the transfer syntax, not the association's
+    /// capabilities, so there is nothing for the flag to mean there.
+    ///
+    /// Two independent halves of vlmcsd agree, which is what settled this:
+    ///
+    /// * its **server** `memcpy`s the request header and then, only for
+    ///   `RPC_PT_ALTERCONTEXT_ACK`, resets `PacketFlags` to
+    ///   `RPC_PF_FIRST | RPC_PF_LAST` (`src/rpc.c:681`). Nobody writes that
+    ///   special case by accident;
+    /// * its **client** warns `RPC_PF_MULTIPLEX should not be set` on any
+    ///   acknowledgement that is not a `bind_ack` (`src/rpc.c:773`).
+    ///
+    /// This host echoed it on both until differential testing against that
+    /// client pointed at it. py-kms has the opposite bug — it sets the flag
+    /// unconditionally, telling every client it has a capability the client
+    /// never asked about.
     #[must_use]
     pub fn reply_flags(&self) -> PacketFlags {
-        PacketFlags::COMPLETE.union(self.client_flags.intersection(PacketFlags::CONC_MPX))
+        if self.packet_type == PacketType::BindAck {
+            PacketFlags::COMPLETE.union(self.client_flags.intersection(PacketFlags::CONC_MPX))
+        } else {
+            PacketFlags::COMPLETE
+        }
     }
 }
 
@@ -1160,10 +1185,16 @@ mod tests {
         assert_eq!(header.packet_type, PacketType::BindAck.to_wire());
     }
 
-    /// `WIRE-028` (#86): `PFC_CONC_MPX` is echoed and never asserted
-    /// unrequested. py-kms sets it on every acknowledgement, telling clients
-    /// they have a capability they never asked about — and vlmcsd copies the
-    /// whole request header, so it would reflect `PFC_PENDING_CANCEL` too.
+    /// `WIRE-028` (#86) and `WIRE-031` (#358): `PFC_CONC_MPX` is echoed on a
+    /// `bind_ack`, never asserted unrequested, and never carried on an
+    /// `alter_context_response` at all.
+    ///
+    /// Every neighbouring implementation gets one of these wrong. py-kms sets
+    /// the flag on every acknowledgement, telling clients they have a
+    /// capability they never asked about. vlmcsd copies the whole request
+    /// header, so it would reflect `PFC_PENDING_CANCEL` too — and this host
+    /// echoed the flag onto `alter_context_response` until differential testing
+    /// against vlmcsd's *client* pointed at it (#358).
     #[test]
     fn multiplexing_is_echoed_rather_than_asserted() {
         let body = bind_body(&[(0, INTERFACE_WIRE, NDR32_WIRE, 2)]);
@@ -1171,17 +1202,42 @@ mod tests {
         let decision = decide(&request, false);
         let mut entropy = DeterministicEntropy::from_seed(7);
 
-        for (client_flags, expects_multiplex) in [
-            (PacketFlags::COMPLETE, false),
-            (PacketFlags::COMPLETE.union(PacketFlags::CONC_MPX), true),
+        for (packet_type, client_flags, expects_multiplex) in [
+            (PacketType::BindAck, PacketFlags::COMPLETE, false),
+            (
+                PacketType::BindAck,
+                PacketFlags::COMPLETE.union(PacketFlags::CONC_MPX),
+                true,
+            ),
             // A client asking to cancel must not have that reflected back.
             (
+                PacketType::BindAck,
                 PacketFlags::COMPLETE.union(PacketFlags::PENDING_CANCEL),
+                false,
+            ),
+            // `WIRE-031` (#358): and **not** on an `alter_context_response`,
+            // however insistently the client asks. Multiplexing is negotiated
+            // once, on the bind; an `alter_context` renegotiates the transfer
+            // syntax and nothing about the association's capabilities.
+            (
+                PacketType::AlterContextResponse,
+                PacketFlags::COMPLETE.union(PacketFlags::CONC_MPX),
+                false,
+            ),
+            (
+                PacketType::AlterContextResponse,
+                PacketFlags::COMPLETE,
                 false,
             ),
         ] {
             let mut parameters = ack_parameters(b"1688");
+            parameters.packet_type = packet_type;
             parameters.client_flags = client_flags;
+            if packet_type == PacketType::AlterContextResponse {
+                // An `alter_context_response` advertises no secondary address
+                // (`WIRE-003`, #61).
+                parameters.secondary_address = b"";
+            }
             let mut out = vec![0_u8; 128];
             write_ack(&parameters, &decision, &mut entropy, &mut out).unwrap();
 
@@ -1191,7 +1247,7 @@ mod tests {
             assert_eq!(
                 flags.contains(PacketFlags::CONC_MPX),
                 expects_multiplex,
-                "client flags {client_flags:?}"
+                "{packet_type:?} with client flags {client_flags:?}"
             );
             assert!(
                 !flags.contains(PacketFlags::PENDING_CANCEL),
