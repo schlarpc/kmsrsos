@@ -266,3 +266,171 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # --- The bootable artifacts, on every run -------------------------------
+  #
+  # `PKG-015` (#364). Built with `nix build`, the same command the release
+  # workflow uses and the same one `nix flake check` gates on. There is no
+  # snapshot-only build path for the same reason there is no release-only one:
+  # an artifact built differently from the thing that was tested is an artifact
+  # nothing has tested.
+  #
+  # Both are cross-compiled from Linux and neither is built on the platform it
+  # runs on. That is deliberate for the Windows binaries — `release.yml` says
+  # why, and it is the same reason: the artifact is a pure function of the flake
+  # inputs, and building it on a Windows runner would make it a function of the
+  # runner image as well. The `windows-x86_64` leg of `platforms` above is a
+  # *test* run on a real Windows machine, which is a different question.
+  #
+  # This runs on pull requests too. A workflow artifact on a pull request is how
+  # somebody boots the change before it merges, which is worth rather more here
+  # than usual: the ISO's whole surface is "does it boot", and `linux-boot` only
+  # answers that for QEMU.
+  snapshot:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build the bootable ISO and the Windows binaries
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          nix build .#linuxIso --print-build-logs --out-link result-iso
+          nix build .#windows  --print-build-logs --out-link result-windows
+
+          # The same names the release uses, so an operator who has downloaded
+          # both is not comparing `kmsrsos-x86_64.iso` against something else.
+          cp result-iso out/kmsrsos-x86_64.iso
+          cp result-windows/bin/*.exe out/
+
+      # Produced here, on the machine that built the artifacts, rather than in
+      # the job that publishes them — the same reasoning as `release.yml`
+      # (`SEC-010`, #202).
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-x86_64
+          path: out/
+          if-no-files-found: error
+
+  # --- The `latest` pointer, moved only when everything is green ----------
+  #
+  # `PKG-015` (#364): a rolling prerelease at the tag `latest`, so there is one
+  # stable URL for the newest build of `main` that passed the whole gate.
+  #
+  # # Why `needs` lists every job
+  #
+  # "All green" has to mean *all*, and the only way to say that in Actions is to
+  # name them. A job added later and not added here would leave this moving the
+  # pointer on a build that job had failed — which is worse than not having a
+  # pointer, because the failure is silent and the artifact looks blessed.
+  #
+  # `the_latest_pointer_waits_for_every_job` in `packaging_invariants.rs` is
+  # what stops that: it reads this file, and fails if any job is missing from
+  # the list below.
+  #
+  # # Why this is not a release
+  #
+  # `make_latest` is never set, so GitHub's "Latest" badge stays on the newest
+  # real tag. The release is marked prerelease, its notes say what it is, and it
+  # carries no SBOM and no `.deb`, `.rpm` or container image — those are things
+  # a tag produces (`PKG-003`, #240) and this is not a tag.
+  #
+  # It *is* signed. An unverifiable bootable image that people download is worse
+  # than one they can check, the machinery is already here, and keyless signing
+  # records the workflow path in the certificate — so the signature itself is
+  # what distinguishes a snapshot from a release, rather than a promise in the
+  # notes.
+  latest:
+    needs:
+      - tests
+      - platforms
+      - bare-metal
+      - no-file-access
+      - reproducible
+      - panic-freedom
+      - fuzz
+      - snapshot
+    # Never from a pull request: a fork's branch must not be able to move a
+    # pointer people download from.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing: the token is the identity and there is no private key
+      # anywhere (`SEC-013`, #205).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: snapshot-x86_64
+          path: release
+
+      # The checksums came from the machine that built the artifacts. Verifying
+      # them here proves the round trip through the artifact store did not
+      # change anything, which is the only thing this job could break.
+      - name: Verify what was uploaded
+        run: cd release && sha256sum -c SHA256SUMS
+
+      - uses: sigstore/cosign-installer@v3.7.0
+      - name: Sign the checksums
+        run: |
+          cd release
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Move the pointer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          **This is not a release.** It is the newest commit on `main` that
+          passed the whole gate, rebuilt on every push, and the tag moves.
+
+          Use it to try something before it is tagged. For anything you intend
+          to keep running, take a real release: this one is replaced without
+          warning, has no version number to report in a bug, and carries no
+          SBOM, `.deb`, `.rpm` or container image — those are what a tag
+          produces.
+
+          | | |
+          |---|---|
+          | `kmsrsos-x86_64.iso` | the bootable image; upload it, attach it, boot it |
+          | `kmsrsos.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+          | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksums |
+
+          Verifying it is the same procedure as a release, with one difference —
+          the certificate identity names this workflow rather than the release
+          one, which is how a signature tells you which channel it came from:
+
+          ```sh
+          cosign verify-blob SHA256SUMS \
+            --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
+            --certificate-identity-regexp 'https://github.com/schlarpc/kmsrsos/.github/workflows/test.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          sha256sum -c SHA256SUMS
+          ```
+          NOTES
+          printf '\nBuilt from `%s`.\n' "$GITHUB_SHA" >> notes.md
+
+          # Deleted and recreated rather than edited, so the tag moves to this
+          # commit and no asset from the previous snapshot survives. `|| true`
+          # because the very first run has nothing to delete.
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest \
+            --target "$GITHUB_SHA" \
+            --title "Latest build of main" \
+            --notes-file notes.md \
+            --prerelease \
+            release/*
