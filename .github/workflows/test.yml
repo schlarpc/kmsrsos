@@ -102,9 +102,52 @@ jobs:
       - if: runner.os == 'Windows'
         run: cargo nextest run --profile ci --locked --package kmsrs-server --package kmsrs-client
 
-  # Hermit (TEST-012, #233) is deliberately absent from that matrix until
-  # PKG-013 (#250) has a hermetic Nix build for it. A job that cannot run is
-  # worse than a missing one: it is a green tick that means nothing.
+  # The bare-metal target, as a faster signal than `nix flake check`
+  # (`OS-017`, #333; `TEST-012`, #233).
+  #
+  # This job used to build the Hermit unikernel. `OS-018` (#334) removed that
+  # target and did not remove the job, so it went on asking the flake for
+  # `.#hermit-kernel` — an attribute that no longer exists — and failing on
+  # every commit since. Replaced rather than deleted, because the role it played
+  # is still worth having: the `linux-boot`, `linux-nics` and `linux-iso-layout`
+  # checks boot real VMs and take twenty minutes, and this says "the artifact
+  # does not even build" in two.
+  #
+  # x86_64 only. `pkgs.syslinux` is unavailable elsewhere, which is why the
+  # flake now gates these outputs by system rather than letting an aarch64
+  # `nix flake check` fail inside them.
+  bare-metal:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build the kernel
+        run: nix build .#linux-kernel --print-build-logs --no-link
+
+      - name: Build the bootable ISO
+        run: nix build .#linuxIso --print-build-logs --out-link result-iso
+
+      # `OS-017` (#333): one file that is both a PE/COFF executable for
+      # firmware and a Linux boot image for isolinux. A fixup phase that
+      # "helpfully" rewrote it would produce something that builds and never
+      # boots on UEFI.
+      - name: The kernel is also an EFI executable
+        run: |
+          set -euo pipefail
+          kernel=$(nix build .#linux-kernel --no-link --print-out-paths)/bzImage
+          test "$(head -c 2 "$kernel")" = "MZ" || {
+            echo "no MZ at offset 0: CONFIG_EFI_STUB is not doing its job" >&2
+            exit 1
+          }
+          test "$(dd if="$kernel" bs=1 skip=514 count=4 status=none)" = "HdrS" || {
+            echo "no HdrS at 0x202: this is not a Linux boot image" >&2
+            exit 1
+          }
 
   # Axiom A5, asserted against the binary rather than against the source
   # (SEC-006, #198).

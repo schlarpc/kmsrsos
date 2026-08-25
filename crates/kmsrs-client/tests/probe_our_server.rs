@@ -26,21 +26,10 @@ use kmsrs_client::request::RequestFields;
 use kmsrs_client::session::Session;
 use kmsrs_proto::entropy::testing::DeterministicEntropy;
 use kmsrs_proto::kms::version::{ProtocolVersion, Version};
-use kmsrs_proto::time::Instant;
 use kmsrs_server::config::operational::LogLevel;
 use kmsrs_server::net::driver::Driver;
 use kmsrs_server::net::listener::bind_each;
 use kmsrs_server::{Compiled, Discovered, Operational, Server};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// A clock that advances a little per reading, so nothing hits a deadline.
-struct TestClock(AtomicU64);
-
-impl TestClock {
-    fn now(&self) -> Instant {
-        Instant::from_nanos(self.0.fetch_add(1_000_000, Ordering::AcqRel))
-    }
-}
 
 /// Run our own server on loopback for the duration of `body`.
 fn with_server<T>(body: impl FnOnce(SocketAddr) -> T) -> T {
@@ -59,17 +48,22 @@ fn with_server<T>(body: impl FnOnce(SocketAddr) -> T) -> T {
 
     let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
     let address = bound[0].address;
-    let mut driver = Driver::new(server, bound, 64).unwrap();
+    let mut driver = Driver::new(
+        server,
+        bound,
+        64,
+        Box::new(DeterministicEntropy::from_seed(0x5A17)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
-    let clock = TestClock(AtomicU64::new(1_000_000));
 
     std::thread::scope(|scope| {
-        let clock_ref = &clock;
         let handle = scope.spawn(move || {
-            // The *server's* entropy must vary, since the probe checks that its
-            // association groups differ between connections.
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
-            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
         });
 
         // The body must not be able to leave the driver running. A panic here

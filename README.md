@@ -1,7 +1,7 @@
 # kmsrsos
 
 A KMS host emulator in pure safe Rust — correct by construction, zero runtime configuration, no
-disk I/O. Targets Linux, Windows, and bare metal ([Hermit] unikernel with virtio-net).
+disk I/O. Targets Linux, Windows, and bare metal (a [Linux] kernel with this program as PID 1).
 
 > **Status: design complete, implementation not started.** The plan of record is the
 > [issue tracker](https://github.com/schlarpc/kmsrsos/issues) — 264 items across 11 milestones,
@@ -42,8 +42,8 @@ Design goals, in the order that shapes the code:
 | [`docs/decisions.md`](docs/decisions.md) | Axioms, the 36 decisions taken, and 41 things deliberately not built |
 | [`docs/reference.md`](docs/reference.md) | Generated from the code: routes, metrics, exit codes, what a build decides, what is in the database |
 | [`docs/releasing.md`](docs/releasing.md) | What a tag produces, how to verify it, and the release-notes template |
-| [`docs/deployment.md`](docs/deployment.md) | Where the host has to live, the SRV record, the container and Kubernetes manifests, Hermit on Proxmox, and what is not in the artifact |
-| [`docs/research-findings.md`](docs/research-findings.md) | Microsoft-sourced product data, Hermit/Proxmox constraints, coverage map |
+| [`docs/deployment.md`](docs/deployment.md) | Where the host has to live, the SRV record, the container and Kubernetes manifests, the bare-metal ISO on Proxmox, and what is not in the artifact |
+| [`docs/research-findings.md`](docs/research-findings.md) | Microsoft-sourced product data, hypervisor platform constraints, coverage map |
 | [`docs/kms-emulator-feature-matrix.md`](docs/kms-emulator-feature-matrix.md) | Cross-implementation synthesis and the 24 behavioural mismatches |
 | [`docs/vlmcsd-features.md`](docs/vlmcsd-features.md) | Complete vlmcsd audit |
 | [`docs/py-kms-features.md`](docs/py-kms-features.md) | Complete py-kms audit |
@@ -94,6 +94,8 @@ $ cargo fmt                  # format
 ```shell
 $ nix build          # build the package
 $ nix build .#windows # cross-compile for Windows (x86_64-pc-windows-msvc)
+$ nix build .#linux-kernel # the bare-metal kernel on its own
+$ nix build .#linuxIso     # a bootable ISO: BIOS or UEFI, 14 MiB
 $ nix flake check    # run all checks (build, clippy, fmt, test, coverage)
 $ nix flake update   # update flake inputs
 ```
@@ -124,7 +126,7 @@ MIT.
 [Crane]: https://crane.dev/
 [cruft]: https://cruft.github.io/cruft/
 [direnv]: https://direnv.net/
-[Hermit]: https://github.com/hermit-os
+[Linux]: https://kernel.org
 [Nix]: https://nixos.org/
 [py-kms]: https://github.com/Py-KMS-Organization/py-kms
 [rust-flake]: https://github.com/schlarpc/rust-flake

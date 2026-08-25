@@ -1,58 +1,36 @@
 [package]
 name = "kmsrs-os"
-description = "Hermit unikernel binary: the bare-metal target (ARCH-001)"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-authors.workspace = true
 license.workspace = true
-repository.workspace = true
 publish = false
 
 [[bin]]
-name = "kmsrsos-hermit"
+name = "kmsrs-os"
 path = "src/main.rs"
 
 [dependencies]
 kmsrs-server.workspace = true
 
-[dev-dependencies]
+# `OS-021` (#337): the syscalls pid 1 needs, without `unsafe`. This crate used
+# to be the Hermit unikernel binary and held the one documented unsafe boundary
+# (`OS-013`, #264); it never contained any, and it does not now — rustix is the
+# reason that stayed true when the duties became `mount(2)` and `waitpid(2)`.
+rustix.workspace = true
 
-# This is the ONE manifest in the tree that does not say `[lints] workspace =
-# true`, and the reason is the single documented unsafe boundary (`OS-013`,
-# #264). The workspace table forbids `unsafe_code`, and `forbid` cannot be
-# lifted by an inner `allow` — which is the property that makes it worth setting
-# there. Here it is `deny` instead, so the boundary must name itself with an
-# explicit `#[expect(unsafe_code)]` carrying a safety comment, and every other
-# line in the crate is still rejected.
-[lints.rust]
-unsafe_code = "deny"
-missing_docs = "warn"
-missing_debug_implementations = "warn"
-unreachable_pub = "warn"
-rust_2018_idioms = { level = "warn", priority = -1 }
+# `OS-019` (#335) and `OS-020` (#336): the DHCP client, what applies its lease
+# to the interface, and the resolver the NTP pool fallback needs. Every one is
+# in the workspace dependency table with the argument for it; none of them is
+# reachable from `kmsrsos` or `kmsrs-client`, because nothing there names this
+# crate.
+dhcproto.workspace = true
+hickory-resolver.workspace = true
+netlink-packet-core.workspace = true
+netlink-packet-route.workspace = true
+netlink-sys.workspace = true
+socket2.workspace = true
+tokio.workspace = true
 
-[lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-arithmetic_side_effects = "deny"
-cast_possible_truncation = "deny"
-cast_possible_wrap = "deny"
-cast_sign_loss = "deny"
-cast_lossless = "deny"
-cast_precision_loss = "deny"
-indexing_slicing = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-unreachable = "deny"
-exit = "deny"
-mem_forget = "deny"
-integer_division = "deny"
-integer_division_remainder_used = "deny"
-module_name_repetitions = "allow"
-similar_names = "allow"
-must_use_candidate = "allow"
-doc_markdown = "allow"
+[lints]
+workspace = true

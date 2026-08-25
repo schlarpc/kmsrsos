@@ -40,9 +40,8 @@
 //! only IPv6 serves that. Failing to bind *everything* is the only fatal case,
 //! because a server that listens nowhere is not a server.
 
-use crate::net::addr::{BACKLOG, bind_addresses};
+use crate::net::addr::bind_addresses;
 use core::net::SocketAddr;
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io;
 use std::net::TcpListener;
 
@@ -127,6 +126,42 @@ pub fn bind_each(addresses: &[SocketAddr]) -> Result<BindOutcome, NothingBound> 
 
 /// Bind one address.
 pub(crate) fn bind_one(address: SocketAddr) -> io::Result<Bound> {
+    let listener = bind_socket(address)?;
+    let actual = listener.local_addr()?;
+    Ok(Bound {
+        listener,
+        address: actual,
+    })
+}
+
+/// Bind one address on Hermit (`PKG-013`, #250; `NET-003`, #152).
+///
+/// `socket2` does not compile for this target — its `sys` module is
+/// `#[cfg(unix)]` and `#[cfg(windows)]` and nothing else — so the manifest does
+/// not name it there and this is the branch that remains. Nothing is lost from
+/// the option side: `SO_REUSEADDR` is skipped on Hermit anyway because
+/// `cfg(unix)` is false, and `IPV6_V6ONLY` is unreachable because the bind list
+/// has no IPv6 entry (`OS-009`, #260).
+///
+/// What *is* lost is the explicit backlog, and that is named rather than
+/// glossed: [`crate::platform::BACKLOG_IS_EXPLICIT`] is false here, so the
+/// queue depth is whatever `std` passes to `listen(2)` — 128 — rather than
+/// [`crate::net::addr::BACKLOG`]. The two happen to be equal today, and
+/// [`crate::platform::STD_BACKLOG`] is what fails if that stops being true,
+/// because a silently deeper queue is exactly the `NET-003` (#152) defect this
+/// program does not have.
+#[cfg(target_os = "hermit")]
+fn bind_socket(address: SocketAddr) -> io::Result<TcpListener> {
+    TcpListener::bind(address)
+}
+
+/// Bind one address everywhere else (`NET-009`, #159; `NET-001`, #150;
+/// `NET-003`, #152).
+#[cfg(not(target_os = "hermit"))]
+fn bind_socket(address: SocketAddr) -> io::Result<TcpListener> {
+    use crate::net::addr::BACKLOG;
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+
     let domain = if address.is_ipv6() {
         Domain::IPV6
     } else {
@@ -171,12 +206,7 @@ pub(crate) fn bind_one(address: SocketAddr) -> io::Result<Bound> {
     // slow one.
     socket.listen(BACKLOG)?;
 
-    let listener = TcpListener::from(socket);
-    let actual = listener.local_addr()?;
-    Ok(Bound {
-        listener,
-        address: actual,
-    })
+    Ok(TcpListener::from(socket))
 }
 
 #[cfg(test)]

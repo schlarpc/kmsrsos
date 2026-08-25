@@ -12,7 +12,7 @@ any of this are in [`decisions.md`](decisions.md).
 - [Building it, and configuring it](#building-it-and-configuring-it)
 - [systemd](#systemd)
 - [Containers and Kubernetes](#containers-and-kubernetes)
-- [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
+- [Bare metal: Linux, on QEMU or Proxmox](#bare-metal-linux-on-qemu-or-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
 
 ---
@@ -153,8 +153,7 @@ That doctrine is only usable if the rebuild is two lines, so it is a function (`
 }
 ```
 
-It returns `{ server, client, container }`. `osImage` joins that set once #250 has a hermetic Hermit
-build.
+It returns `{ server, client, container }`.
 
 Those four settings are the entire build-time surface — see [D37](decisions.md#d37) for why it is not
 thirty preprocessor macros and seven presets. A bad value is a **compile error** rather than a
@@ -303,116 +302,455 @@ route to.
 
 ---
 
-## Hermit on QEMU and Proxmox
+## Bare metal: Linux, on QEMU or Proxmox
 
-The bare-metal target is a [Hermit](https://github.com/hermit-os) unikernel: one binary that is the
-whole operating system, booted by a UEFI loader, talking to virtio-net. QEMU/libvirt is the supported
-configuration, because that is what hermit's own CI exercises on every pull request. Proxmox is a
-nice-to-have (decision 25), and the constraints below are why.
+The bare-metal target is one binary that is the whole userland: a Linux kernel built from an
+explicit allowlist, with `kmsrs-server` as **PID 1** and nothing else in the image. No init system,
+no shell, no libc on disk.
 
-The findings this section rests on are in
-[`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
-kernel and `qemu-server` sources rather than from documentation.
+This used to be a [Hermit](https://github.com/hermit-os) unikernel. `OS-018` (#334) replaced it, and
+[`decisions.md`](decisions.md#hermit-was-removed-rather-than-kept-os-018-334) is why: the unikernel
+needed three non-default VM settings, only one of which the Proxmox web UI can express, and failed
+quietly when they were missing.
 
-### A serial port is mandatory (`OS-005`, #256)
+### The artifact (`OS-017`, #333)
 
-**Hermit's only console is the 16550 UART at `0x3F8`.** There is no VGA text mode, no framebuffer
-console, and no kernel-side logging to anywhere else. A VM without a serial port is a VM that boots
-in complete silence — including when it panics, which on a unikernel means the guest simply stops.
-
-In the Proxmox web UI, on the VM:
-
-1. **Hardware → Add → Serial Port**, port number `0`.
-2. **Options → Display → Serial terminal 0**.
-
-Then `qm terminal <vmid>` from the Proxmox host attaches to it. Under plain QEMU the equivalent is
-`-serial stdio` or `-nographic`.
-
-Do this **before** the first boot. Adding it afterwards works, but the first boot is the one whose
-output decides whether virtio-net attached at all, and that output is gone.
-
-### The configuration channel (`OS-008`, #259)
-
-There is exactly one runtime setting (`KMSRSOS_CONFIG`, `CFG-002` #167) and it reaches a Hermit guest
-through the loader's boot-arguments file, not through anything the hypervisor offers. What a Proxmox
-admin can set from the GUI, and whether it arrives:
-
-| Setting | GUI-settable | Reaches a Hermit guest |
-|---|:---:|---|
-| DHCP, via the network | yes | **yes** — the sanctioned path, and how the guest gets its address (#254) |
-| MAC address | yes | yes — readable by the guest, so it is a per-VM identifier if one is needed |
-| Serial port | yes | yes, and mandatory — see above |
-| CPU type (`host`) | yes | yes, and **required** — see entropy below |
-| SMBIOS type 1 fields | yes | **no** — the kernel has no DMI code and the loader discards the pointer |
-| Cloud-init drive | yes | **no** — it arrives as an ISO9660 block device, and there is no block driver |
-| `args` / kernel command line | **no** (CLI only) | would work, but Proxmox does not expose it in the web UI |
-
-So the whole GUI-settable channel is **DHCP plus the MAC address**. Everything else comes from the
-ESP: a GPT disk whose EFI system partition holds `\EFI\BOOT\BOOTX64.EFI` (the hermit loader),
-`\EFI\hermit\hermit-app` (this binary) and optionally `\EFI\hermit\hermit-bootargs`, a plain text file
-the loader reads. Boot args accept `env=KEY=VALUE` tokens, which is how `KMSRSOS_CONFIG` is set.
-
-Worked example — serve the web UI on 8081 instead of 8080:
-
-```
-# \EFI\hermit\hermit-bootargs on the image's ESP
-env=KMSRSOS_CONFIG=web_ui_port = 8081
+```shell
+$ nix build .#linuxIso        # kmsrsos-linux.iso, 14 MiB
+$ nix build .#linux-kernel    # the bzImage on its own
 ```
 
-Editing that file is the entire in-place reconfiguration story, and it is deliberately small: the
-doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch
-settings that cannot change a byte on the wire (`CFG-001`, #166).
+**One ISO, both firmwares.** `CONFIG_EFI_STUB` makes a `bzImage` simultaneously a PE/COFF executable
+and a Linux boot image — `MZ` at offset 0 and `HdrS` at 0x202 — so the same 3.4 MiB file is both
+`\EFI\BOOT\BOOTX64.EFI` for UEFI and an isolinux `KERNEL` line for BIOS. There is no bootloader on
+the UEFI path and nothing to register in NVRAM, so a fresh VM boots on its first try.
 
-### Set the CPU type to `host`
+The initramfs and the kernel command line are *inside* that file
+(`CONFIG_INITRAMFS_SOURCE`, `CONFIG_CMDLINE_OVERRIDE`). The second is not a convenience: it means a
+bootloader passing a different command line is **ignored**, so the kernel command line is a
+build-time decision like every other setting here (axiom A3, `CFG-001` #166).
 
-Not cosmetic, and not about speed. Hermit's CSPRNG seeds from **RDSEED** or from virtio-rng, and on a
-seeding failure `sys_read_entropy` *silently succeeds* — filling the buffer from a Park–Miller–Lehmer
-LCG seeded with a static zero, a stream that is identical across boots, and emitting only a warning
-the guest never sees. `getrandom` sees an ordinary success and hands it on.
+### Which hypervisors this runs on (`OS-025`, #342)
 
-Proxmox's default `kvm64` CPU model **does not expose RDSEED**, and Proxmox's `virtio-rng-pci` lands
-on the same conventional PCI bus Hermit rejects. So on a default Proxmox VM this is the likely path
-rather than the edge case, and every value this host draws — the RPC association group, response IVs
-and salts, the hardware ID, the randomised ePID fields — would quietly become a constant while the
-service kept working perfectly.
+**The column that matters is the last one.** A driver list is never complete, and the failure this
+matrix exists to prevent is not "it did not boot" — it is a machine that boots to completion, prints
+`listening`, and then answers nobody forever because no driver claimed its NIC. So every row says
+how it was checked, and "reasoned" means exactly that: read from documentation, never observed.
 
-**Options → Processors → Type: `host`.** The self-test at start-up (`OS-012`, #263) **refuses to
-serve** rather than serving a predictable identity: the process exits 69 and says so, naming RDSEED,
-because the operator who reads that line is one hypervisor setting away from the fix. The source is
-re-tested every five minutes thereafter — Hermit reseeds every second and a failed reseed is
-silent — and a source that starts repeating takes `/healthz` to 503 and
-`kmsrsos_entropy_healthy` to 0.
+| Platform | Firmware | Default NIC | Driver | Checked how |
+|---|---|---|---|---|
+| **Proxmox VE / QEMU-KVM** | SeaBIOS or OVMF | virtio-net | `virtio_net` | **Observed**: boots and serves on both firmwares, on the exact PCI topology `qemu-server` emits |
+| Proxmox — *Intel E1000* | either | e1000 | `e1000` | **Observed** |
+| Proxmox — *Intel E1000E* | either | e1000e | `e1000e` | **Observed** |
+| Proxmox — *Realtek RTL8139* | either | rtl8139 | `8139cp` | **Observed** |
+| Proxmox — *VMware vmxnet3* | either | vmxnet3 | `vmxnet3` | **Observed** |
+| **Nutanix AHV** | UEFI or legacy | virtio-net | `virtio_net` | Reasoned — it is KVM, and the device model is the one above |
+| **VMware ESXi / vSphere** | EFI on 7.x+ | vmxnet3 | `vmxnet3` | Device model observed in QEMU; **ESXi itself not booted** |
+| **VMware Workstation / Fusion** | BIOS or EFI | e1000e | `e1000e` | Device model observed; the product not booted |
+| **VirtualBox** | BIOS or EFI | Intel 82540EM | `e1000` | Device model observed; the product not booted. `pcnet32` is in for the older adapter choices |
+| **Hyper-V Gen 1** | BIOS | synthetic (VMBus) | `hv_netvsc` | **Not observed.** VMBus cannot be exercised in QEMU at all |
+| Hyper-V Gen 1 — *Legacy Network Adapter* | BIOS | DEC 21140 | `tulip` | Device model observed in QEMU |
+| **Hyper-V Gen 2 / Azure** | UEFI | synthetic only — no emulated NIC exists | `hv_netvsc` | **Not observed.** Secure Boot must be turned off: the EFI stub is unsigned |
+| **Xen — XCP-ng / Citrix** | HVM | rtl8139 | `8139cp` | Device model observed |
+| Xen — PV path | HVM | xen-netfront | `xen_netfront` | **Not observed** |
+| **bhyve** | UEFI only | virtio-net | `virtio_net` | Reasoned. The console path is unverified — there is no VGA unless `fbuf` is configured |
+| **Cloud Hypervisor** | direct kernel boot | virtio-**pci** | `virtio_net` | Reasoned |
+| **Parallels Desktop** | EFI | e1000 or virtio | both | Reasoned |
+| **EC2** | UEFI | ENA | `ena` | **Not observed** — `OS-027` (#344) |
 
-So the mistake is loud rather than silent. It is still a mistake, and this is how not to make it.
+`nix flake check` runs `linux-nics`, which boots the shipped ISO once per QEMU device model in that
+table and asserts the machine **serves an activation**, not that it booted. Everything marked
+"observed" is that check; everything else is a claim.
+
+#### What each row costs
+
+Measured on the built `bzImage` with the initramfs held constant, which is the only way the number
+means anything — the initramfs is *inside* the image, so a change to the program moves the total by
+more than a driver does. Reproduce with `nix build .#linux-deltas && cat result/report`.
+
+| Driver | Cost | For |
+|---|---|---|
+| `8139cp` + `8139too` | +12 KiB | Proxmox's RTL8139 entry; Xen HVM's default |
+| `pcnet32` | +12 KiB | VirtualBox's older adapters |
+| `tulip` | +16 KiB | Hyper-V Gen 1's Legacy Network Adapter |
+| `vmxnet3` | +24 KiB | VMware, and Proxmox's vmxnet3 entry |
+| `ena` | +24 KiB | EC2 Nitro |
+| **VMBus** (`hv_netvsc` + timer) | **+40 KiB** | Hyper-V Gen 1 and 2, Azure |
+| ~~Xen PV~~ (`xen-netfront`) | ~~+148 KiB~~ | **declined** — see below |
+| **all of the above, as shipped** | **+120 KiB** | 2,364,416 → 2,487,296 bytes |
+
+The total is less than the sum, because drivers sharing a vendor gate pay for it once. Taking Xen on
+top of this would add a further **140 KiB**.
+
+**For scale, the drivers are the small part.** The whole `bzImage` went from 2,814,976 to 3,539,968
+bytes across this round of work, and the kernel configuration is a rounding error in that:
+
+| | |
+|---|---|
+| `OS-026` (#343) — the power button, net of what it let go | −36 KiB |
+| `OS-025` (#342) — the platform matrix | +120 KiB |
+| `OS-023` (#339) — the pare-back | −36 KiB |
+| **the initramfs** | **≈ +660 KiB** |
+| | **+708 KiB** |
+
+The initramfs is inside the `bzImage`, and it grew because the DHCP and SNTP clients of `OS-019`
+(#335) and `OS-020` (#336) brought a DNS library with them. That was a deliberate trade — the
+reasoning is in [`decisions.md`](decisions.md) — and this is what it weighs. Anyone wanting a
+smaller image should start there and not with the drivers.
+
+**VMBus was expected to be the expensive one and is not.** The kernel config used to say `hv_netvsc`
+"drags in the whole VMBus stack, which is not a driver-sized cost". Measured, it is 40 KiB — less
+than twice a plain PCI driver. The estimate had never been taken on a built image.
+
+**The Xen paravirtual path is the expensive one, and is declined.** 148 KiB is 6 % of the whole
+kernel, because it is xenbus, grant tables and event channels rather than a driver. What it buys is
+throughput on XCP-ng and Citrix Hypervisor — whose *default* emulated NIC is RTL8139 and therefore
+already works for 12 KiB. A host that answers one 384-byte request per client per few hours does not
+need the faster path.
+
+**A machine with no usable interface says so.** That is the other half of this, and the half no
+driver list can cover:
+
+```
+{"level":"error","event":"dhcp","detail":"this machine has no Ethernet interface, so it
+ will never have an address and no client will ever reach it. The usual cause is a NIC
+ model with no driver in this kernel — see the supported list in docs/deployment.md"}
+```
+
+It keeps retrying rather than giving up, because a hypervisor that attaches the NIC a moment late
+looks identical at boot. The `linux-nics` check boots a machine with `-nic none` and asserts that
+sentence appears — and that the host still binds its port, because a host that cannot find a NIC is
+not a host that should refuse to start.
+
+#### On Proxmox
+
+Create a VM with **no disk**, upload `kmsrsos-linux.iso` to your ISO storage, attach it to the
+CD-ROM drive, and boot it. That is the whole procedure. SeaBIOS or OVMF both work, so the default
+BIOS setting is fine and an EFI disk is only needed if you choose OVMF.
+
+Two things are worth adding, neither of which is required for it to serve:
+
+| | Why |
+|---|---|
+| **Hardware → Add → virtio-rng** | Cuts time-to-serving by **more than half** — see the numbers below. The program blocks in `getrandom(2)` until the kernel's CRNG is seeded, and on a CPU model without RDRAND that takes seconds of jitter entropy |
+| **Hardware → Add → Serial Port** `0`, then **Options → Display → Serial terminal 0** | Convenience, not necessity — the framebuffer console already shows the boot in the noVNC window |
+
+#### How long it takes to start
+
+Measured on the shipped ISO, `-machine q35 -cpu qemu64 -enable-kvm -smp 1 -m 512M`, best of three,
+from the QEMU process starting to the guest printing `listening`:
+
+| Firmware | virtio-rng | Seconds |
+|---|---|---|
+| SeaBIOS | no | 1.70 |
+| SeaBIOS | **yes** | **0.71** |
+| OVMF | no | 3.33 |
+| OVMF | **yes** | 1.86 |
+
+So **attach virtio-rng**: it is worth a second on BIOS and a second and a half on UEFI, and it is one
+checkbox. Firmware is what is left — OVMF costs about 1.1 s more than SeaBIOS before Linux starts,
+and that is PE loading and relocation rather than I/O (CD-ROM and SATA measure identically).
+
+**`cpu: host` is not needed.** It was mandatory on Hermit, whose only seed source was RDSEED. Linux
+seeds its CRNG on any CPU model; with virtio-rng attached, `host` and the default `kvm64` differ by
+noise.
+
+**`qm set --args` is not needed.** Proxmox puts NICs on a conventional PCI bus and never emits
+`disable-legacy=on`, so the virtio-net device is *transitional* — PCI ID `0x1000` rather than
+`0x1041`. Hermit refused anything below `0x1040`, which is `OS-004` (#255) and is why that target
+needed a CLI-only workaround. Linux has driven transitional virtio devices for fifteen years.
+
+#### Locally
+
+```shell
+$ qemu-system-x86_64 -machine q35 -cpu qemu64 -enable-kvm \
+    -smp 1 -m 512M -display none -serial stdio -no-reboot \
+    -drive file=result/kmsrsos-linux.iso,media=cdrom,readonly=on \
+    -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+    -device virtio-net-pci,netdev=u1 \
+    -device virtio-rng-pci
+```
+
+`kmsrs-client 127.0.0.1:1688` is the check that it answers *correctly*. The `linux-boot` check in
+`nix flake check` runs exactly this on both firmwares, on the PCI topology `qemu-server` emits, with
+no `--args` — so the two conditions that defeated the unikernel are exercised on every change.
+
+### The console (`OS-028`, #345)
+
+**Every line this program writes goes to every console the kernel registered.** Not to one of them.
+Pid 1 reads `/proc/consoles` at boot, opens each console's device node, and tees its own stdout and
+stderr — which is also the KMS host's log, and a panic message — to all of them.
+
+That is worth stating because the consequence is visible: **an operator watching both the noVNC
+window and a serial port sees the same JSON twice.** That is correct, not a bug, and there is no
+setting to turn it off.
+
+The line that says which consoles were found comes first in the boot:
+
+```
+{"level":"info","event":"console","detail":"logging to tty0 ttyS0"}
+```
+
+If that says `inherited stderr: …` instead, the tee could not be installed and output goes to
+`/dev/console` alone, as it did before this change. The machine still serves; you may just be
+looking at the wrong console.
+
+Why it works this way: `/dev/console` — which the kernel hands pid 1 as fds 0, 1 and 2 — resolves to
+the **last** `console=` entry on the command line, while kernel messages go to all of them. So
+before this, whichever console came last got the program's log and the other showed a clean boot
+followed by silence, which reads exactly like a program that never started (`OS-005`, #256). Which
+console an operator can actually read is a property of the platform — the framebuffer on Proxmox,
+`ttyS0` and nothing else on EC2 (`OS-027`, #344) — so there was no ordering that was right
+everywhere. Now the ordering decides nothing.
+
+### What is in the kernel, and what is not
+
+`os/linux/kernel.config` is checked in and is meant to be read. The base is `make tinyconfig`, so
+every subsystem defaults to **off** and each of the ~90 enabled entries is a deliberate line — the
+file is the statement of what is in this machine's TCB. `os/linux/config.nix` regenerates it and
+carries the reasoning per group.
+
+**Axiom A5 is structural here.** `CONFIG_BLOCK` is unset: there is no block *layer*, not merely no
+block drivers, so disk I/O is a syscall with nothing behind it. The boot medium is invisible to the
+kernel — firmware reads the ESP and the image runs from RAM thereafter — so no ATAPI, no SCSI and no
+ISO9660 are compiled in either. After boot the CD-ROM could be ejected.
+
+Also absent, deliberately: modules, netfilter, BPF, tracing, cgroups, namespaces, USB, sound, and
+every filesystem but ramfs, tmpfs, proc and sysfs.
+
+Present because something needs them: PCI and ACPI (the NIC is on a PCI bus), the 8250 UART **and** a
+framebuffer console, virtio-net plus `e1000`/`e1000e` for hypervisors that do not offer virtio,
+`seccomp`, and `kvmclock` — which keeps the clock close between the SNTP polls of `OS-020` (#336).
+
+### Addressing (`OS-003`, #254; `OS-019`, #335)
+
+The guest takes its address from DHCP and there is nothing to configure. The server binds `0.0.0.0`
+and `[::]`, and no part of this program reads its own IP to decide anything.
+
+**The DHCP client is part of the program.** `CONFIG_IP_PNP_DHCP` — the kernel's built-in client — is
+gone, because it took a lease and never renewed it, and because it discarded the three options this
+host most wants. What it does now:
+
+| | |
+|---|---|
+| Renews at T1 and rebinds at T2 | So a lease that expires does not silently take the host off the network hours after a boot that looked fine |
+| Reads **option 15** and **option 119** | The domain your clients search, which is the zone the `_vlmcs._tcp` SRV record has to go in. The `/instructions` page fills it in for you instead of printing `EXAMPLE.COM` |
+| Reads **option 42** | The NTP servers, which the clock discipline below prefers over anything on the internet |
+| Says so when there is no interface | A NIC model with no driver in this kernel used to produce a machine that booted, reported `listening`, and served nobody forever. It now says that on the console |
+
+The client's whole conversation is on the console, at `"event":"dhcp"`:
+
+```
+{"level":"info","event":"dhcp","detail":"using eth0 (52:54:00:12:34:56)"}
+{"level":"info","event":"dhcp","detail":"Init -> Selecting"}
+{"level":"info","event":"dhcp","detail":"192.168.1.1 offered 192.168.1.50"}
+{"level":"info","event":"dhcp","detail":"192.168.1.50/24 on eth0, lease 3600s"}
+{"level":"info","event":"dhcp","detail":"Requesting -> Bound"}
+```
+
+Every RFC 2131 state transition appears once, which is the trace to look at when a lease is not
+being renewed — the alternative symptom is an address that stops working in the middle of the night.
+
+**Reserve the address on your DHCP server anyway.** Not because the lease will lapse — it will not —
+but because the SRV record and every `slmgr /skms` your clients hold have to point somewhere stable.
+If a renewal ever comes back with a *different* address, the host takes the old one off, uses the new
+one, and says this on the console:
+
+```
+{"level":"info","event":"dhcp","detail":"the lease moved from 192.168.1.50 to 192.168.1.77;
+ anything pointing at 192.168.1.50 — an SRV record, a client's slmgr /skms — is now wrong"}
+```
+
+**A machine with more than one NIC takes a lease on the lowest-numbered one and says which.** The KMS
+port is bound on all of them regardless; the choice only decides where the DHCP conversation happens
+and which address the page suggests you publish.
 
 ### Memory (`OS-011`, #262)
 
-A unikernel has a fixed memory budget decided when the VM is created, no swap, and no OOM killer to
-pick a victim: a failed allocation in a program compiled with `panic = "abort"` stops the machine, and
-only the hypervisor can restart it. So the number that matters is not how much this host uses but how
-much it *can* use, and that is bounded by constants rather than by traffic.
+`crates/kmsrs-server/src/budget.rs` adds up the CMID table, the event-log ring buffer and the
+connection state budget, and asserts the total at **compile time**, so a build that would exceed the
+ceiling does not link. The current ceiling is 8 MiB of heap; 512 MiB is a comfortable VM size.
 
-`crates/kmsrs-server/src/budget.rs` adds them up — the CMID table, the event-log ring buffer and the
-connection state budget — and asserts the total at **compile time**, so a build that would exceed the
-ceiling does not link. The product database is not in that sum: it is `static` data in `.rodata`
-(`DB-003`, #127), part of the image rather than of the heap, and `DB-018` (#142) is where it is
-measured.
+The failure mode is worth knowing: this program is PID 1, the kernel refuses to OOM-kill PID 1, and
+`panic = "abort"` means a panic ends the machine. So an allocation failure is a kernel panic on the
+console rather than a silent restart — loud, which is the right direction, and the reason the budget
+is a compile-time assertion rather than a runtime check.
 
-The current ceiling is 8 MiB of heap. A Hermit guest is normally given 64 MiB or more, which leaves
-the kernel, the stacks and the network buffers an order of magnitude more room than this takes.
+### The clock (`OS-020`, #336)
 
-### virtio-net may not attach at all (`OS-004`, #255)
+**Nothing in a KMS response derives from this host's clock.** The v6 key schedule derives from the
+*client's* timestamp, every deadline in the program is monotonic, and the wall clock is read exactly
+once at start-up. So the clock matters for the log, and for the ±4 hour skew band a future strict
+build would compare a client against — not for whether anything activates.
 
-Proxmox always places NICs on a conventional PCI bus — `pci.0` is a `pci-bridge` behind an i82801b11
-bridge even on q35 — and **never** emits `disable-legacy=on`; there are zero occurrences of it in
-`qemu-server`. QEMU therefore presents a *transitional* virtio-net device with PCI ID `0x1000`, and
-Hermit refuses anything below `0x1040`.
+That decides the two questions an operator would ask:
 
-That chain is solid link-by-link from the sources and has **never been observed**, which is what #255
-is for. If it does fail, the serial console will say so on the first boot — which is the other reason
-to attach one before that boot rather than after.
+- **Where the time comes from.** DHCP option 42 if the lease supplies it, because that is your own
+  infrastructure and on an isolated LAN the only thing reachable. Otherwise `pool.ntp.org`, resolved
+  through the lease's own DNS servers — there is no `/etc/resolv.conf` here to configure, and no
+  resolver that would read one. The pool hostname is a build-time constant like every other setting
+  (`CFG-001`, #166).
+- **What happens when nothing answers.** **The host serves anyway, with the clock it booted with**,
+  and says so once. Refusing to activate because an NTP server was unreachable would trade this
+  machine's entire function for a log field. On every platform in the matrix above the clock is
+  already close — kvmclock, the Hyper-V reference TSC, or a real RTC.
 
----
+It steps rather than slews, once every seventeen minutes, when the offset exceeds a second:
+
+```
+{"level":"info","event":"clock","detail":"stepped -3s from a stratum 2 server (round trip 4ms)."}
+```
+
+A correction larger than a day is logged at `warn` — that is a VM restored from a snapshot or a dead
+RTC battery, not drift.
+
+**A step cannot disturb anything in flight**, and not because this code is careful about it:
+`clock_settime` moves `CLOCK_REALTIME` and never `CLOCK_MONOTONIC`, and every deadline this program
+has is monotonic. `the_wall_clock_is_read_in_exactly_two_places` in
+`crates/kmsrs-server/tests/workspace_invariants.rs` is what keeps that true — it fails if the request
+path ever grows a `SystemTime::now()`.
+
+This is SNTP (RFC 4330), not NTP. No discipline loop, no peer selection: a `pool.ntp.org` answer is
+taken from the first server that gives a usable one, so a lying time server is believed. That is
+acceptable only because the DHCP server that named it already controls this host's address and
+routing and can do considerably worse — it is a property, not an oversight.
+
+### On EC2 (`OS-027`, #344)
+
+**This target is for an operator who already has a VPN or a site-to-site link into the VPC.** The
+loopback constraint at the top of this document applies here with more force, not less: an EC2
+instance is the easiest possible place to give clients an address they cannot route to, and exposing
+1688 to the internet is not the intended deployment — see the source-IP ACL decision
+([12](decisions.md)) for why there is no ACL to lean on either.
+
+Nothing here needs a different artifact. The same ISO is already a GPT disk with a typed EFI System
+Partition (`OS-027`, #344 changed one xorriso flag to make that true), and `aws ec2 import-image` —
+which would refuse it, since a kernel with no distribution underneath is not a guest OS it
+recognises — is not on the path. `coldsnap` writes raw bytes to an EBS snapshot through the EBS
+direct APIs with no inspection at all.
+
+```shell
+# 1. A snapshot of the ISO, byte for byte. Nothing inspects it.
+$ nix build .#linuxIso
+$ coldsnap upload --region eu-west-1 result > snapshot-id
+
+# 2. An AMI over that snapshot.
+$ aws ec2 register-image --region eu-west-1 \
+    --name kmsrsos \
+    --description "kmsrsos KMS host" \
+    --architecture x86_64 \
+    --root-device-name /dev/xvda \
+    --boot-mode uefi \
+    --ena-support \
+    --virtualization-type hvm \
+    --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=$(cat snapshot-id),VolumeSize=1,DeleteOnTermination=true}"
+```
+
+`--boot-mode uefi` is the load-bearing one: firmware reads the ESP off the volume and Linux never
+touches a block layer, exactly as it does from a CD-ROM, so axiom A5 is untroubled.
+`--ena-support` matches `CONFIG_ENA_ETHERNET` in the kernel — without it a Nitro instance lands in
+precisely the silent no-address failure the [matrix](#which-hypervisors-this-runs-on-os-025-342)
+exists to eliminate. Secure Boot is off on EC2 unless keys are enrolled, so the unsigned EFI stub is
+fine.
+
+Read the log with `aws ec2 get-console-output`, which reads `ttyS0` and nothing else. That works
+because pid 1 writes to every registered console (`OS-028`, #345) rather than to whichever one the
+command line ended with.
+
+**Not verified on a real instance.** Everything above is derived from observation of the artifact —
+the GPT layout, the ESP type GUID, and booting the same bytes as a raw disk under OVMF — and from
+AWS documentation for the two API calls. Nobody has launched it. Two claims in particular are
+untested and would show up immediately if wrong:
+
+- **The backup GPT header is not at the volume's last LBA.** The upload is ~14 MB and the volume
+  rounds up to 1 GiB, so the backup header sits ~14 MB in rather than at the end of the disk.
+  Firmware generally boots from the primary header alone. *Generally* is not a test.
+- **`ena` binding on a real Nitro instance.** The driver is compiled in and has never seen the
+  hardware.
+
+### Telling the hypervisor about itself (`OS-022`, #338)
+
+**Memory** needs nothing: `virtio-balloon` reports statistics with no guest userland at all, and
+`CONFIG_VIRTIO_BALLOON` is in the kernel. Attach the device and the hypervisor sees them.
+
+**The address** needs an agent, and there is one. On Proxmox: **Hardware → Add → QEMU Agent**, or
+`qm set <id> --agent 1`. The console says whether it found the channel:
+
+```
+{"level":"info","event":"agent","detail":"answering on vport0p1"}
+```
+
+or, on a VM without it:
+
+```
+{"level":"info","event":"agent","detail":"no org.qemu.guest_agent.0 channel is attached
+ to this VM, so the hypervisor will show no address for it. On Proxmox: Hardware -> Add ->
+ QEMU Agent, or `qm set <id> --agent 1`"}
+```
+
+**Seven commands are implemented and everything else is refused**, which is the more interesting
+half of the surface. `qemu-ga` has about forty; most of them are things this program must not do:
+
+| Command | |
+|---|---|
+| `guest-ping`, `guest-sync`, `guest-sync-delimited` | liveness, and the handshake libvirt and Proxmox send before anything else |
+| `guest-info` | what a client asks before deciding which commands to offer |
+| `guest-network-get-interfaces` | the one that fills the IP column |
+| `guest-get-osinfo` | so the summary page says `kmsrsos` rather than `unknown`. Honest rather than flattering: claiming to be a distribution would invite a management tool to try running a package manager |
+| `guest-shutdown` | the same drain the ACPI power button reaches (`OS-026`, #343), not a second one |
+| **`guest-exec`, `guest-exec-status`** | **refused.** Remote code execution by design, over a channel with no authentication. There is no shell here to exec into, and `qm guest exec` failing should be a decision rather than an accident of packaging |
+| **`guest-file-*`** | **refused.** Disk I/O, which axiom A5 forbids and this kernel has no block layer for |
+| **`guest-fsfreeze-*`** | **refused.** Meaningless without a filesystem — and worth knowing before you schedule a backup that expects a quiesced guest |
+| **`guest-suspend-*`** | **refused.** `CONFIG_SUSPEND` is unset; a KMS host that suspends is a KMS host that is down |
+| everything else | **refused**, with `CommandNotFound` and a reason |
+
+Every refusal is a *reply*. A hypervisor that gets silence waits for a timeout and an operator reads
+that as a hung guest, so "not supported" is said rather than implied.
+
+### What still needs doing
+
+Everything a normal userland provides that this host needs, it now has. What is left is
+platform reach rather than function — see [the hypervisor matrix](#which-hypervisors-this-runs-on-os-025-342)
+for what has been observed and what has only been reasoned about, and `OS-027` (#344) for EC2.
+
+What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
+orphaned children. It reports what it mounted on the console at boot —
+`{"event":"pid1","detail":"mounted /dev /proc /sys"}` — which is the line to look for if a guest
+misbehaves.
+
+### Stopping it (`OS-026`, #343)
+
+**`qm shutdown` works, and drains.** So does the Shutdown button in the web UI, `virsh shutdown`, and
+anything else that sends an ACPI power-button event. What happens is:
+
+```
+{"level":"info","event":"power","detail":"acpi power button: draining"}
+{"level":"info","event":"stopped","detail":"kmsrsos"}
+{"level":"info","event":"power","detail":"serve returned: powering off"}
+```
+
+In-flight connections finish, the listeners close, and the machine powers itself off — the same drain
+`SIGTERM` gets on the Linux and Windows builds (`NET-007`, #157), reached through the same code
+rather than a parallel one.
+
+Three details worth knowing:
+
+- **The button is found by capability, not by name.** Pid 1 looks through `/sys/class/input` for a
+  device claiming `KEY_POWER` rather than assuming `event0`, because which node it lands on depends
+  on what else the hypervisor attached — Proxmox adds a USB tablet by default on some machine types.
+  The console says which node it found: `{"event":"power","detail":"watching event0"}`.
+- **A press during the first fraction of a second is ignored.** The kernel discards signals that pid 1
+  has no handler for, and the handler is installed as the host starts serving. Press again.
+- **`qm stop` is still there and still drops everything in flight.** It is the hypervisor pulling the
+  power; nothing in the guest can make that graceful.
+
+This needed the kernel's evdev interface, which was the one part of the input subsystem that was
+missing — `CONFIG_INPUT` and `CONFIG_ACPI_BUTTON` were already on, having arrived as dependencies of
+the console rather than as a decision. Naming all three in `os/linux/config.nix` and naming what they
+drag in made the change a net *removal* of about fifty lines from the built config: the AT keyboard
+driver, PS/2 mouse support and the SERIO bus had been in this machine's TCB since `OS-017` (#333)
+without anybody asking for them. Measured on the built `bzImage` with the initramfs held constant,
+**2,405,376 → 2,368,512 bytes** — handling the power button makes the kernel 36 KiB smaller.
 
 ## What is not in the artifact
 

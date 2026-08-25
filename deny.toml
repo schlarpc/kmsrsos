@@ -19,6 +19,20 @@
 # place to be relaxed about advisories.
 all-features = true
 
+# The targets this project actually ships (`PKG-001`, #238; `PKG-003`, #240).
+#
+# Without this, `cargo deny` walks every `[target.'cfg(...)']` table in the
+# graph and audits dependencies that can never be built here — `OS-019` (#335)
+# brought in `hickory-proto`, whose Android support pulls `jni`, which pulls
+# `walkdir` and `log`. Auditing an Android JNI binding for a KMS host that
+# builds for two triples is noise, and noise in a ban list is how a real finding
+# gets waved through.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]
+
 [advisories]
 version = 2
 # An unmaintained crate is a finding worth seeing rather than a build failure:
@@ -68,10 +82,15 @@ allow-wildcard-paths = true
 # reaches for the convenient thing, which is exactly how py-kms ended up with a
 # web framework inside an activation server.
 deny = [
-  # No async runtime. There is one mio event loop on all three targets, and
-  # tokio has zero upstream Hermit support (see the ARCH-005 superseding
-  # decision).
-  { name = "tokio" },
+  # One async runtime, and it is tokio (`OS-024`, #340). The ban on it was for
+  # Hermit, which had no upstream support and needed a four-commit fork; that
+  # target is gone (`OS-018`, #334), and `kmsrs-os` being pid 1 means the
+  # userland now owns DHCP renewal, NTP polling, a reaper and a guest-agent
+  # channel — several concurrent activities with timers, which is precisely
+  # what mio does not provide.
+  #
+  # The other two stay banned. The reason was never "async is bad", it was that
+  # a second runtime is a second scheduler with its own idea of when work runs.
   { name = "async-std" },
   { name = "smol" },
 
@@ -127,13 +146,29 @@ deny = [
   # a file sink gets added to a program that must not have one — and axiom A5
   # forbids the file.
   #
-  # `log` itself is permitted under the three dependencies that already carry
-  # it, and nowhere else. It is a facade with no sink installed, so those
-  # crates' log calls go nowhere; what the ban is really for is stopping a
-  # `log::info!` appearing in *our* code, at which point somebody installs a
-  # sink and the discipline is gone.
-  { name = "log", wrappers = ["mio", "rustls", "ureq", "ureq-proto"] },
-  { name = "tracing" },
+  # `log` itself is permitted under the dependencies that already carry it, and
+  # nowhere else. It is a facade with no sink installed, so those crates' log
+  # calls go nowhere; what the ban is really for is stopping a `log::info!`
+  # appearing in *our* code, at which point somebody installs a sink and the
+  # discipline is gone.
+  #
+  # `tokio` and `mio` were on this list and are not any more: neither reaches
+  # `log` with the features this workspace selects, so cargo-deny reported both
+  # as unused wrappers. Left in, they would be two names nobody could justify;
+  # taken out, a future feature that does reach `log` fires the ban and somebody
+  # has to look, which is the list working rather than failing.
+  { name = "log", wrappers = ["rustls", "ureq", "ureq-proto", "netlink-packet-route", "netlink-sys"] },
+  # `tracing` was banned outright, with no wrappers, while `log` right above it
+  # was banned *with* them. The stated reason — stop a facade with a pluggable
+  # sink appearing in our code — applies to both identically, and a transitive
+  # `tracing` with no subscriber installed is exactly as inert as a transitive
+  # `log` with no logger, so the asymmetry was an oversight rather than a
+  # decision. Corrected in `OS-019` (#335), which needed `hickory-proto`.
+  #
+  # It did useful work while it lasted: the ban is what forced a look at
+  # `dhcproto`'s dependency tree, and finding a whole DNS library in there is
+  # what turned up the fact that `OS-020` (#336) needed one anyway.
+  { name = "tracing", wrappers = ["hickory-proto", "hickory-net", "hickory-resolver"] },
   { name = "env_logger" },
 
   # No argument parser in the tree at all. The server takes no arguments

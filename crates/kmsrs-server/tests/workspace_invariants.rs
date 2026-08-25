@@ -33,10 +33,39 @@ const QUARANTINED_CRATE: &str = "kmsrs-dbgen";
 /// shipped artifact.
 const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client", "kmsrs-os"];
 
-/// The one crate permitted to define its own lint table instead of inheriting
-/// the workspace's, because it holds the single documented unsafe boundary
-/// (`SEC-001`, #193; `OS-013`, #264).
-const UNSAFE_BOUNDARY_CRATE: &str = "kmsrs-os";
+/// The crate that is process 1 on the bare-metal target, and so the one crate
+/// that must open paths (`OS-021`, #337). It answers to
+/// `pid1_opens_nothing_but_pseudo_filesystems` instead of to
+/// `no_shipped_crate_touches_the_filesystem`.
+const PID1_CRATE: &str = "kmsrs-os";
+
+/// Names that mean "this code opens something".
+///
+/// `rustix::fs::open` is on the list because `OS-021` (#337) brought rustix
+/// into the tree for `mount(2)`, and a safe binding to `openat(2)` arrived in
+/// the same crate. Axiom A5 is about what the program reaches for, not about
+/// which crate spells the syscall, so leaving it off would have made the ban
+/// avoidable by import.
+const OPENS_SOMETHING: &[&str] = &[
+    "std::fs",
+    "File::open",
+    "File::create",
+    "OpenOptions",
+    "temp_dir",
+    "TempDir",
+    "NamedTempFile",
+    "read_to_string(",
+    "write(&path",
+    "rustix::fs::open",
+];
+
+// No crate is permitted to define its own lint table any more. `kmsrs-os` held
+// the single documented unsafe boundary (`SEC-001`, #193; `OS-013`, #264) and
+// set `deny` where the workspace sets `forbid`, so a boundary would have had to
+// name itself. `OS-018` (#334) removed that crate with Hermit, and the boundary
+// went with it — never having contained any `unsafe` at all. The workspace
+// `forbid` is now absolute, which is a stronger statement than this test was
+// originally written to make.
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -172,44 +201,12 @@ fn every_crate_inherits_the_workspace_lint_table() {
             .get("lints")
             .unwrap_or_else(|| panic!("{name} has no [lints] table (ARCH-008, #8)"));
 
-        if name == UNSAFE_BOUNDARY_CRATE {
-            assert_eq!(
-                lints["rust"]["unsafe_code"].as_str(),
-                Some("deny"),
-                "{name} holds the single documented unsafe boundary (OS-013, #264), so it \
-                 defines its own lint table — but unsafe_code must still be denied, so that \
-                 the boundary has to name itself with an explicit expect and a safety comment."
-            );
-
-            // Its table is a copy, so it can drift. Every lint the workspace
-            // sets must be set here to at least the same severity; otherwise
-            // adding a deny to the workspace would silently exempt this crate,
-            // which is the one crate where that matters most.
-            for table in ["rust", "clippy"] {
-                let workspace_lints = workspace["workspace"]["lints"][table]
-                    .as_table()
-                    .expect("the workspace lint table has rust and clippy sections");
-                for (lint, level) in workspace_lints {
-                    // The one deliberate difference, asserted separately above.
-                    if lint == "unsafe_code" {
-                        continue;
-                    }
-                    assert_eq!(
-                        lints[table].get(lint.as_str()),
-                        Some(level),
-                        "{name}'s copied lint table has drifted: {table}::{lint} is set to \
-                         {level:?} at the workspace level but not here (ARCH-008, #8)"
-                    );
-                }
-            }
-        } else {
-            assert_eq!(
-                lints.get("workspace").and_then(toml::Value::as_bool),
-                Some(true),
-                "{name} must say `[lints] workspace = true`. Only {UNSAFE_BOUNDARY_CRATE} may \
-                 define its own table (SEC-001, #193)."
-            );
-        }
+        assert_eq!(
+            lints.get("workspace").and_then(toml::Value::as_bool),
+            Some(true),
+            "{name} must say `[lints] workspace = true`. No crate defines its own \
+             table any more (SEC-001, #193; OS-018, #334)."
+        );
     }
 }
 
@@ -397,27 +394,28 @@ fn only_the_operational_config_can_be_deserialised() {
 /// `OS-013` (#264): the unsafe boundary is empty, and there is exactly one
 /// place it could ever be.
 ///
+/// `SEC-001` (#193), `OS-013` (#264): no `unsafe` anywhere, at all.
+///
 /// The workspace lint table sets `unsafe_code = "forbid"`, and `forbid` cannot
 /// be lifted by an inner `allow` — which is the property that makes it worth
-/// setting there. `kmsrs-os` is the single crate permitted to override it, and
-/// it sets `deny` instead: a boundary would have to name itself with an
-/// explicit `#[expect(unsafe_code)]` carrying a safety comment, and every other
-/// line in the crate is still rejected.
+/// setting there. `kmsrs-os` used to be the single crate permitted to override
+/// it with the weaker `deny`, so that the documented boundary would have to
+/// name itself with an explicit `#[expect(unsafe_code)]` and a safety comment.
 ///
-/// Today it contains **none**, which is the answer this issue was open to
-/// establish rather than to arrange. The Hermit platform layer is still
-/// `OS-001` (#252), so the honest statement is "no unsafe yet, and one place it
-/// may appear" rather than "no unsafe ever" — and this test is what turns the
-/// second half into something that has to be argued for at a review rather than
-/// spread quietly.
+/// It never contained any. `OS-018` (#334) removed that crate along with
+/// Hermit, so the exception is gone and the statement is now the simple one:
+/// no shipped crate contains the word, not even in a comment. The over-reach is
+/// deliberate — a reader grepping this tree for `unsafe` should find nothing
+/// and never have to decide which hits are real.
+///
+/// The `OS-021` (#337) pid-1 work is where this would come under pressure,
+/// since `mount(2)` and `waitpid(2)` are syscalls. `rustix` is the answer and
+/// the reason it was chosen: safe bindings mean the boundary stays empty rather
+/// than reopening.
 #[test]
-fn the_unsafe_boundary_is_empty_and_singular() {
+fn no_shipped_crate_contains_unsafe() {
     let root = workspace_root();
 
-    // Nothing that ships contains the word at all — not even in a comment,
-    // which is a deliberate over-reach: the point is that a reader grepping for
-    // `unsafe` in this tree finds either nothing or the one boundary, and never
-    // has to decide which hits are real.
     let mut found = Vec::new();
     for (name, manifest_path) in crate_manifests(&root) {
         let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
@@ -447,21 +445,10 @@ fn the_unsafe_boundary_is_empty_and_singular() {
 
     assert!(
         found.is_empty(),
-        "the unsafe boundary is supposed to be empty (OS-013, #264). If one of          these is the documented boundary in {UNSAFE_BOUNDARY_CRATE}, this test          is what should be updated — deliberately, in the same commit:          {found:#?}"
-    );
-
-    // And the one crate that *could* hold one still declares the weaker lint,
-    // so a boundary would have to name itself rather than appearing.
-    let manifest = std::fs::read_to_string(
-        root.join("crates")
-            .join(UNSAFE_BOUNDARY_CRATE)
-            .join("Cargo.toml"),
-    )
-    .expect("the boundary crate's manifest");
-    assert!(
-        manifest.contains("unsafe_code = \"deny\""),
-        "{UNSAFE_BOUNDARY_CRATE} no longer denies unsafe, so a boundary could \
-         appear without saying so"
+        "no crate in this workspace may contain `unsafe` (SEC-001, #193; \
+         OS-013, #264). If a boundary is genuinely needed, reopening it is a \
+         decision for a review and this test is what should be updated in the \
+         same commit: {found:#?}"
     );
 }
 
@@ -515,19 +502,118 @@ fn there_is_one_driver_and_no_patched_dependencies() {
         "there should be exactly one driver, and there are {drivers:?}"
     );
 
-    // And no async runtime reached the tree. `deny.toml` bans them by name
-    // (SEC-009, #201); this catches the case where somebody adds one and
-    // updates the ban list in the same breath.
+    // Exactly one async runtime, and it is tokio (`OS-024`, #340). The ban on
+    // tokio was for Hermit, which needed a four-commit fork; that target is
+    // gone (`OS-018`, #334) and `kmsrs-server` is pid 1 on its replacement,
+    // which means DHCP renewal, SNTP polling and a reaper all want timers that
+    // mio does not have.
+    //
+    // The other two stay out. The reason was never "async is bad", it is that a
+    // second runtime is a second scheduler with its own idea of when work runs.
+    // `deny.toml` bans them by name (`SEC-009`, #201); this catches the case
+    // where somebody adds one and updates the ban list in the same breath.
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("the lockfile");
-    for runtime in [
-        "name = \"tokio\"",
-        "name = \"async-std\"",
-        "name = \"smol\"",
-    ] {
+    assert!(
+        lock.contains("name = \"tokio\""),
+        "tokio is not in the lockfile, so this test would pass vacuously"
+    );
+    // `mio` is not in this list: it is tokio's own reactor and arrives as a
+    // transitive dependency. Banning it would be banning tokio's insides.
+    for runtime in ["name = \"async-std\"", "name = \"smol\""] {
         assert!(
             !lock.contains(runtime),
-            "{runtime} is in the lockfile; there is one mio loop on all three \
-             targets (ARCH-005, #5)"
+            "{runtime} is in the lockfile; there is one runtime and it is tokio \
+             (ARCH-005, #5; OS-024, #340)"
+        );
+    }
+}
+
+/// `OS-007` (#258), and what makes `OS-020` (#336) safe: the wall clock is read
+/// in exactly two places, and neither is on the request path.
+///
+/// The rule is usually stated as an efficiency one — a syscall per request that
+/// answers a question nothing needs. It is really a correctness one, and
+/// `OS-020` is where that becomes visible. That issue's definition of done says
+/// **"a step is applied in a way `kmsrs-policy` cannot observe as time
+/// reversal"**, and the reason it is satisfied is not that the SNTP client is
+/// careful:
+///
+/// * `clock_settime(CLOCK_REALTIME)` does not move `CLOCK_MONOTONIC`.
+/// * Every deadline in this program is monotonic — tokio's for connections, an
+///   injected reading for the activation interval (`ARCH-004`, #4).
+/// * So there is no path by which a step can be seen as time going backwards.
+///
+/// That property survives only while the second bullet holds. One
+/// `SystemTime::now()` in the request path would break it silently, and the
+/// symptom would be a host that miscounts activations for a few hours after a
+/// clock correction — which is not a symptom anybody traces back to here. So it
+/// is asserted rather than left to the comment above.
+///
+/// The two permitted readers, and why each is not the request path:
+///
+/// | Where | Why |
+/// |---|---|
+/// | `entry.rs` | once at start-up, to bound the randomised activation date in the ePID (`ID-007`, #112). Stable for the life of the process, which `ID-001` (#106) requires |
+/// | `net/sntp.rs` | the thing whose job is the clock (`OS-020`, #336) |
+#[test]
+fn the_wall_clock_is_read_in_exactly_two_places() {
+    /// Names that mean "this reads or writes the wall clock".
+    ///
+    /// `FileTime::UNIX_EPOCH` in `kmsrs-proto` is a constant, not a read — the
+    /// needle is the `std` path and the `rustix` realtime clock, not the words.
+    const READS_THE_WALL_CLOCK: &[&str] = &[
+        "SystemTime::now",
+        "std::time::UNIX_EPOCH",
+        "ClockId::Realtime",
+    ];
+
+    /// The files that may. Everything else in every shipped crate may not.
+    const PERMITTED: &[&str] = &["entry.rs", "sntp.rs"];
+
+    let root = workspace_root();
+    let mut offences = Vec::new();
+    let mut found = Vec::new();
+
+    for (name, manifest_path) in crate_manifests(&root) {
+        if name == QUARANTINED_CRATE {
+            continue;
+        }
+        let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
+            continue;
+        };
+        if !source_dir.is_dir() {
+            continue;
+        }
+        for (path, text) in rust_sources_with_paths(&source_dir) {
+            for needle in READS_THE_WALL_CLOCK {
+                if !text.contains(needle) {
+                    continue;
+                }
+                let file = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                found.push(file.to_owned());
+                if !PERMITTED.contains(&file) {
+                    offences.push(format!("{}: {needle}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offences.is_empty(),
+        "these read the wall clock, and only {PERMITTED:?} may (`OS-007`, #258). \
+         Every deadline in this program is monotonic, which is the whole reason \
+         `OS-020` (#336) can step the clock without `kmsrs-policy` observing \
+         time reversal: {offences:#?}"
+    );
+    for permitted in PERMITTED {
+        assert!(
+            found.iter().any(|file| file == permitted),
+            "{permitted} no longer reads the wall clock, so this test is not \
+             looking at the right tree and would pass if the request path grew a \
+             `SystemTime::now()`"
         );
     }
 }
@@ -572,27 +658,15 @@ fn rust_sources(dir: &Path) -> Vec<String> {
 /// property is easy to lose one call at a time. `kmsrs-dbgen` is exempt: it is
 /// a host-only tool whose entire job is reading artifacts, and
 /// `dbgen_is_unreachable_from_every_shipped_binary` is what keeps it out of the
-/// shipped closure.
+/// shipped closure. `kmsrs-os` is exempt for a different reason and under a
+/// narrower rule — see [`pid1_opens_nothing_but_pseudo_filesystems`].
 #[test]
 fn no_shipped_crate_touches_the_filesystem() {
-    /// Names that mean "this code opens something".
-    const FORBIDDEN: &[&str] = &[
-        "std::fs",
-        "File::open",
-        "File::create",
-        "OpenOptions",
-        "temp_dir",
-        "TempDir",
-        "NamedTempFile",
-        "read_to_string(",
-        "write(&path",
-    ];
-
     let root = workspace_root();
     let mut offences = Vec::new();
 
     for (name, manifest_path) in crate_manifests(&root) {
-        if name == QUARANTINED_CRATE {
+        if name == QUARANTINED_CRATE || name == PID1_CRATE {
             continue;
         }
         let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
@@ -603,7 +677,7 @@ fn no_shipped_crate_touches_the_filesystem() {
         }
 
         for (path, text) in rust_sources_with_paths(&source_dir) {
-            for needle in FORBIDDEN {
+            for needle in OPENS_SOMETHING {
                 if text.contains(needle) {
                     offences.push(format!("{}: {needle}", path.display()));
                 }
@@ -616,6 +690,92 @@ fn no_shipped_crate_touches_the_filesystem() {
         "these shipped sources reach for the filesystem, which axiom A5 \
          forbids: {offences:#?}"
     );
+}
+
+/// Axiom A5 for pid 1, which cannot be the blanket ban and is not weaker for it
+/// (`OS-021`, #337; `OS-028`, #345).
+///
+/// `kmsrs-os` is the one shipped crate that must open paths. Mounting `/proc`
+/// is an open; finding the consoles the kernel registered is a read of
+/// `/proc/consoles`; writing to them is an open of a node under `/dev`. None of
+/// that is storage, and on this target it *cannot* become storage: the kernel is
+/// built with `CONFIG_BLOCK` unset, so there is no block layer for a real
+/// filesystem to be mounted from.
+///
+/// So the rule for this crate is a whitelist of prefixes rather than a ban, and
+/// it is checked the same way — by reading the source for the paths it names.
+/// The failure this prevents is the one the blanket ban prevents everywhere
+/// else: a configuration file, a state file, a log file, arriving one call at a
+/// time in the only crate where `open` is unremarkable.
+#[test]
+fn pid1_opens_nothing_but_pseudo_filesystems() {
+    /// The only trees pid 1 may name. Every one is a kernel interface that
+    /// exists in RAM.
+    const PSEUDO: &[&str] = &["/proc/", "/sys/", "/dev/"];
+
+    /// Bare mount points, which are paths without a trailing separator and so
+    /// are not matched by the prefixes above.
+    const MOUNT_POINTS: &[&str] = &["/proc", "/sys", "/dev"];
+
+    let root = workspace_root();
+    let source_dir = root.join("crates").join(PID1_CRATE).join("src");
+    assert!(
+        source_dir.is_dir(),
+        "{PID1_CRATE} has no src/; this test would pass vacuously"
+    );
+
+    let mut named = Vec::new();
+    let mut offences = Vec::new();
+    for (path, text) in rust_sources_with_paths(&source_dir) {
+        for literal in absolute_path_literals(&text) {
+            named.push(literal.clone());
+            let allowed = PSEUDO.iter().any(|prefix| literal.starts_with(prefix))
+                || MOUNT_POINTS.contains(&literal.as_str());
+            if !allowed {
+                offences.push(format!("{}: {literal}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        !named.is_empty(),
+        "no absolute path literal was found in {PID1_CRATE}; this test is not \
+         looking at the right tree and would pass if a state file were added"
+    );
+    assert!(
+        offences.is_empty(),
+        "pid 1 named a path outside /proc, /sys and /dev. Axiom A5 says this \
+         machine has no storage, and the kernel it runs on has no block layer \
+         to give it any (`OS-021`, #337): {offences:#?}"
+    );
+}
+
+/// Every double-quoted string literal in `text` that looks like an absolute
+/// Unix path.
+///
+/// Crude on purpose. It over-collects — a doc comment's example path is a
+/// string to nobody — and over-collecting is the safe direction, because a
+/// false positive is an argument at review and a false negative is the state
+/// file this is here to catch. Doc comments are excluded for exactly that
+/// reason: this tree's prose is full of `/dev/console` and `/nix/store`.
+fn absolute_path_literals(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        // Splitting on the quote character puts the quoted pieces at the odd
+        // indices, which is the whole parser. An escaped quote inside a literal
+        // shifts that parity and yields nonsense pieces; none of them starts
+        // with a separator, so they fall out below rather than needing a real
+        // lexer here.
+        for literal in line.split('"').skip(1).step_by(2) {
+            if literal.starts_with('/') && literal.len() > 1 {
+                found.push(literal.to_owned());
+            }
+        }
+    }
+    found
 }
 
 /// `SEC-013` (#205): nothing secret is embedded in the shipped artifact.

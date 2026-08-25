@@ -20,24 +20,24 @@ kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 serde.workspace = true
 toml.workspace = true
-socket2.workspace = true
-mio.workspace = true
+tokio.workspace = true
 
-# OS-015 (#298): the one dependency that is target-gated, and the reason is that
-# it does not exist on the third target rather than that we do not want it.
-# `ctrlc` picks its implementation with `#[cfg(unix)]` and `#[cfg(windows)]`;
-# Hermit is neither, so the module is simply absent and the crate does not
-# compile there. Hermit has no signals to handle in the first place
-# (docs/research-findings.md §R2), so nothing is lost — but the fact belongs in
-# the manifest, where a build can act on it, rather than only in a comment.
-#
-# This is the exception to "never a cfg on an item": every other platform
-# difference is a `const bool` in src/platform.rs whose branches all compile
-# everywhere. No runtime bool can select around a crate that will not build.
-[target.'cfg(not(target_os = "hermit"))'.dependencies]
+# `ctrlc` and `socket2` both select their implementation with `#[cfg(unix)]`
+# and `#[cfg(windows)]`. They used to be target-gated here, because Hermit was
+# neither and the modules were simply absent — the one documented exception to
+# "never a cfg on an item" (`OS-015`, #298; `PKG-013`, #250), since no runtime
+# bool can select around a crate that will not build. `OS-018` (#334) removed
+# that target, so they are ordinary dependencies and the exception is gone.
 ctrlc.workspace = true
+socket2.workspace = true
 
 [dev-dependencies]
+# `test-util` is what provides `#[tokio::test(start_paused = true)]` and
+# `time::advance`, which is how a deadline test drives a deadline now that
+# deadlines are tokio's (`OS-024`, #340). Dev-only on purpose: under resolver 3
+# a dev-dependency's features do not reach the binary, so the shipped server
+# cannot have its clock paused by anything.
+tokio = { workspace = true, features = ["test-util"] }
 # Deterministic entropy for the host-state tests. Enabling `testing` here does
 # not enable it for the binary: under resolver 3 a dev-dependency's features do
 # not propagate to the normal dependency graph (ARCH-003, #3).

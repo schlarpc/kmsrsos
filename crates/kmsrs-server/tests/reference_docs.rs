@@ -232,8 +232,8 @@ fn database_section(out: &mut String) {
          | Locales | {} |\n\
          \n\
          The arrays occupy {} bytes, against a {}-byte ceiling asserted at\n\
-         compile time (`DB-018`, #142) — on Hermit every byte of `.rodata` is a\n\
-         byte of the guest's memory, permanently.",
+         compile time (`DB-018`, #142) — on the bare-metal target every byte\n\
+         of `.rodata` is a byte of the guest's memory, permanently.",
         kmsrs_db::APPLICATIONS.len(),
         kmsrs_db::PRODUCTS.len(),
         kmsrs_db::CSVLKS.len(),
@@ -328,6 +328,9 @@ fn every_documented_route_answers_and_nothing_else_does() {
 struct Fixture {
     identity: HostIdentity,
     events: EventLog,
+    /// `OS-019` (#335). Empty: `docs/reference.md` documents the shipped
+    /// program, not one particular machine's lease.
+    network: kmsrs_server::facts::Network,
 }
 
 impl Fixture {
@@ -340,6 +343,7 @@ impl Fixture {
             )
             .unwrap(),
             events: EventLog::new(4096, core::time::Duration::from_hours(24)),
+            network: kmsrs_server::facts::Network::default(),
         }
     }
 
@@ -348,6 +352,7 @@ impl Fixture {
             listening: true,
             entropy_healthy: true,
             kms_ports: &[1688],
+            network: &self.network,
             identity: &self.identity,
             events: &self.events,
         }

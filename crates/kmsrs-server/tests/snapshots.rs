@@ -191,6 +191,9 @@ fn assert_snapshot(name: &str, actual: &str) {
 struct Fixture {
     identity: HostIdentity,
     events: EventLog,
+    /// `OS-019` (#335). Empty here: these snapshots are of what a hosted
+    /// build renders, and a hosted build never learns a lease.
+    network: kmsrs_server::facts::Network,
 }
 
 impl Fixture {
@@ -205,6 +208,7 @@ impl Fixture {
             )
             .unwrap(),
             events,
+            network: kmsrs_server::facts::Network::default(),
         }
     }
 
@@ -213,6 +217,7 @@ impl Fixture {
             listening: true,
             entropy_healthy: true,
             kms_ports: &[1688],
+            network: &self.network,
             identity: &self.identity,
             events: &self.events,
         }

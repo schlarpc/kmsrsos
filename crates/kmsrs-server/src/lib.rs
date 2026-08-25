@@ -2,9 +2,13 @@
 //!
 //! Everything that touches the outside world lives here: sockets, threads,
 //! clocks, entropy, the log sink and the in-process web server. The protocol
-//! and policy crates below it are sans-io, so this crate is the only one that
-//! has to be written three times over — once for tokio on Linux and Windows,
-//! once for blocking `std::net` on Hermit (`ARCH-005`, #5).
+//! and policy crates below it are sans-io, so this is the only crate that knows
+//! what platform it is on — and it is written *once*, not three times: one
+//! `mio` event loop runs on Linux, Windows and Hermit, and what differs is
+//! socket semantics, named as constants in [`platform`] (`ARCH-005`, #5).
+//!
+//! [`entry::serve`] is the whole program. Both binaries — `kmsrsos` and the
+//! unikernel `kmsrsos-hermit` — are a `main` that calls it (`OS-001`, #252).
 //!
 //! The web UI is folded in here rather than living in its own crate. It shares
 //! the bounded worker budget with the KMS listener (`OBS-014`, #190), which is
@@ -22,6 +26,8 @@
 pub mod budget;
 pub mod config;
 pub mod entropy;
+pub mod entry;
+pub mod facts;
 pub mod host;
 pub mod log;
 pub mod net;
@@ -31,9 +37,9 @@ pub mod web;
 
 pub use config::{BuildStamp, Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
+pub use facts::{Facts, Network};
 pub use host::{Host, RequestContext};
 pub use log::{Logger, Severity};
-pub use platform::{SIGNALS_EXIST, SINGLE_SOCKET_ONLY, SignalHandling};
 pub use server::{Handled, Server};
 
 /// The name the emulator reports for itself. Used by the log sink and the web

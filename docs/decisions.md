@@ -14,10 +14,10 @@ These constrain everything. A proposal that violates one is wrong by default, no
 
 | # | Axiom | Consequence |
 |---|---|---|
-| A1 | Pure safe Rust | `#![forbid(unsafe_code)]` in every crate except a documented `kmsrs-os` boundary |
+| A1 | Pure safe Rust | `#![forbid(unsafe_code)]` in every crate, with no exception — the one documented boundary went with Hermit (#334) |
 | A2 | Correct by construction | Illegal states unrepresentable; no runtime panics; no runtime validation of what a type could carry |
 | A3 | Configuration is compile-time | One narrow runtime escape hatch, restricted to settings that cannot change a byte on the wire |
-| A4 | Linux + Windows + bare metal (Hermit, virtio-net) | Thin swappable platform layer; core builds for `no_std + alloc` |
+| A4 | Linux + Windows + bare metal (Linux as PID 1, virtio-net) | Thin swappable platform layer; core builds for `no_std + alloc` |
 | A5 | No disk I/O; logs to stderr | One narrow exception: six lifecycle events to the Windows Event Log (#192) |
 | A6 | Maximal client compatibility, permissive time band | Defaults say *yes*; strictness is opt-in at build time |
 | A7 | Sans-io core | Protocol crates take `&[u8]` → events; sockets live at the edges; fuzzable and cross-testable |
@@ -33,10 +33,10 @@ These constrain everything. A proposal that violates one is wrong by default, no
 
 | # | Decision | Outcome |
 |---|---|---|
-| 1 | Crate split | 8 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary (#1) |
+| 1 | Crate split | 7 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary. Was 8 until `kmsrs-os` went with Hermit (#1, #334) |
 | 2 | Framing | `zerocopy` end to end, including checked prefix-splitting for variable DCE/RPC sections (#11) |
 | 3 | Panic-freedom | Lints everywhere + a symbol-level CI gate on `proto`/`crypto` + `panic = "abort"`; [what the gate found](#what-the-panic-freedom-gate-actually-found-arch-009-9) (#9) |
-| 4 | Concurrency | One `mio` event loop on all three targets — superseded the original two-driver plan, [see below](#superseding-decision--one-mio-event-loop-not-two-drivers-arch-005-5) (#5) |
+| 4 | Concurrency | One `tokio` runtime, one task per connection. Superseded mio, which had superseded a two-driver plan, [see below](#superseding-decision--one-tokio-runtime-arch-005-5-os-024-340) (#5, #340) |
 | 5 | Crypto | One minimal Rijndael in `kmsrs-crypto` with exhaustive KATs, quarantined as the A8 exception (#41) |
 | 6 | Product-data source | Microsoft `pkeyconfig` artifacts, extracted by `kmsrs-dbgen` (#125, #126) |
 | 7 | Product gate | **Split**: permissive on unknown KMS IDs; strict on retail/preview and AppID mismatch (#98) |
@@ -57,18 +57,203 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 22 | SRV publishing | RFC 2136 dropped → [D15](#d15). Instructions page emits zone snippet, `nsupdate` **and** `dnscmd`/PowerShell (#148) |
 | 23 | mDNS | Measurement harness first, as a standalone deliverable (#146) |
 | 24 | `TCP_NODELAY` | OS default; measured in the harness (#164) |
-| 25 | Proxmox | Nice-to-have. QEMU/libvirt is the supported configuration (#255) |
+| 25 | Supported hypervisors | Proxmox is the reason the bare-metal target changed, and is no longer the whole answer: a stated matrix, one boot check per NIC model, [see below](#vmbus-is-in-and-firecracker-is-out-os-025-342) (#255, #333, #334, #342) |
 | 26 | OS packages | `.deb`/`.rpm` as CI artifacts; no repo, no Homebrew (#246) |
 | 27 | Kubernetes | Plain manifests, `replicas: 1` hardcoded. No Helm → [D17](#d17) |
-| 28 | Linux appliance image | Skipped → [D16](#d16) |
+| 28 | Linux appliance image | **Built** — reverses [D16](#d16); it is now the bare-metal target (#333) |
 | 29 | Upstream proxy / chaining | Declined → [D12](#d12) |
 | 30 | Build-time identity harvesting | Out of scope → [D13](#d13) |
 | 31 | C library API | Declined → [D8](#d8) |
-| 32 | Hermit addressing | DHCPv4, on by default (#254) |
+| 32 | Bare-metal addressing | DHCPv4, spoken by `kmsrs-os` itself. `CONFIG_IP_PNP_DHCP` removed, so one implementation rather than two, [see below](#the-bare-metal-target-speaks-dhcp-and-dns-itself-os-019-335-os-020-336) (#254, #335) |
 | 33 | ePID day-of-year / LCID / channel | 1-based / unpadded / always `03` (#109–#111) |
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
+| 37 | ~~Hermit build~~ | Removed with the target (#334). Kept in history because `PKG-013`/`PKG-014` (#250, #251) are cited in commits |
+| 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
+
+### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
+
+The kernel's `ip=dhcp` was a stopgap for one stated reason — it takes a lease and never renews it —
+and for a second that turned out to matter more: **it discards every option this host actually
+wants.** Option 15 and option 119 are the domain the clients search, which is the zone an SRV record
+has to go in and which `/instructions` had no way to know (`DISC-007`, #149). Option 42 is the time
+source `OS-020` prefers over anything on the internet.
+
+So `kmsrs-os` owns the client, `CONFIG_IP_PNP_DHCP` is gone, and there is one implementation rather
+than two that can disagree.
+
+**The crate choices changed during the work, and the reason is worth recording.** `OS-019` nominated
+`dhcproto` — correctly: it is a sans-io parser and encoder, actively maintained, and nothing else in
+the field is both. What the issue did not check is that it depends on `hickory-proto`
+**unconditionally**, for the DNS name type option 119 is made of. That is a complete DNS protocol
+implementation, and `url`, `idna` and the ICU data crates arrive with it: about forty crates for a
+236-byte header and a TLV list, in the boot path of a machine whose TCB claim is a checked-in
+config a reviewer can read. One of them is `tracing`, which `deny.toml` bans.
+
+That very nearly settled it against `dhcproto`. What reversed it was noticing that **`OS-020` needs
+a resolver anyway**. Its pool fallback is a *hostname*, this machine has no `/etc/resolv.conf` for a
+libc resolver to read (axiom A5), and nothing in the tree resolved a name before this. So the choice
+was never "a DNS library or not" — it was "one, or two implementations of half of one". The library
+is paid for once and both issues spend it.
+
+Consequences worth stating:
+
+- **`hickory-resolver`'s `system-config` feature is off.** That feature is what reads
+  `/etc/resolv.conf`. The resolver is configured from DHCP option 6 instead, in memory, which is an
+  observation about the network rather than configuration (`CFG-001`, #166). Turning it off also
+  drops the macOS and Windows system-configuration crates.
+- **The `tracing` ban gains a `wrappers` list**, as `log` right above it already had. The stated
+  reason for both — stop a facade with a pluggable file sink appearing in *our* code, because axiom
+  A5 forbids the file — applies identically, and a transitive `tracing` with no subscriber installed
+  is as inert as a transitive `log` with no logger. The asymmetry was an oversight. It did useful
+  work while it lasted: the ban is what forced the look at the dependency tree that found the DNS
+  library in the first place.
+- **None of this is reachable from `kmsrsos` or `kmsrs-client`.** Nothing they depend on names
+  `kmsrs-os`, which is the same property the `kmsrs-dbgen` split relies on and which
+  `dbgen_is_unreachable_from_every_shipped_binary` is the pattern for.
+
+**The lease state machine is still written out**, because no crate offers RFC 2131 §4.4 separately —
+every existing Rust client welds INIT/SELECTING/REQUESTING/BOUND/RENEWING/REBINDING to sockets or to
+netlink. That is the part axiom A7 wants sans-io anyway, so it takes a `Duration` and a message and
+returns actions, and the whole of it is exercised against captured exchanges with no network.
+
+### VMBus is in, and Firecracker is out (`OS-025`, #342)
+
+Decision 25 said "Proxmox is supported". What the rest of the world got was "whatever happens to
+work", and measuring it turned out worse than "untested": of the four NIC models the Proxmox web UI
+itself offers, two produced a machine that booted to completion, printed `listening`, and then served
+nobody forever. No driver, so no interface, so no address, and nothing said so. That is the failure
+class Hermit was removed for (`OS-018`, #334), reachable from a dropdown on the supported path.
+
+**VMBus is accepted.** Hyper-V Generation 2 has *no emulated NIC at all* — there is no PCI device to
+fall back to — so `CONFIG_HYPERV` and `CONFIG_HYPERV_NET` are not a nice-to-have on that platform,
+they are the difference between supported and unsupported. Hyper-V and Azure are targets, so the bus
+is in, and the comment in `os/linux/config.nix` that called it "not a driver-sized cost" is replaced
+rather than left to contradict this. The cost is measured rather than argued: see the table in that
+file, produced by `nix build .#linux-deltas`.
+
+**Firecracker is declined**, and as [D42](#d42) rather than left unscoped, because the reason is
+structural rather than a matter of effort.
+
+**Two things this changed about how the file is maintained.** Both came out of the work rather than
+going into it:
+
+- **`nix build .#linux-deltas`** measures a config change on the built `bzImage` with the initramfs
+  held constant. The initramfs is *inside* the image, so measuring a 40 kB driver against the shipped
+  kernel compares two numbers that differ for two reasons — which is how a driver's cost gets
+  estimated instead of measured.
+- **`kernel_tcb.rs`** asserts what is in the machine's TCB against the **generated** config rather
+  than the allowlist, in both directions: the subsystems that must stay out, and the drivers this
+  matrix promises. The second half exists because `OS-023` (#339) is a pare-back and this is a
+  matrix, and they pull on the same file in opposite directions.
+
+That test found the `OS-006` (#257) lesson recurring a third time. `CONFIG_DEBUG_KERNEL` had been on
+the *disable* list for two issues and was on in every build, because `tinyconfig` requires
+`CONFIG_EXPERT` and `EXPERT` selects it. It is a menu gate rather than code and costs nothing, so the
+entry was a statement the build could not make; it is replaced by the ten options underneath it that
+would cost something.
+
+### The kernel is in the ISO twice, and stays there (`OS-023`, #339)
+
+The `bzImage` appears once in the ISO9660 filesystem for isolinux and once inside the FAT ESP for
+firmware, because the two read different filesystems and neither reads the other's.
+
+**It appeared a third time**, which was not noticed while this decision was being taken: `-e
+efi.img` booted the ESP as a file in the ISO tree while `-append_partition` appended a *second copy*
+of that same ESP for the GPT partition `OS-027` (#344) needs. Three kernels was 10.6 MB of a 16.3 MB
+image. `OS-029` (#347) removed it by pointing El Torito at the appended partition —
+`-e --interval:appended_partition_2:all::` — which took the ISO to **8.3 MB**, a 49 % cut, with no
+new component. What follows is about the two copies that remain. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
+only a ~1 MB `grubx64.efi` would need to live in the ESP.
+
+**Keep the duplication.** Four reasons, in the order they matter:
+
+1. **It would put a bootloader in an image whose contents are enumerable in a sentence.** GRUB is a
+   program with a configuration language, a module loader and a filesystem stack. Today the UEFI
+   path has *no bootloader at all* — `CONFIG_EFI_STUB` makes the kernel the EFI executable — and
+   that is a TCB statement, not a size one.
+2. **It would give the UEFI path something to go wrong.** Nothing is registered in NVRAM and nothing
+   is chainloaded, which is why a fresh Proxmox VM boots on its first try and `OS-004` (#255) is not
+   a problem here. Adding a stage between firmware and kernel adds a stage that can fail.
+3. **The ESP is load-bearing now.** `OS-027` (#344) makes the same file a GPT disk with a typed EFI
+   System Partition, which is what the EC2 pipeline imports. Replacing the kernel in the ESP with a
+   bootloader that reads ISO9660 works for a CD and not for a raw disk import.
+4. **Nothing is paying for it at runtime.** The machine runs from RAM; the ISO is downloaded once and
+   attached. The duplication is a transfer cost, not a memory or a boot cost.
+
+The related proposal on the same issue — dropping `-append_partition` to recover ~5 MB — is declined
+for reason 3 alone: that partition *is* the EFI System Partition, and `OS-027` (#344) needs it.
+
+**This decision is worth re-taking, and #348 is where.** It was argued against a saving of "~2.7 MB",
+which was wrong twice over: it counted two kernel copies where there were three, and it predates the
+kernel reaching 3.4 MB. With `OS-029` (#347) landed, GRUB would take the image from 8.3 MB to roughly
+5 MB. Reasons 1 and 2 above are about the trusted computing base rather than about size and are
+unaffected either way — but a 40 % saving deserves to be argued against the real number rather than
+the one that was recorded.
+
+### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
+
+Two decisions this issue asked to be made explicitly rather than by default.
+
+**Why SNTP.** The difference that matters is the discipline loop: full NTP estimates the local
+oscillator's frequency error and *slews* continuously, so the clock stays right between polls and
+never jumps. Three things rule it out here, in descending order of finality.
+
+1. **There is nothing to slew with.** `adjtimex` has no safe binding in rustix, so axiom A1 leaves
+   `clock_settime` as the only move available. "SNTP with slewing" is not on the menu, and a
+   discipline loop with nothing to drive is not a discipline loop.
+2. **There is nothing to reuse.** `ntpd-rs` is a daemon, not a crate to embed. A hand-written PLL
+   would be a far larger A8 exception than the lease state machine, for a clock that feeds a ±4 hour
+   tolerance.
+3. **The platform already handles drift.** Every hypervisor in `OS-025` (#342)'s matrix gives the
+   guest kvmclock, the Hyper-V reference TSC or an equivalent that tracks the host continuously. The
+   case SNTP helps is the RTC-only one, where a step every seventeen minutes is ample.
+
+What is given up, stated rather than glossed: **falseticker rejection**. The first usable answer is
+taken rather than several compared, so a lying option-42 server is believed. Acceptable because the
+DHCP server that named it already controls this host's address and routing.
+
+**Why an unreachable time server is not fatal.** The issue asks for "serve with the unsynchronised
+clock, or refuse — decided explicitly". It serves, because the clock turns out to reach almost
+nothing: nothing in a response derives from it, every deadline is monotonic, and the one wall-clock
+read happens once at start-up. A KMS host that refused to activate anything because it could not
+reach an NTP server would be trading its whole function for a log field.
+
+That last point deserves an asterisk found while doing the work: **the skew check does not run at
+all today**, because `driver.rs` passes `host_time: None` on every request. `POL-011` (#99) is inert
+and `strict-clock-skew` changes nothing. Filed as #346 (`POL-020`) rather than fixed here.
+
+### Hermit was removed rather than kept (`OS-018`, #334)
+
+Both targets worked. The question was never which one *ran*, it was which one an operator could
+deploy without being told three things first, and Hermit needed all of: `qm set --args
+'-set device.net0.disable-legacy=on'` for a NIC that would otherwise not attach at all (`OS-004`,
+#255), a CPU-model change away from the Proxmox default or the CSPRNG silently fell back to a
+31-bit LCG (`OS-016`, #332), and a serial port added before first boot, because it is the only
+console Hermit has and without it the other two failures are invisible. The web UI can express one
+of those three.
+
+Worse, the failure was quiet. QEMU runs with `-no-shutdown`, so when the guest exited 69 the process
+stayed and the run state parked at `prelaunch` — `qm status` said so, but the API's `status` field,
+which is what the green dot in the web UI reads, still said `running` and the uptime kept climbing.
+
+The Linux target needs none of the three, boots from SeaBIOS or OVMF, and is smaller (14 MB against
+17 MB). Keeping both would have meant two bare-metal targets with their own boot checks, their own
+differential runs and their own section of the deployment guide, for one deployment story — and the
+one being kept for interest's sake would be the one nobody could deploy.
+
+**What was actually lost.** A5 was *inexpressible* on Hermit rather than merely absent: there was no
+syscall to reach a disk. On Linux with `CONFIG_BLOCK` unset it is a syscall with nothing behind it,
+which is very close and not identical. That is the whole cost, and it is worth naming rather than
+pretending the two were equivalent.
+
+**What was not the argument.** TCB size. It does not survive `SEC-013` (#205): nothing secret ships,
+so the blast radius of either kernel is a box that answers KMS on a LAN. A unikernel also has no
+privilege separation at all — the application runs in ring 0 with the kernel — so "fewer lines" and
+"smaller attack surface" were never the same claim, and the network-reachable surface was smoltcp
+against the most heavily fuzzed TCP stack in existence. This decision went the way it did on
+deployability, and it should not be re-litigated on TCB grounds.
 
 ### Notes on the three decisions that took the most argument
 
@@ -118,6 +303,40 @@ Two things are deliberately *not* done. The count is not floored at 100 for absu
 own sketch suggested: reporting a plausible-looking 100 to a fresh host holding one machine is still
 a sentence no genuine host says, and `world` is simply the true one. And the request is not refused —
 that is #283, declined as [D38](#d38).
+
+### The Hermit build does not use the `hermit` crate (`PKG-013`, #250)
+
+`PKG-013` was filed as the largest schedule risk in the project, and it was correct about the shape
+of the risk. The documented way to build a Hermit application is to depend on the `hermit` crate.
+That crate is not a library: its `lib.rs` is empty for every configuration this project would use,
+and its `build.rs` shells out to a nested `cargo run --package=xtask` that builds the kernel from a
+git submodule against *its own* lockfile and *its own* pinned nightly. Crane vendors neither. A build
+script that runs `cargo` is a build script that wants the network, which is the one thing a Nix build
+does not have.
+
+Both options the issue sketched were tried on paper. Carrying two vendored dependency trees and two
+toolchains inside one derivation makes the workspace's own build depend on the kernel's nightly. The
+other option is what shipped:
+
+* **The kernel is its own derivation.** It builds through the kernel's own `xtask`, not through a
+  reimplementation of it, because `xtask build` is not `cargo build` — it rewrites every symbol that
+  is not an exported syscall so the kernel's `core` cannot collide with the application's, links in
+  `hermit-builtins` for the libm symbols, and stamps `ELFOSABI_STANDALONE` on every archive member.
+  Four steps that a shell script could reproduce, until the day upstream adds a fifth.
+* **The two link flags are injected directly.** `-L native=…` and `-l static:-bundle=hermit` are the
+  whole of what the crate's build script emits for a non-`common-os` target, so nothing is lost by
+  not having it — and `tests/hermit_toolchain.rs` fails if the crate ever reappears in the lockfile.
+* **The workspace stays on stable.** `hermit-os/rust-std-hermit` is built per exact stable release,
+  so pinning it to `rust-toolchain.toml`'s channel avoids `-Z build-std=std,panic_abort`, which would
+  have put every crate that ships on nightly.
+
+Two details cost more time than the design did, and both are recorded in tests rather than only here.
+`rustc` derives its sysroot from the *resolved* path of its own executable, so a `symlinkJoin`
+toolchain finds the original sysroot and reports `can't find crate for core`; the sysroot has to be
+named with `--sysroot`. And `-l static=hermit`, which is what upstream emits, makes `rustc` adopt
+every member of `libhermit.a` as one of its own objects — the kernel's compiled-C intrinsics have no
+`.llvmbc` section, so `lto = "fat"` fails with "failed to get bitcode from object file". `-bundle`
+says what was meant. Neither failure appears in a debug build.
 
 ---
 
@@ -193,11 +412,27 @@ BIND-style managed DNS, a static record added once is equally easy and more audi
 embed a secret in the shipped artifact, so the published container could never enable it. The
 instructions page (#148) delivers the value instead.
 
-<a id="d16"></a>**D16 — Linux appliance image (kernel + initramfs).** Not the hedge it appeared to be:
-if Hermit-on-Proxmox fails, the fallback is a normal Linux VM running the container or the `.deb`,
-which needs nothing from us. Its only unique property is minimalism, which is Hermit's entire reason
-for existing. Revisit only if Hermit is abandoned, at which point it replaces rather than supplements
-the OS image.
+<a id="d16"></a>**D16 — Linux appliance image (kernel + initramfs). ~~Declined~~ — reopened, see
+`OS-017` (#333).** The original reasoning was: if Hermit-on-Proxmox fails, the fallback is a normal
+Linux VM running the container or the `.deb`, which needs nothing from us; its only unique property
+is minimalism, which is Hermit's entire reason for existing.
+
+The premise did not survive being built. Minimalism is not where a Linux appliance loses — a
+`tinyconfig`-derived kernel with `kmsrs-server` as PID 1 and no other userland produces a *smaller*
+ISO than the Hermit image (14 MB against 17 MB) and a *stronger* version of axiom A5, because
+`CONFIG_BLOCK` is unset: there is no block layer, not merely no block drivers. What it actually has
+that Hermit does not is that it boots into service on a Proxmox VM with nothing changed from the
+defaults, where the Hermit image needs `qm set --args` (`OS-004`, #255) and a CPU-model change
+(`OS-016`, #332), neither of which the web UI can express.
+
+Also wrong: "it replaces rather than supplements the OS image" assumed the choice would be forced by
+Hermit failing. It was not — Hermit works, on a VM configured for it. So the disposition is a real
+decision rather than a fallback, and it is `OS-018` (#334).
+
+Note what is *not* the argument. The TCB case for either kernel does not survive `SEC-013` (#205):
+nothing secret ships, so the blast radius of a compromise is a box that answers KMS on a LAN. A
+unikernel also has no privilege separation at all, so "fewer lines" and "smaller attack surface" are
+not the same claim. Whichever way #334 goes, it should not go that way because of TCB size.
 
 <a id="d17"></a>**D17 — Helm chart.** Helm's value is parameterization, and the parameter operators
 would reach for first — `replicaCount` — is the one that must never change, because multi-replica
@@ -261,158 +496,68 @@ express a KMS host. Ruled out on paper, not by experiment.
 **D33 — Reimplementing DNS, standard AES, SHA-256, HMAC, HTTP, TLS or binary framing by hand.**
 Two exceptions, both in #41.
 
-### Superseding decision — one mio event loop, not two drivers (`ARCH-005`, #5)
+<a id="d42"></a>**D42 — Firecracker.** Declined for reasons that are properties of the formats and
+the product rather than of effort available (`OS-025`, #342):
 
-`ARCH-005` originally specified **tokio on Linux and Windows, blocking `std::net` + `std::thread` on
-Hermit** — two drivers, on the reasoning that tokio has no usable Hermit support. The first half of
-that reasoning is right and the conclusion was wrong: the alternative to tokio is not threads, it is
-**mio**, which is the layer tokio itself uses.
+- On x86_64 Firecracker boots an uncompressed **ELF `vmlinux`**. `\x7fELF` at offset 0 and the `MZ`
+  of a PE/COFF EFI stub at offset 0 are mutually exclusive, so **no single artifact can serve both
+  Firecracker and UEFI**. That is arithmetic, not a build problem.
+- Device discovery is virtio-**mmio**. Before Firecracker gained ACPI support the
+  `virtio_mmio.device=` command-line parameters were mandatory — and `CONFIG_CMDLINE_OVERRIDE`
+  (axiom A3, `CFG-001` #166) makes them unreachable by construction. Supporting older Firecracker
+  means giving up A3, which is a worse trade than not supporting Firecracker.
+- Product fit. Firecracker exists to run short-lived multi-tenant sandboxes; a KMS host is a
+  long-lived LAN service with a stable address and an SRV record pointing at it.
 
-Per `docs/research-findings.md` §R2, mio has first-class Hermit support in the stock crates.io
-release and hermit's own CI exercises it on every pull request; its backends are epoll on Linux, IOCP
-on Windows and `poll(2)` on Hermit. tokio, by contrast, works there only through a four-commit fork
-of 1.45.0 whose substantive patch is a level-triggered selector workaround — and tokio's readiness
-caching assumes edge-triggered semantics, so getting it wrong produces *hangs, not errors*. Adopting
-that fork would need a workspace-global `[patch.crates-io]`, pinning Linux and Windows to it too.
+If it is ever wanted anyway the answer is a *second output* — the kernel build already produces
+`vmlinux` — and not a cleverer ISO.
 
-One loop removed three hand-built mechanisms, two of which were untestable:
+**Numbering note.** The decisions table links `D34`–`D41`, and no such entries were ever written; the
+list runs D1–D33. This one is D42 to avoid colliding with whatever those were meant to be.
 
-- **Timeouts.** There is no `SO_RCVTIMEO` anywhere. A deadline is the poll timeout, computed from the
-  injected clock, so it behaves identically on every target — including Hermit, whose `setsockopt` is
-  a stub returning `EINVAL` for exactly that option. The previous design chose between a socket
-  timeout and a hand-written polling fallback *at runtime*, and no test ever executed the fallback
-  branch despite it existing solely for Hermit (`OS-014`, #297).
-- **The shutdown wakeup.** `mio::Waker` is an eventfd on Linux and Hermit and a posted IOCP
-  completion on Windows. The previous design woke a blocked `accept()` by connecting to its own
-  listener, which assumed a loopback route Hermit may not have (`OS-015`, #298).
-- **Thread-per-connection.** A connection is a few kilobytes in a map rather than an OS thread, which
-  is what makes the connection ceiling derivable rather than picked (`NET-014`, #296).
+### Superseding decision — one `tokio` runtime (`ARCH-005`, #5; `OS-024`, #340)
 
-What one loop does *not* solve is the reason the platform split existed at all: Hermit's socket
-**semantics**. No readiness abstraction models "this platform's `setsockopt` is a stub", that `bind()`
-ignores the address, that there is never an IPv6 address, or that `cfg(unix)` is false. Those remain
-per-target facts, and the pattern for them is `SINGLE_SOCKET_ONLY` — a named capability whose *both*
-branches compile and are tested on every host, rather than a `cfg` on an item, which only ever
-compiles on the platform that cannot be tested.
+This has been settled twice, and the second time reversed the first.
 
+`ARCH-005` originally specified **tokio on Linux and Windows, blocking `std::net` +
+`std::thread` on Hermit** — two drivers, on the reasoning that tokio has no usable Hermit support.
+The first half of that was right and the conclusion was wrong: the alternative to tokio is not
+threads, it is **mio**, which is the layer tokio itself uses. So it became one mio loop on all three
+targets, and the argument was portability.
 
-**D34 — A `MinActiveClients` field per host key (`POL-009`, #97).** The field is inert in both
-existing implementations, for opposite reasons. vlmcsd declares it in `KmsData->CsvlkData` and reads
-it in `kms.c` to floor the reported count, but nothing ever writes it and it is 0 for every CSVLK in
-the shipped blob, so the floor does nothing. py-kms carries it in `KmsDataBase.xml` with real-looking
-values — 50 for Windows, 10 for each Office application — and no code path anywhere reads it. Those
-two numbers are exactly the saturation values the client-count model computes from `2N`, so the
-concept is subsumed rather than dropped: `POL-001` (#89) produces them from observed clients instead
-of from a constant nobody populated. Carrying a dead column would invite someone to populate it later
-with a value that fights the model.
+`OS-018` (#334) removed Hermit, which removed the only reason mio was chosen. That alone would have
+justified rewriting the paragraph rather than the code — mio is a perfectly good event loop for a
+server that is only a server. What changed the answer is that `kmsrs-server` stopped being only a
+server.
 
-<a id="d35"></a>**D35 — A build-time flag reproducing a genuine host's `0xC004D104` client-table refusal
-(`POL-007`, #95).** The issue proposed keeping the refuse path behind a strict flag. Its own reasoning
-rules it out: with per-client views (`POL-001`, #89) the 671-entry cap is never reached in a way that
-matters, and evicting the oldest entry is strictly more compatible than refusing. A flag whose only
-effect is to make the server refuse a request it could have answered is a fingerprint, not a
-hardening measure — the same shape of mistake as `POL-011`'s clock-skew tolerance, which is itself a
-detection oracle. `HResult::InvalidActivationData` remains in the vocabulary so `kmsrs-client` can
-name the code when a *real* host sends one. The neighbouring question for `N_Policy` is
-[D38](#d38).
+It is **pid 1** on the bare-metal target (`OS-017`, #333): the entire userland. What a userland does
+is run several things on timers at once — DHCP renewal at T1 and T2 (#335), SNTP polling (#336),
+`SIGCHLD` reaping and an ACPI power-button watch (#337), a virtio-serial guest-agent channel (#338),
+and the entropy re-test that was already there. **mio has no timers.** Every one of those deadlines
+would have been hand-rolled bookkeeping against a `poll()` timeout, which is the code that is tedious
+to write, easy to get subtly wrong, and unpleasant to test.
 
-**D36 — Honouring py-kms's `InvalidWinBuild` per CSVLK (`ID-017`, #122).** The *intent* is sound — a
-host key should not be paired with a host build that could not have had it installed — but the field
-itself cannot be adopted. It exists only in py-kms's `KmsDataBase.xml`, it is hand-entered, and its
-values are **indices into py-kms's own `WinBuild` table** (`[0,1,2]`, `[0]`, `[]`), so they carry no
-meaning outside that file's row order. No Microsoft artifact contains it, or anything equivalent:
-`pkeyconfig` gives `ActConfigId`, `RefGroupId`, `EditionId`, `ProductDescription`, `ProductKeyType`
-and `IsRandomized`, and nothing about host builds. Copying the values would be exactly the practice
-that produced every fabricated GUID the audits found. The constraint is worth enforcing, so it is
-reopened as #286 in the form that has a real data source — deriving each host key's earliest build
-from the images its `pkeyconfig` appears in — rather than closed outright.
+What the migration actually cost, and what it did not:
 
-**D37 — vlmcsd-scale feature stripping (`CFG-011`, #176).** vlmcsd carries roughly 30 preprocessor
-macros and 7 build presets whose purpose is to shrink the binary for OpenWrt-class embedded targets —
-`NO_LOG`, `NO_CLIENT_LIST`, `NO_STRICT_MODES`, `NO_HELP`, `NO_TIMEOUT`, `ONE_FILE` and the rest. They
-are why 21 of the 119 rows in its feature matrix are build-gated rather than simply present, so a
-statement about "what vlmcsd does" is really a statement about one of 2^n vlmcsd builds.
+- **The sans-io core did not change at all.** `kmsrs-proto` and `kmsrs-policy` still take `&[u8]` and
+  a clock reading (axiom A7). This is the second time that split has paid for itself in one week —
+  the bare-metal target changed operating system and then changed I/O driver, and neither crate
+  noticed.
+- **Connection deadlines moved to tokio's clock.** They were computed against an injected closure
+  (`ARCH-004`, #4), which made timeout tests deterministic; they now use `tokio::time`, and the tests
+  use `#[tokio::test(start_paused = true)]`. That is strictly better than it sounds: the two deadline
+  tests went from 62 seconds of real waiting to 0.05 seconds, because a paused clock jumps to the
+  next timer instead of sleeping. The injected clock survives where it was always load-bearing — a
+  request is still *handed* the instant it happened.
+- **`Server::handle` takes `&mut self`**, so the server and the entropy source sit behind one mutex,
+  taken per request and never held across an `await`. That is what the single-threaded mio loop did
+  anyway; the difference is that reading, writing and waiting now overlap.
+- **A current-thread runtime, not a worker pool.** This host answers one 384-byte request per client
+  per few hours, and the shared state is serialised regardless, so threads would contend and gain
+  nothing — and on a one-vCPU guest a thread-per-core scheduler is a scheduler arguing with itself.
 
-The targets that motivated them are not targets here (axiom A4: Linux, Windows, and Hermit on
-x86-64). Buying a smaller binary with a combinatorial explosion of behaviours is a bad trade when
-every build has to be differentially tested against a reference — the number of artifacts to test
-would grow faster than confidence in any of them. The two build-time flags that do exist
-(`permissive-retail`, `strict-clock-skew`) each change behaviour a deployment might genuinely need
-changed, and CI builds the **whole powerset** rather than a sampled subset (`CFG-010`, #175).
-
-
-<a id="d38"></a>**D38 — A build-time strict mode refusing an anomalous `N_Policy` with `0x8007000D`
-(`POL-018`, #283).** `POL-006` (#94) specified it and it was never implemented; this records why it
-will not be.
-
-The argument that kept it open was byte-for-byte parity: a differential test against a genuine host
-with a deliberately absurd `N_Policy` might show a divergence, and this is where the fix would go.
-`POL-019` (#313) has since answered that test, and the answer is not a refusal. **A genuine host
-answers the request** — it reports how many machine IDs it is holding, the client compares that
-against its own `N_Policy`, and the client decides it has not been activated. The refusal is vlmcsd's
-invention, faithful to nothing, and reproducing it would replace one divergence with another.
-
-Under the per-client view model (`POL-001`, #89) there is also nothing for a refusal to protect: an
-anomalous demand cannot reach shared state, so there is no table to poison. A flag whose only effect
-is to refuse a request a genuine host would have answered is a *fingerprint*, not a hardening
-measure — the same shape of mistake as [D35](#d35) and as `POL-011`'s clock-skew tolerance, which is
-itself a detection oracle.
-
-`HResult::InvalidData` (`0x8007000D`) stays in the vocabulary regardless — it is what an unsupported
-protocol version returns (`KMS-014`, #30) — so `kmsrs-client` can still name the code when a vlmcsd
-instance sends one for this reason instead.
-
-<a id="d39"></a>**D39 — A copy-to-clipboard button on the instructions page (`DISC-006`, #148).** The
-issue asks for one and it is the only part of #148 not built. `navigator.clipboard` needs script, and
-the web UI's Content-Security-Policy is `default-src 'none'; style-src 'unsafe-inline'` — no
-`script-src` at all, in any form. Adding the button means adding `script-src 'unsafe-inline'`, which
-is the single header change that converts every escaping bug on those pages from a rendering defect
-into script execution. One of those pages renders a client-supplied `Host` header and another renders
-client-supplied workstation names.
-
-That is a bad trade for a convenience the browser already provides: the snippets are in `<pre>`
-blocks, which double-click and triple-click select whole. Revisit only if the UI acquires script for
-some other reason, at which point the marginal cost is zero rather than the entire policy.
-
-<a id="d40"></a>**D40 — systemd socket activation (`NET-016`, #165).** The issue is right about the
-trap: `Accept=yes` is the inetd convention, one process per connection, which silently destroys both
-the stable ePID and the CMID table — and that is exactly how vlmcsd-under-systemd degrades without
-telling anyone. What it is wrong about is the payoff.
-
-> *"systemd binds 1688 so we never need `CAP_NET_BIND_SERVICE` — a process that never had privileges
-> beats one that dropped them."*
-
-**1688 is unprivileged.** There is no capability to avoid, so the entire benefit is a restatement of
-something already true. What remains is zero-downtime restarts, which for a service whose clients
-retry and whose activations last 180 days is worth nothing.
-
-Against that: adopting an inherited file descriptor means `FromRawFd`, which is `unsafe` in every
-spelling — `std`, `socket2` and `rustix` alike — and axiom A1 is pure safe Rust with exactly one
-permitted boundary, in `kmsrs-os`, for a different target and a different reason ([D13](#d13),
-`OS-013` #264). A dependency that performs the `unsafe` on our behalf moves the code without moving
-the risk, and adds a dependency to a project whose whole dependency posture is the point of
-`SEC-009` (#201).
-
-So the answer is to refuse rather than to support. `LISTEN_FDS` set to anything non-zero exits 64 and
-says to remove the `.socket` unit. That is the same detection the issue asked for, applied to the
-whole feature rather than to one mode of it, and it forecloses the silent degradation completely
-rather than for one configuration.
-
-<a id="d41"></a>**D41 — Privilege drop on Linux (`SEC-007`, #199).** The issue names the preferred
-path itself — *"socket activation plus DynamicUser, where privileges never exist to drop"* — and half
-of that is now [D40](#d40). The other half is enough on its own: `DynamicUser=yes` with
-`CapabilityBoundingSet=` and `AmbientCapabilities=` starts the service with **no capabilities at
-all**, and 1688 is unprivileged, so there is nothing to bind that would have needed one.
-
-`setgid`/`setgroups`/`setuid` therefore exist to drop a privilege this process never has. They are
-also three `unsafe` libc calls in a specific order whose failure modes are famous — `setgroups`
-before `setuid`, checking every return value, and the whole sequence being untestable without running
-as root — added to remove a privilege that `deploy/systemd/kmsrsos.service` never grants. A container
-runs as `65534:65534` for the same reason ([`PKG-004`](#d17), #241).
-
-If someone runs the binary as root outside those two paths, it stays root. That is a true statement
-about a deployment nobody has to make, and it is a better one than a partial implementation that
-looks like it solved the problem.
+`deny.toml` still bans `async-std` and `smol`. The reason was never "async is bad", it is that a
+second runtime is a second scheduler with its own idea of when work runs.
 
 ### What the panic-freedom gate actually found (`ARCH-009`, #9)
 

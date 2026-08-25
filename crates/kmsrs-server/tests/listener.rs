@@ -23,7 +23,6 @@ use kmsrs_proto::entropy::testing::DeterministicEntropy;
 use kmsrs_proto::kms::framing::{self, Ciphers};
 use kmsrs_proto::kms::layout::{REQUEST_BODY_LEN, RequestBody};
 use kmsrs_proto::kms::version::Version;
-use kmsrs_proto::time::Instant;
 use kmsrs_proto::wire::header::{HEADER_LEN, PacketFlags, PacketType, RpcHeader};
 use kmsrs_server::config::operational::LogLevel;
 use kmsrs_server::net::driver::Driver;
@@ -31,7 +30,6 @@ use kmsrs_server::net::listener::bind_each;
 use kmsrs_server::{Compiled, Discovered, Operational, Server};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicU64, Ordering};
 use zerocopy::{FromBytes, IntoBytes};
 
 const NDR32_WIRE: [u8; 16] = [
@@ -99,39 +97,6 @@ fn kms_payload(machine: u32) -> Vec<u8> {
     stub
 }
 
-/// A clock the test drives, so deadlines are reachable.
-///
-/// Every reading advances by `step`, which is what makes `READ_TIMEOUT` and
-/// `CONNECTION_DEADLINE` testable at all: under the previous 1 ms-per-call
-/// clock neither was reachable, so both were entirely uncovered
-/// (`OS-014`, #297).
-struct TestClock {
-    nanos: AtomicU64,
-    step: u64,
-}
-
-impl TestClock {
-    /// A clock that barely moves, for tests that are not about deadlines.
-    fn still() -> Self {
-        Self {
-            nanos: AtomicU64::new(1_000_000),
-            step: 0,
-        }
-    }
-
-    /// A clock that advances `seconds` per reading.
-    fn stepping(seconds: u64) -> Self {
-        Self {
-            nanos: AtomicU64::new(1_000_000),
-            step: seconds.saturating_mul(1_000_000_000),
-        }
-    }
-
-    fn now(&self) -> Instant {
-        Instant::from_nanos(self.nanos.fetch_add(self.step, Ordering::AcqRel))
-    }
-}
-
 fn test_server() -> Server {
     let mut entropy = DeterministicEntropy::from_seed(0x11_22_33_44);
     Server::new(
@@ -156,22 +121,29 @@ fn quiet() -> Operational {
 /// Run a driver on loopback for the duration of `body`, then stop it.
 ///
 /// Returns the driver, so a test can inspect the server afterwards.
-fn with_driver<T>(
-    limit: usize,
-    server: Server,
-    clock: TestClock,
-    body: impl FnOnce(SocketAddr) -> T,
-) -> (T, Driver) {
+fn with_driver<T>(limit: usize, server: Server, body: impl FnOnce(SocketAddr) -> T) -> (T, Driver) {
     let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
     let address = bound[0].address;
-    let mut driver = Driver::new(server, bound, limit).unwrap();
+    let mut driver = Driver::new(
+        server,
+        bound,
+        limit,
+        Box::new(DeterministicEntropy::from_seed(0x5A17)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
 
     std::thread::scope(|scope| {
-        let clock_ref = &clock;
         let handle = scope.spawn(move || {
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
-            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+            // The driver is async now (`OS-024`, #340), but everything a test
+            // body does is blocking loopback I/O. So the driver gets a
+            // current-thread runtime of its own on this thread and the bodies
+            // below are unchanged.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
             driver
         });
 
@@ -182,9 +154,43 @@ fn with_driver<T>(
     })
 }
 
+/// Run a driver and an async body on one **paused** clock (`OS-024`, #340).
+///
+/// Deadlines belong to tokio now, so a test that is *about* a deadline drives
+/// it with tokio's clock rather than with an injected closure. Everything here
+/// shares one current-thread runtime, so when every task is idle the runtime
+/// auto-advances to the next timer — which is what closes a quiet connection
+/// without anybody sleeping for thirty real seconds.
+async fn with_paused_driver<F, Fut, T>(limit: usize, body: F) -> (T, Driver)
+where
+    F: FnOnce(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
+    let address = bound[0].address;
+    let mut driver = Driver::new(
+        test_server(),
+        bound,
+        limit,
+        Box::new(DeterministicEntropy::from_seed(0x5A17)),
+    )
+    .unwrap();
+    let shutdown = driver.shutdown_handle();
+
+    let task = tokio::spawn(async move {
+        driver.run().await.unwrap();
+        driver
+    });
+
+    let result = body(address).await;
+    shutdown.request();
+    let driver = task.await.expect("the driver stopped cleanly");
+    (result, driver)
+}
+
 /// The common case: a default server, a clock that does not move.
 fn with_server<T>(limit: usize, body: impl FnOnce(SocketAddr) -> T) -> T {
-    with_driver(limit, test_server(), TestClock::still(), body).0
+    with_driver(limit, test_server(), body).0
 }
 
 /// Read a whole RPC PDU: the 16-byte header, then `frag_length - 16` more.
@@ -362,13 +368,13 @@ fn shutdown_wakes_a_blocked_poll() {
     // promptly — which is what `mio`'s `Waker` is for (`NET-008`, #158). The
     // previous design woke a blocked `accept()` by connecting to its own
     // listener, which assumed a loopback route (`OS-015`, #298).
-    let ((), driver) = with_driver(8, test_server(), TestClock::still(), |_address| {});
+    let ((), driver) = with_driver(8, test_server(), |_address| {});
     assert_eq!(driver.in_flight(), 0);
 }
 
 #[test]
 fn the_recorded_peer_is_normalised() {
-    let ((), driver) = with_driver(8, test_server(), TestClock::still(), |address| {
+    let ((), driver) = with_driver(8, test_server(), |address| {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
         stream
@@ -381,8 +387,8 @@ fn the_recorded_peer_is_normalised() {
         read_pdu(&mut stream);
     });
 
-    let event = driver
-        .server()
+    let server = driver.server();
+    let event = server
         .host()
         .events()
         .iter()
@@ -478,7 +484,7 @@ fn a_denied_peer_never_reaches_the_protocol() {
     )
     .unwrap();
 
-    let ((), driver) = with_driver(8, server, TestClock::still(), |address| {
+    let ((), driver) = with_driver(8, server, |address| {
         let mut stream = TcpStream::connect(address).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -532,7 +538,7 @@ fn the_default_build_admits_everyone() {
 fn a_source_over_its_budget_is_rate_limited() {
     let server = test_server().with_limiter(RateLimiter::with(2, 1));
     // A clock that does not advance, so no tokens are earned back mid-test.
-    let (counts, driver) = with_driver(8, server, TestClock::still(), |address| {
+    let (counts, driver) = with_driver(8, server, |address| {
         let mut answered = 0_u32;
         let mut cut_off = 0_u32;
         for _ in 0..6 {
@@ -649,19 +655,16 @@ fn the_protocol_crates_own_client_can_activate() {
 /// where the socket option fails. With the poller there is one path, and the
 /// deadline is a pure function of the injected clock, so a test can simply
 /// drive the clock to it.
-#[test]
-fn a_quiet_connection_is_closed_when_its_read_deadline_passes() {
-    // Each clock reading advances 20 seconds, so `READ_TIMEOUT` (30 s) is
-    // crossed within a couple of poll wakeups.
-    let (outcome, driver) = with_driver(8, test_server(), TestClock::stepping(20), |address| {
-        let mut stream = TcpStream::connect(address).unwrap();
-        // Say nothing at all, and wait to be hung up on.
-        stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
+#[tokio::test(start_paused = true)]
+async fn a_quiet_connection_is_closed_when_its_read_deadline_passes() {
+    let (outcome, driver) = with_paused_driver(8, |address| async move {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        // Say nothing at all. Every task is now idle, so the runtime advances
+        // to the driver's read deadline and the server hangs up.
         let mut buffer = [0_u8; 16];
-        stream.read(&mut buffer)
-    });
+        tokio::io::AsyncReadExt::read(&mut stream, &mut buffer).await
+    })
+    .await;
 
     match outcome {
         Ok(0) => {}
@@ -682,33 +685,33 @@ fn a_quiet_connection_is_closed_when_its_read_deadline_passes() {
 /// idle deadline forever. Here the client dribbles bytes steadily while the
 /// clock advances, and the connection is closed anyway once
 /// `CONNECTION_DEADLINE` passes.
-#[test]
-fn a_dribbling_connection_is_closed_when_its_total_deadline_passes() {
-    // 10 seconds per reading: under `READ_TIMEOUT` each time, so the idle
-    // deadline keeps being reset, but past `CONNECTION_DEADLINE` (2 min) within
-    // a dozen or so wakeups.
-    let (outcome, driver) = with_driver(8, test_server(), TestClock::stepping(10), |address| {
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(200)))
-            .unwrap();
+#[tokio::test(start_paused = true)]
+async fn a_dribbling_connection_is_closed_when_its_total_deadline_passes() {
+    let (outcome, driver) = with_paused_driver(8, |address| async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
 
-        // Dribble one byte at a time, never completing a PDU, until the server
-        // hangs up.
-        for _ in 0..2_000 {
-            if stream.write_all(&[0x05]).is_err() {
+        // Dribble one byte at a time, never completing a PDU, stepping the
+        // clock by less than READ_TIMEOUT each round so the *idle* deadline is
+        // reset every time. Only the total deadline can end this.
+        for _ in 0..64 {
+            if stream.write_all(&[0x05]).await.is_err() {
                 return Ok(0);
             }
+            tokio::time::advance(Duration::from_secs(10)).await;
             let mut buffer = [0_u8; 16];
-            match stream.read(&mut buffer) {
-                Ok(0) => return Ok(0),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-                other => return other,
+            match tokio::time::timeout(Duration::from_millis(1), stream.read(&mut buffer)).await {
+                Ok(Ok(0)) => return Ok(0),
+                Ok(other) => {
+                    other?;
+                }
+                // Nothing to read yet; keep dribbling.
+                Err(_) => {}
             }
         }
         Err(std::io::Error::other("never closed"))
-    });
+    })
+    .await;
 
     match outcome {
         Ok(0) => {}
@@ -723,7 +726,7 @@ fn a_dribbling_connection_is_closed_when_its_total_deadline_passes() {
 /// everything.
 #[test]
 fn an_active_connection_survives_a_moving_clock() {
-    with_driver(8, test_server(), TestClock::stepping(5), |address| {
+    with_driver(8, test_server(), |address| {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
@@ -770,15 +773,22 @@ fn each_listener_advertises_its_own_port() {
     let second = bound[1].address;
     assert_ne!(first.port(), second.port());
 
-    let mut driver = Driver::new(test_server(), bound, 8).unwrap();
+    let mut driver = Driver::new(
+        test_server(),
+        bound,
+        8,
+        Box::new(DeterministicEntropy::from_seed(0x5A17)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
-    let clock = TestClock::still();
 
     std::thread::scope(|scope| {
-        let clock_ref = &clock;
         let handle = scope.spawn(move || {
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
-            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
         });
 
         let result = std::panic::catch_unwind(|| {

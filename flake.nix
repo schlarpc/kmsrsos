@@ -18,9 +18,21 @@
       url = "github:nix-community/nix-direnv";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+
+
+
   };
 
-  outputs = { self, nixpkgs, systems, rust-overlay, crane, nix-direnv, ... }:
+  outputs =
+    { self
+    , nixpkgs
+    , systems
+    , rust-overlay
+    , crane
+    , nix-direnv
+    , ...
+    }:
     let
       eachSystem = nixpkgs.lib.genAttrs (import systems);
 
@@ -83,6 +95,10 @@
             || (builtins.match ".*/deploy(/.*)?" path != null)
             || (builtins.match ".*/docs(/.*)?" path != null)
             || (builtins.match ".*/ci(/.*)?" path != null)
+            # The kernel allowlist and what it generated, which `kernel_tcb.rs`
+            # reads to assert what is in the bare-metal machine's TCB
+            # (`OS-023`, #339; `OS-025`, #342).
+            || (builtins.match ".*/os(/.*)?" path != null)
             # nextest's profile, which decides the timeouts a test run uses.
             || (builtins.match ".*/\\.config(/.*)?" path != null)
             # The workflows, because `packaging_invariants.rs` asserts that a
@@ -174,8 +190,7 @@
             "-imsvc${xwinSdk}/sdk/include/shared"
           ];
 
-          # Windows binaries can't run on the build host. `kmsrs-os` is a Hermit
-          # binary and has nothing to say on Windows.
+          # Windows binaries can't run on the build host.
           doCheck = false;
           cargoExtraArgs = "--package kmsrs-server --package kmsrs-client";
         };
@@ -184,16 +199,6 @@
         let craneLib = cranelibFor system;
         in craneLib.buildDepsOnly (windowsArgsFor system);
 
-      # --- The build-time settings a deployment might genuinely need changed ---
-      #
-      # `CFG-001` (#166): anything that can change a byte on the wire is decided
-      # when the binary is built. These are the two intervals and the two policy
-      # features, which is the whole list — see declined item D37 for why it is
-      # not thirty macros and seven presets.
-      #
-      # An invalid value here is a *compile error*, not a start-up failure:
-      # `Compiled::BUILD` parses the overrides in const context (`CFG-004`,
-      # #169), so `KMSRSOS_ACTIVATION_INTERVAL=banana` stops the build.
       defaultSettings = {
         # Minutes. Microsoft's documented defaults, and the one genuine
         # three-way agreement between the documentation, vlmcsd and py-kms.
@@ -328,15 +333,18 @@
           });
 
           server = buildOne { pname = "kmsrsos"; package = "kmsrs-server"; };
+
+          # `OS-021` (#337): pid 1 on the bare-metal target. The same server,
+          # with the handful of duties the kernel does not perform for process
+          # 1 done first — mounts and a reaper.
+          os = buildOne { pname = "kmsrsos-os"; package = "kmsrs-os"; };
           client = buildOne { pname = "kmsrs-client"; package = "kmsrs-client"; };
+
         in
         rec {
-          inherit server client;
+          inherit server client os;
           container = containerFor { inherit pkgs system server client; };
-          # `osImage` and `hermit` join this set once PKG-013 (#250) has a
-          # hermetic Hermit build. Named here rather than stubbed, because an
-          # output that exists and does not work is worse than one that does
-          # not exist.
+
         };
 
       # The Debian and RPM architecture names, which are neither Nix's nor
@@ -386,6 +394,553 @@
       #   * Every version in it comes from `flake.lock` and `Cargo.lock`, both
       #     exact. edgd1er's move from pinned pip to apk floors is what
       #     `PKG-006` (#243) exists about, and there is no apk here to float.
+      # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
+      #
+      # Kept in `os/linux/` rather than inline, because unlike the Hermit
+      # artefacts this one is mostly a kernel configuration, and a 2790-line
+      # allowlist is the statement of what is in the machine's TCB. It belongs
+      # in a file a reviewer can read, not spliced into this one.
+      linuxFor = system:
+        let pkgs = pkgsFor system;
+        in import ./os/linux {
+          inherit pkgs;
+          init = (mkKmsrsos { inherit system; }).os;
+        };
+
+      # `OS-017` (#333): the Linux target boots into service on the device
+      # topology that defeats Hermit, from *both* firmwares, with no `--args`.
+      #
+      # Three things are deliberately absent from the command line and each
+      # absence is the assertion:
+      #
+      #   * No `disable-legacy=on`. The NIC sits on `pci.0` behind the bridge
+      #     pair, exactly as `qemu-server` emits it, so the device is
+      #     transitional (`0x1000`). That is `OS-004` (#255), the thing Hermit
+      #     refuses and this target does not.
+      #   * No `rdseed`/`rdrand` in the CPU model. `qemu64` has neither, which
+      #     is the condition behind `OS-016` (#332). Linux seeds its CRNG
+      #     anyway, so `getrandom(2)` never returns predictable bytes.
+      #   * No `-enable-kvm`. A build sandbox has no `/dev/kvm`, and TCG is fast
+      #     enough.
+      linuxBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor system;
+
+          # Exactly what `qemu-server` emits for a q35 VM with one virtio NIC.
+          proxmoxTopology = builtins.concatStringsSep " " [
+            "-device i82801b11-bridge,id=pci.1,bus=pcie.0,addr=0x1e"
+            "-device pci-bridge,id=pci.0,chassis_nr=1,bus=pci.1,addr=0x1"
+            "-netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688"
+            "-device virtio-net-pci,netdev=u1,bus=pci.0,addr=0x12,id=net0"
+          ];
+        in
+        pkgs.runCommand "linux-boot"
+          {
+            # `socat` is `OS-026` (#343): the QEMU monitor is how a
+            # `system_powerdown` — the same ACPI event `qm shutdown` sends — is
+            # delivered to the guest.
+            nativeBuildInputs = [ pkgs.qemu_kvm pkgs.socat ];
+            meta.timeout = 900;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          # `firmware` is `bios` or `uefi`. The same ISO, the same bytes of
+          # kernel, reached two different ways: SeaBIOS through isolinux and
+          # the Linux boot protocol, OVMF through the PE header. One file is
+          # both, which is the whole point of `CONFIG_EFI_STUB`.
+          boot() {
+            local firmware="$1"
+            local serial="$PWD/$firmware.log"
+            local monitor="$PWD/$firmware.mon"
+            local fw=""
+
+            if [ "$firmware" = uefi ]; then
+              cp ${pkgs.OVMF.variables} "$PWD/$firmware-vars.fd"
+              chmod +w "$PWD/$firmware-vars.fd"
+              fw="-drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware}"
+              fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
+            fi
+
+            # `-no-shutdown` is deliberately absent: this check's whole point is
+            # that the guest powers itself off and qemu exits on its own.
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              -monitor "unix:$monitor,server,nowait" \
+              -device virtio-serial-pci \
+              -chardev "socket,path=$PWD/$firmware.agent,server=on,wait=off,id=ga" \
+              -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \
+              $fw \
+              -drive file=${linux.iso},media=cdrom,readonly=on \
+              ${proxmoxTopology} &
+            qemu=$!
+
+            local attempt
+            local serving=0
+            for attempt in $(seq 1 120); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:1688; then
+                serving=1
+                break
+              fi
+              if ! kill -0 $qemu 2>/dev/null; then
+                echo "qemu exited before the guest answered ($firmware)" >&2
+                cat "$serial" >&2 || true
+                return 1
+              fi
+              sleep 1
+            done
+
+            if [ "$serving" -ne 1 ]; then
+              echo "the guest never answered on $firmware" >&2
+              cat "$serial" >&2 || true
+              kill $qemu 2>/dev/null || true
+              return 1
+            fi
+
+            # `OS-022` (#338): the guest agent, spoken to over the channel a
+            # hypervisor would use. Not a unit test of the JSON — that is in
+            # `agent.rs` — but the whole path: virtio-serial attached, the port
+            # found by name in sysfs rather than by guessing `vport0p1`, the
+            # node opened, a request read and a reply written.
+            #
+            # `guest-network-get-interfaces` is the one that matters. It is what
+            # populates the IP column on a Proxmox summary page, and the whole
+            # reason #338 exists.
+            local agent="$PWD/$firmware.agent"
+            for attempt in $(seq 1 30); do
+              grep -q '"event":"agent"' "$serial" && break
+              sleep 1
+            done
+            # The `sleep` keeps stdin open, and that is not padding. With an
+            # immediate EOF socat shuts the socket down as soon as it has
+            # written, qemu reports the client gone, and the guest's reply is
+            # written to a channel with nobody on it. A guest agent client that
+            # hangs up before the answer is one that concludes there is no
+            # agent — which is what this looked like the first time.
+            ask() {
+              { printf '%s\n' "$1"; sleep 5; } \
+                | socat -T8 - "UNIX-CONNECT:$agent" 2>/dev/null || true
+            }
+            ask '{"execute":"guest-network-get-interfaces"}' > "$PWD/$firmware.ifaces"
+            ask '{"execute":"guest-exec","arguments":{"path":"/bin/sh"}}' > "$PWD/$firmware.exec"
+            cp "$PWD/$firmware.ifaces" $out/$firmware.ifaces 2>/dev/null || true
+            cp "$PWD/$firmware.exec" $out/$firmware.exec 2>/dev/null || true
+
+            # `OS-020` (#336): wait for the clock task to have tried and
+            # reported, which it does within a few seconds of the lease. Waited
+            # for rather than assumed, because the healthcheck above can succeed
+            # before the DNS lookup for the pool has timed out — and then the
+            # assertion below would be racing rather than checking.
+            for attempt in $(seq 1 30); do
+              grep -q '"event":"clock"' "$serial" && break
+              sleep 1
+            done
+
+            # `OS-026` (#343): the shutdown half. `system_powerdown` is exactly
+            # what `qm shutdown` and the Proxmox web UI's Shutdown button send —
+            # an ACPI power-button event — and until this issue the guest
+            # discarded it, so only `qm stop` would stop the VM.
+            #
+            # Asserted by *letting qemu exit on its own*. Nothing is killed
+            # below unless the guest failed to stop, so a regression here is a
+            # timeout rather than a passing check that killed the evidence.
+            echo system_powerdown | socat - "UNIX-CONNECT:$monitor" >/dev/null
+
+            local stopped=0
+            for attempt in $(seq 1 60); do
+              if ! kill -0 $qemu 2>/dev/null; then
+                stopped=1
+                break
+              fi
+              sleep 1
+            done
+            wait $qemu 2>/dev/null || true
+            cp "$serial" $out/$firmware.log
+
+            if [ "$stopped" -ne 1 ]; then
+              echo "the guest ignored system_powerdown on $firmware, so \
+          'qm shutdown' does nothing and only 'qm stop' would stop it \
+          (OS-026, #343)" >&2
+              cat "$serial" >&2 || true
+              kill -9 $qemu 2>/dev/null || true
+              return 1
+            fi
+            return 0
+          }
+
+          boot bios
+          boot uefi
+
+          # The transitional device must have *attached*, not been skipped. If
+          # this ever stops holding, the interesting question is what changed.
+          for f in bios uefi; do
+            grep -q '"event":"listening"' $out/$f.log || {
+              echo "no listener reported on $f" >&2; exit 1; }
+            # `OS-021` (#337): pid 1 mounted the pseudo-filesystems. Asserted
+            # positively — the absence of a warning is equally consistent with
+            # the code never having run.
+            grep -q '"event":"pid1".*devtmpfs\|"event":"pid1"' $out/$f.log || {
+              echo "pid 1 did not report its mounts on $f (OS-021, #337)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q 'mounted /dev /proc /sys' $out/$f.log || {
+              echo "pid 1 did not mount all three pseudo-filesystems on $f \
+          (OS-021, #337)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
+            # `OS-028` (#345). Everything above this point is read out of the
+            # *serial* log of a machine whose command line ends `console=tty0`
+            # — so /dev/console is the framebuffer and, without the tee, not one
+            # of those lines would be here. That is what makes the greps above a
+            # regression test for this and not merely for OS-021.
+            #
+            # Asserted explicitly as well, because "the lines are present" would
+            # also hold if somebody reordered the command line back, and the
+            # point of this issue is that the order stopped mattering.
+            grep -q '"event":"console".*logging to.*ttyS0' $out/$f.log || {
+              echo "pid 1 did not tee its log to the serial console on $f; \
+          with tty0 last, every line above reached the framebuffer only \
+          (OS-028, #345)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q '"event":"console".*logging to.*tty0' $out/$f.log || {
+              echo "pid 1 found no framebuffer console on $f, so this check is \
+          not exercising the two-console case OS-028 (#345) is about" >&2
+              cat $out/$f.log >&2; exit 1; }
+
+            # `OS-022` (#338). The channel was found — by matching its name in
+            # sysfs, since there is no udev here to make
+            # /dev/virtio-ports/org.qemu.guest_agent.0.
+            grep -q '"event":"agent".*answering on vport' $out/$f.log || {
+              echo "the guest agent found no channel on $f, so a hypervisor \
+          would show no address for this VM (OS-022, #338)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
+            # And it answered the question Proxmox asks, with the address the
+            # DHCP client took.
+            grep -q '"hardware-address"' $out/$f.ifaces || {
+              echo "guest-network-get-interfaces was not answered on $f. That \
+          is the command that fills the IP column (OS-022, #338)" >&2
+              cat $out/$f.ifaces >&2 || true; exit 1; }
+            grep -q '"ip-address": "10.0.2.15"' $out/$f.ifaces || {
+              echo "the agent did not report the leased address on $f, so the \
+          hypervisor would show the wrong one or none (OS-022, #338)" >&2
+              cat $out/$f.ifaces >&2 || true; exit 1; }
+
+            # The refusals are the other half of the surface, and the one worth
+            # a check: `guest-exec` is remote code execution over a channel with
+            # no authentication, and its absence must be an answer rather than
+            # a silence a client waits out.
+            grep -q 'CommandNotFound' $out/$f.exec || {
+              echo "guest-exec was not refused with an error on $f. Silence is \
+          not a refusal — a client waits for a timeout and an operator reads \
+          that as a hung guest (OS-022, #338)" >&2
+              cat $out/$f.exec >&2 || true; exit 1; }
+
+            # `OS-026` (#343). The guest stopping is asserted above, by qemu
+            # having exited without being killed. These four lines are the
+            # assertion that it stopped *the right way* — a machine that
+            # panicked, or that was cut off mid-request, would also stop.
+            grep -q '"event":"power".*watching event' $out/$f.log || {
+              echo "pid 1 found no power button on $f: the ACPI event has \
+          nowhere to go and 'qm shutdown' is silently a no-op (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q '"event":"power".*acpi power button: draining' $out/$f.log || {
+              echo "the button was watched but the press did not reach the \
+          drain on $f (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # The drain is the point: `qm stop` also stops a VM, and does it by
+            # dropping every connection in flight.
+            grep -q '"event":"stopped"' $out/$f.log || {
+              echo "the host stopped without draining on $f (NET-007, #157; \
+          OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # `OS-020` (#336). The clock task must have run and said something —
+            # a task that failed quietly is the failure mode this whole target
+            # keeps producing.
+            #
+            # *Which* thing it said is not asserted here, because it is not this
+            # check's to decide: whether `pool.ntp.org` resolves depends on
+            # whether the build sandbox has a route out. Both outcomes are
+            # correct, and the one that matters — that an unreachable time
+            # server does not stop the host serving — is already proven above by
+            # the healthcheck having succeeded, and its wording is asserted by
+            # `an_unreachable_time_server_is_not_a_reason_to_stop_serving`.
+            grep -q '"event":"clock"' $out/$f.log || {
+              echo "the clock task never reported on $f, so either it did not \
+          run or it failed quietly (OS-020, #336)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # Whichever branch it took, it must be one of the two.
+            grep -qE '"event":"clock".*(no time server answered|stepped)' $out/$f.log || {
+              echo "the clock task said something on $f that is neither a step \
+          nor a report of no answer (OS-020, #336)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
+            # An ACPI power-off, not `Attempted to kill init!`. Both stop the
+            # machine; only one of them looks like a clean stop to the operator
+            # who pressed the button.
+            if grep -qi 'Attempted to kill init' $out/$f.log; then
+              echo "pid 1 returned instead of powering the machine off on $f, \
+          so the operator sees a kernel panic after pressing Shutdown \
+          (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1
+            fi
+
+            if grep -qi 'unable to open an initial console' $out/$f.log; then
+              echo "init had no stdio on $f: the /dev/console node is missing \
+          from the initramfs manifest (OS-017, #333)" >&2
+              exit 1
+            fi
+          done
+        '';
+
+      # `OS-025` (#342): one boot per NIC model this project claims to support,
+      # asserting that the machine **serves** rather than that it boots.
+      #
+      # That distinction is the whole issue. Two of the four models the Proxmox
+      # web UI offers used to produce a machine that booted to completion,
+      # printed `listening`, and then answered nobody forever — no driver, so
+      # no interface, so no address, and nothing said so. A check that asserted
+      # "the guest booted" would have passed on every one of them.
+      #
+      # BIOS only, and one model at a time. Both firmwares are already covered
+      # by `linux-boot` on the supported topology; what varies here is the
+      # driver, and doubling the matrix to prove that a NIC driver does not
+      # depend on the firmware would be buying nothing.
+      # Port 11688, not 1688, and that is load-bearing rather than arbitrary:
+      # `nix flake check` runs checks in parallel, and `linux-boot` already
+      # forwards 1688. Two qemus asking for the same host port means the second
+      # one **exits at start-up**, which presents as a guest that booted to a
+      # completely empty console and "never served" — a failure that blames the
+      # kernel config for a port clash. Observed once; hence the comment.
+      nicBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor system;
+
+          # Each is `qemu-device-name:kernel-driver`, so a failure names the
+          # driver an operator would have to look for.
+          models = [
+            "virtio-net-pci:virtio_net"
+            "e1000:e1000"
+            "e1000e:e1000e"
+            "rtl8139:8139cp"
+            "vmxnet3:vmxnet3"
+            "pcnet:pcnet32"
+            "tulip:tulip"
+          ];
+        in
+        pkgs.runCommand "linux-nics"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 1800;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          serves() {
+            local model="''${1%%:*}"
+            local driver="''${1##*:}"
+            local serial="$PWD/$driver.log"
+
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              -drive file=${linux.iso},media=cdrom,readonly=on \
+              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:11688-:1688 \
+              -device "$model,netdev=u1,id=net0" &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 120); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:11688; then
+                kill $qemu 2>/dev/null || true
+                wait $qemu 2>/dev/null || true
+                cp "$serial" $out/$driver.log
+                echo "$model serves, via $driver"
+                return 0
+              fi
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$serial" $out/$driver.log 2>/dev/null || true
+            echo "$model never served. The kernel needs $driver, and \
+          os/linux/kernel.config is where it is missing from (OS-025, #342)" >&2
+            cat "$serial" >&2 || true
+            return 1
+          }
+
+          ${builtins.concatStringsSep "\n          "
+            (map (model: "serves ${model}") models)}
+
+          # The other half of `OS-025` (#342), and the one a driver list can
+          # never cover: a machine whose NIC has no driver at all. It must say
+          # so on the console rather than reporting `listening` and going quiet.
+          #
+          # `-nic none` is the strongest form of that — no NIC at all — and it
+          # exercises the same path as an unrecognised one, since both end with
+          # the kernel having created no interface.
+          echo "checking that a machine with no interface says so"
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 \
+            -smp 1 -m 512M -display none -no-reboot \
+            -serial "file:$PWD/no-nic.log" \
+            -drive file=${linux.iso},media=cdrom,readonly=on \
+            -nic none &
+          nonic=$!
+
+          found=0
+          for attempt in $(seq 1 60); do
+            if grep -q 'no Ethernet interface' "$PWD/no-nic.log" 2>/dev/null; then
+              found=1
+              break
+            fi
+            kill -0 $nonic 2>/dev/null || break
+            sleep 1
+          done
+          kill $nonic 2>/dev/null || true
+          wait $nonic 2>/dev/null || true
+          cp "$PWD/no-nic.log" $out/no-nic.log 2>/dev/null || true
+
+          if [ "$found" -ne 1 ]; then
+            echo "a machine with no network interface did not say so. That is \
+          the silent failure OS-025 (#342) was filed about: it boots, it reports \
+          listening, and it serves nobody forever" >&2
+            cat $out/no-nic.log >&2 || true
+            exit 1
+          fi
+          # And it must still have got as far as listening, because a host that
+          # cannot find a NIC is not a host that should refuse to start.
+          grep -q '"event":"listening"' $out/no-nic.log || {
+            echo "a machine with no interface should still bind and serve \
+          whatever route it does have — refusing to start is not the behaviour \
+          OS-025 (#342) asked for" >&2
+            cat $out/no-nic.log >&2; exit 1; }
+        '';
+
+      # `OS-029` (#347): the kernel appears exactly twice in the ISO, and the
+      # image boots as a raw disk on both firmwares.
+      #
+      # Counted in the bytes, not read off the recipe. It was three for two
+      # issues — `-e efi.img` pointed El Torito at a copy of the ESP inside the
+      # ISO9660 tree while `-append_partition` appended a byte-identical second
+      # copy for the GPT — and the comment in `default.nix` said "twice" the
+      # whole time. A count is the only form of this claim that cannot drift.
+      #
+      # Two is the floor without a bootloader that reads ISO9660: isolinux reads
+      # ISO9660, UEFI reads only FAT, and neither reads the other's. #348 is
+      # where spending a GRUB to reach one gets re-argued.
+      isoLayoutCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          linux = linuxFor system;
+        in
+        pkgs.runCommand "linux-iso-layout"
+          {
+            nativeBuildInputs = [ pkgs.python3 pkgs.qemu_kvm ];
+            meta.timeout = 900;
+          } ''
+          mkdir -p $out
+          python3 - <<'PYTHON' | tee $out/report
+          import pathlib
+          iso = pathlib.Path("${linux.iso}").read_bytes()
+          kernel = pathlib.Path("${linux.kernel}/bzImage").read_bytes()
+
+          # A run from the middle of the kernel, long enough not to collide by
+          # accident and far enough in to miss the headers that also appear in
+          # the El Torito boot catalogue.
+          needle = kernel[1_000_000:1_000_256]
+          at, hits = 0, []
+          while (i := iso.find(needle, at)) != -1:
+              hits.append(i)
+              at = i + 1
+
+          print(f"ISO      {len(iso)} bytes")
+          print(f"bzImage  {len(kernel)} bytes")
+          print(f"copies   {len(hits)} at {[hex(h) for h in hits]}")
+
+          assert len(hits) == 2, (
+              f"the kernel appears {len(hits)} times in the ISO and should appear "
+              "twice: once in ISO9660 for isolinux, once in the appended FAT ESP "
+              "for both UEFI paths. Three means El Torito is reading a copy of "
+              "the ESP from the ISO tree instead of the appended partition "
+              "(OS-029, #347); one means a firmware path lost its kernel"
+          )
+
+          # And the ISO must not have quietly grown back. 12 MB is generous
+          # against the 8.3 MB it is, and tight enough to notice a third copy
+          # of anything.
+          assert len(iso) < 12_000_000, f"the ISO is {len(iso)} bytes"
+          PYTHON
+
+          # And the layout is not just counted, it is booted — **as a raw
+          # disk**, which is the path `OS-027` (#344) exists for and which
+          # nothing else here exercises. `linux-boot` and `linux-nics` both
+          # attach the image as a CD-ROM, so until now the GPT and the
+          # protective MBR were asserted by reading `fdisk` output and by one
+          # manual test.
+          #
+          # That gap is not hypothetical. `OS-029` (#347) looked like it had
+          # broken both disk paths, for half an hour, on no evidence but a
+          # hand-run qemu that was failing for an unrelated reason — the store
+          # path is mode 444 and a writable `if=virtio` drive cannot open it.
+          # Hence the copy below, and hence this check.
+          cp ${linux.iso} disk.img
+          chmod +w disk.img
+
+          disk() {
+            local firmware="$1"
+            local log="$PWD/disk-$firmware.log"
+            local fw=""
+            if [ "$firmware" = uefi ]; then
+              cp ${pkgs.OVMF.variables} "$PWD/$firmware-vars.fd"
+              chmod +w "$PWD/$firmware-vars.fd"
+              fw="-drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware}"
+              fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
+            fi
+
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$log" \
+              $fw \
+              -drive file=disk.img,format=raw,if=virtio \
+              -nic none &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 180); do
+              grep -q '"event":"listening"' "$log" 2>/dev/null && break
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$log" $out/disk-$firmware.log 2>/dev/null || true
+
+            grep -q '"event":"listening"' $out/disk-$firmware.log || {
+              echo "the ISO does not boot as a raw disk on $firmware. That is \
+          the path the EC2 pipeline uses (OS-027, #344), and the partition \
+          layout OS-029 (#347) touches is what decides it" >&2
+              cat $out/disk-$firmware.log >&2 || true
+              exit 1
+            }
+            echo "boots as a raw disk on $firmware"
+          }
+
+          disk bios
+          disk uefi
+        '';
+
       containerFor = { pkgs, system, server, client }:
         pkgs.dockerTools.buildLayeredImage {
           name = "kmsrsos";
@@ -472,6 +1027,9 @@
           windows = craneLib.buildPackage ((windowsArgsFor system) // stampEnv // {
             cargoArtifacts = windowsCargoArtifactsFor system;
           });
+
+
+
 
           # --- OS packages (PKG-009, #246) ---
           #
@@ -569,6 +1127,83 @@
               mkdir -p "$out"
               find rpms -name '*.rpm' -exec cp {} "$out/" ';'
             '';
+          };
+        }
+        # The bare-metal target is x86_64 and nothing else, and until now that
+        # was true of the artifacts without being true of the *attribute set*.
+        # `nix flake check` on aarch64 evaluates every output, reached
+        # `pkgs.syslinux` — which nixpkgs marks as unavailable off x86 — and
+        # failed there rather than anywhere informative (`OS-017`, #333).
+        #
+        # An `optionalAttrs` rather than a `meta.platforms`: the point is that
+        # the attribute should not *exist* on a system that cannot build it, so
+        # `nix flake show` on aarch64 says so instead of erroring.
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
+          #
+          # The second bare-metal target: the same `kmsrs-server` binary as pid
+          # 1 on a `tinyconfig`-derived kernel, with no other userland. It exists
+          # because the Hermit image does not boot into service on a stock
+          # Proxmox VM — `OS-004` (#255) needs `qm set --args`, which has no GUI
+          # field — and this one does, from BIOS or UEFI, unmodified.
+          #
+          # Which of the two ships is `OS-018` (#334), and is not decided here.
+          linuxIso = (linuxFor system).iso;
+          linux-kernel = (linuxFor system).kernel;
+
+          # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
+          #
+          # An output rather than `nix build -f os/linux/config.nix`, which is
+          # what this used to be and which reads `<nixpkgs>` from the caller's
+          # channel. That silently regenerates the file against *a different
+          # kernel version* than the one the flake pins and the ISO is built
+          # from — observed on `OS-026` (#343), where it produced a 6.12.91
+          # config for a tree that ships 6.12.94, as a 54-line deletion that
+          # looked like a pare-back. The file is the statement of what is in
+          # this machine's TCB; generating it from an unpinned input is exactly
+          # the `OS-006` (#257) mistake in a new place.
+          linux-config = import ./os/linux/config.nix { inherit pkgs; };
+
+          # `nix build .#linux-deltas && cat result/report` — what each driver
+          # in the `OS-025` (#342) matrix costs, measured on the built bzImage
+          # with the initramfs held constant. That last part is the whole
+          # point: the initramfs is *inside* the bzImage, so measuring a 40 kB
+          # driver against the shipped kernel compares two numbers that differ
+          # for two reasons.
+          #
+          # Each variant is the checked-in allowlist plus the symbols named,
+          # run through the same `olddefconfig` the real build uses — so a
+          # symbol that drags a subsystem in is measured with the subsystem,
+          # which is the mistake `OS-026` (#343) found the hard way.
+          linux-deltas = import ./os/linux/delta.nix {
+            inherit pkgs;
+            variants = {
+              # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
+              # for a modern Linux guest on ESXi and Workstation.
+              vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
+              # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
+              rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
+              # VirtualBox's older adapter choices.
+              pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
+              # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
+              tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
+              # EC2 Nitro (`OS-027`, #344).
+              ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
+              # Hyper-V and Azure. The one item `OS-025` calls "genuinely
+              # large", and the reason this output exists rather than an
+              # estimate in a comment.
+              hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
+              # Xen PV networking on XCP-ng and Citrix Hypervisor.
+              xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
+              # `OS-023` (#339) asks in the other direction: what does something
+              # already in the allowlist cost to *keep*? A negative delta is the
+              # saving available if it were removed.
+              no-smp = { disable = [ "SMP" ]; };
+              no-elf-core = { disable = [ "ELF_CORE" ]; };
+              no-seccomp = { disable = [ "SECCOMP" ]; };
+              no-ipv6 = { disable = [ "IPV6" ]; };
+              no-packet = { disable = [ "PACKET" ]; };
+            };
           };
         });
 
@@ -672,6 +1307,10 @@
             };
           }).server;
 
+
+
+
+
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
             inherit cargoArtifacts;
             pname = "kmsrsos-feature-powerset";
@@ -681,6 +1320,27 @@
             nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ])
               ++ [ (pkgsFor system).cargo-hack ];
           });
+        }
+        # x86_64 only, for the same reason the packages above are: these boot a
+        # kernel built with `pkgs.syslinux`, which nixpkgs marks unavailable off
+        # x86. Before this, `nix flake check` on aarch64 failed evaluating them
+        # rather than skipping them (`OS-017`, #333).
+        #
+        # `nixpkgs.lib` rather than `pkgs.lib`: `pkgs` is bound inside this
+        # check set's `let`, and this splice is outside it.
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # `OS-017` (#333): boots and serves on the topology Hermit cannot,
+          # from BIOS and UEFI, with no `--args`.
+          linux-boot = linuxBootCheckFor system;
+
+          # `OS-025` (#342): one boot per supported NIC model, each asserting
+          # that the machine *serves* — plus the machine with no NIC at all,
+          # which must say so rather than reporting `listening` and going quiet.
+          linux-nics = nicBootCheckFor system;
+
+          # `OS-029` (#347): the kernel is in the ISO exactly twice, counted,
+          # and it boots as a raw disk on both firmwares.
+          linux-iso-layout = isoLayoutCheckFor system;
         });
 
       devShells = eachSystem (system:

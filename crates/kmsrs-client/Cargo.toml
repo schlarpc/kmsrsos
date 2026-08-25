@@ -24,6 +24,9 @@ getrandom = { workspace = true, features = ["std"] }
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# The server's driver is async (`OS-024`, #340), and `probe_our_server` runs a
+# real one on a thread to probe it. Only the test needs this.
+tokio.workspace = true
 # The probe's headline test runs against our own server, which is the point of
 # CLI-002 (#208): the suite is only meaningful if it is pointed at the thing
 # this repository builds.

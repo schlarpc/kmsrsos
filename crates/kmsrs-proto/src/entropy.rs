@@ -1,18 +1,20 @@
 //! Randomness as an injected capability (`ARCH-003`, #3).
 //!
-//! Linux, Windows, Hermit and the fuzzer each supply their own implementation.
+//! Linux, Windows and the fuzzer each supply their own implementation.
 //! The core never opens `/dev/urandom`, never calls `getrandom`, and holds no
 //! generator state of its own — a request handler is *handed* a source.
 //!
 //! Two things depend on that inversion, and neither is cosmetic:
 //!
-//! * The Hermit entropy self-test (`OS-012`, #263) can refuse to serve. On a
-//!   seeding failure Hermit's `sys_read_entropy` **silently succeeds**, filling
-//!   the buffer from a Park–Miller LCG seeded from a static zero — a stream
-//!   identical across boots — and `getrandom` reports success. Every value in
-//!   the list below would silently become a constant while the service kept
-//!   working perfectly. A source that can report failure is what makes refusing
-//!   possible; [`EntropyUnavailable`] is that channel.
+//! * The entropy self-test (`OS-012`, #263) can refuse to serve. The failure it
+//!   was built for was Hermit's: on a seeding failure `sys_read_entropy`
+//!   **silently succeeded**, filling the buffer from a Park–Miller LCG while
+//!   `getrandom` reported success, so every value in the list below would have
+//!   become predictable with the service still working perfectly. That target
+//!   is gone (`OS-018`, #334) and Linux's `getrandom(2)` blocks until its CRNG
+//!   is seeded, so the silent-degradation shape is no longer reachable — but a
+//!   source that *can* report failure is still what makes refusing possible,
+//!   and [`EntropyUnavailable`] is that channel.
 //! * Differential testing against vlmcsd and py-kms (`TEST-004`, #225) needs
 //!   the same request to produce the same bytes twice.
 //!

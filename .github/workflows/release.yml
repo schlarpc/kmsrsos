@@ -11,9 +11,8 @@
 #   * `.deb` and `.rpm` for both, carrying the hardened systemd unit
 #   * the container image, to GHCR, multi-arch
 #   * Windows `.exe`s, cross-compiled
+#   * the bootable Hermit OS image and ISO, x86_64 only (OS-002, #253)
 #   * an SBOM per artifact, checksums, and a cosign signature over the lot
-#
-# The Hermit OS image joins this list when PKG-013 (#250) can build one.
 name: Release
 
 on:
@@ -66,6 +65,24 @@ jobs:
           cp result-deb/*.deb out/
           cp result-rpm/*.rpm out/
           cp result-container "out/kmsrsos-container-${{ matrix.name }}.tar.gz"
+
+          # The bare-metal ISO is x86_64 and nothing else: `pkgs.syslinux` is
+          # unavailable elsewhere, and the flake gates the output by system
+          # accordingly (`OS-017`, #333).
+          #
+          # This block used to build `.#osImage` and `.#osIso` and ship
+          # `kmsrsos-hermit.img`. `OS-018` (#334) removed that target and left
+          # this behind, so a release would have failed on a missing flake
+          # attribute — and `the_release_workflow_builds_what_the_gate_checks`
+          # did not catch it, because it was asserting the same stale names.
+          #
+          # Shipped uncompressed. It is 8.3 MiB since `OS-029` (#347), and a
+          # `.iso.gz` is one more step between an operator and a running host —
+          # the whole deployment procedure is "upload it, attach it, boot it".
+          if [ "${{ matrix.name }}" = "x86_64-linux" ]; then
+            nix build .#linuxIso --print-build-logs --out-link result-iso
+            cp result-iso out/kmsrsos-x86_64.iso
+          fi
 
       # `SEC-010` (#202): the binaries are static, so "what is in this" is a
       # question the file itself has to answer. An SBOM derived from the
