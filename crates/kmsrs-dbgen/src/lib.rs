@@ -97,7 +97,26 @@ pub struct ArtifactSource {
 ///
 /// Adding a source is a reviewable change to this list, which is the point: the
 /// alternative is a shell script somebody ran once.
+///
+/// # The order is load-bearing: **oldest image first**
+///
+/// `extract` processes artifact directories in this order, and where two
+/// describe the same product the first wins — so a product's recorded `source`
+/// is *the earliest image that contained it*. That is the bound `DB-018` (#286)
+/// needs: a key that first appears in the Server 2019 image cannot have been
+/// installed on a host older than that build.
+///
+/// It used to be alphabetical, which gave the right answer for
+/// `windows-server-2019` before `windows-server-2025` purely by accident of the
+/// digits. Naming the next image `win2012` would have reversed it silently.
 pub const SOURCES: &[ArtifactSource] = &[
+    ArtifactSource {
+        id: "windows-server-2019",
+        description: "Windows Server 2019 (build 17763) Software Protection Platform tokens",
+        origin: Origin::ContainerImage {
+            reference: "mcr.microsoft.com/windows/servercore:ltsc2019",
+        },
+    },
     ArtifactSource {
         id: "windows-server-2025",
         description: "Windows Server 2025 (build 26100) Software Protection Platform tokens",
@@ -105,6 +124,15 @@ pub const SOURCES: &[ArtifactSource] = &[
             reference: "mcr.microsoft.com/windows/servercore:ltsc2025",
         },
     },
+    // `DB-018` (#286) and `DB-010` (#134): older images, for the products the
+    // newest one has forgotten and for the earliest build that knew each key.
+    //
+    // Each image ships the `pkeyconfig` its own build knew about, so extracting
+    // from several turns "which keys exist" into "which build first knew this
+    // key" — the bound `DB-018` needs, from Microsoft, with provenance, through
+    // this pipeline. `ID-017` (#122) tried to take the same fact from py-kms's
+    // hand-entered `InvalidWinBuild` and was declined as D36 because those
+    // values are indices into py-kms's own table and mean nothing outside it.
     ArtifactSource {
         id: "office-ltsc-2024",
         description: "Microsoft Office LTSC 2024 Volume License Pack (16.0.17830.20004)",

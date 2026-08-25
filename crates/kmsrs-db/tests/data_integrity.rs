@@ -63,11 +63,22 @@ use std::collections::{BTreeMap, BTreeSet};
 /// in; a floor set at an aspiration would just fail today and teach the next
 /// person to lower it.
 ///
-/// Measured when written, from the extraction committed at the time: 273
-/// products, 14 host keys, 27 counted IDs, 2 applications, 252 locales, 23
+/// Measured when written, from the extraction committed at the time: **533
+/// products**, 14 host keys, 27 counted IDs, 2 applications, 252 locales, 23
 /// builds of which 8 are drawable, and 151 client setup keys.
+///
+/// The product floor went 200 → 400 when `DB-010` (#134) added the Server 2019
+/// image, which nearly doubled the catalogue. Raising a floor is how a coverage
+/// improvement is locked in — without it, an extraction that silently lost the
+/// second image would still pass.
+///
+/// The counted-ID floor did **not** move, and the reason is worth writing down
+/// because the numbers invite the mistake: `kmsrs-dbgen` reports "256 counted
+/// IDs", which is the *sum over products* of how many each lists. `COUNTED_IDS`
+/// is the table of **distinct** ones, and there are 27 of those — the second
+/// image added products that count the same IDs, not new IDs to count.
 mod floors {
-    pub(crate) const PRODUCTS: usize = 200;
+    pub(crate) const PRODUCTS: usize = 400;
     pub(crate) const CSVLKS: usize = 12;
     pub(crate) const COUNTED_IDS: usize = 24;
     /// Windows and Office, at least.

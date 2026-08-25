@@ -88,14 +88,14 @@ cost.
 | Table | Rows |
 |---|---:|
 | Applications | 2 |
-| Products | 273 |
-| KMS host keys | 14 |
+| Products | 533 |
+| KMS host keys | 20 |
 | Counted IDs | 27 |
 | Host builds | 23 |
 | Host builds an ePID may claim | 8 |
 | Locales | 252 |
 | Client setup keys | 151 |
 
-The arrays occupy 48480 bytes, against a 262144-byte ceiling asserted at
+The arrays occupy 71888 bytes, against a 262144-byte ceiling asserted at
 compile time (`DB-018`, #142) — on the bare-metal target every byte
 of `.rodata` is a byte of the guest's memory, permanently.
