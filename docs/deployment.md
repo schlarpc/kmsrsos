@@ -316,14 +316,34 @@ quietly when they were missing.
 ### The artifact (`OS-017`, #333)
 
 ```shell
-$ nix build .#linuxIso        # kmsrsos-linux.iso, 14 MiB
+$ nix build .#linuxIso        # kmsrsos-linux.iso, 5.3 MiB
 $ nix build .#linux-kernel    # the bzImage on its own
 ```
 
-**One ISO, both firmwares.** `CONFIG_EFI_STUB` makes a `bzImage` simultaneously a PE/COFF executable
-and a Linux boot image — `MZ` at offset 0 and `HdrS` at 0x202 — so the same 3.4 MiB file is both
-`\EFI\BOOT\BOOTX64.EFI` for UEFI and an isolinux `KERNEL` line for BIOS. There is no bootloader on
-the UEFI path and nothing to register in NVRAM, so a fresh VM boots on its first try.
+**One ISO, both firmwares, and one copy of the kernel** (`OS-030`, #348). The 3.4 MiB `bzImage` lives
+in the ISO9660 filesystem and nowhere else. isolinux reads it there for BIOS; a small `grubx64.efi` in
+the EFI System Partition reads it there for UEFI. All four combinations —
+`{CD-ROM, raw disk} × {SeaBIOS, OVMF}` — are booted on every `nix flake check`.
+
+The image carried the kernel three times until `OS-029` (#347) and twice until `OS-030`, because UEFI
+reads only FAT and isolinux reads only ISO9660. Putting a bootloader that reads ISO9660 in the ESP
+took it to one and the ISO from 8.3 MiB to 5.3 MiB.
+
+**The GRUB in the ESP is 278 KiB and runs four commands.** It is built with `grub-mkimage` from six
+named modules, with an empty prefix and its configuration embedded in the executable — so there is no
+`grub.cfg` in the ESP to edit, no module directory to load from, and no `normal` module, which means
+no menu and no scripting. The whole of it:
+
+```
+search --no-floppy --set=root --label KMSRSOS
+linux /bzImage
+boot
+halt
+```
+
+`CONFIG_EFI_STUB` still makes the `bzImage` a PE/COFF executable as well as a Linux boot image — `MZ`
+at offset 0 and `HdrS` at 0x202 — and that is what GRUB's `linux` command uses to hand over. Nothing
+is registered in NVRAM, so a fresh VM still boots on its first try.
 
 The initramfs and the kernel command line are *inside* that file
 (`CONFIG_INITRAMFS_SOURCE`, `CONFIG_CMDLINE_OVERRIDE`). The second is not a convenience: it means a
@@ -512,8 +532,12 @@ carries the reasoning per group.
 
 **Axiom A5 is structural here.** `CONFIG_BLOCK` is unset: there is no block *layer*, not merely no
 block drivers, so disk I/O is a syscall with nothing behind it. The boot medium is invisible to the
-kernel — firmware reads the ESP and the image runs from RAM thereafter — so no ATAPI, no SCSI and no
+kernel — the bootloader reads the image and it runs from RAM thereafter — so no ATAPI, no SCSI and no
 ISO9660 are compiled in either. After boot the CD-ROM could be ejected.
+
+The ISO9660 reader that finds the kernel is **in the bootloader, not in the kernel**: isolinux's for
+BIOS and GRUB's `iso9660` module for UEFI (`OS-030`, #348). Neither is running by the time pid 1
+starts, so this changes nothing about what is in the machine's TCB once it is up.
 
 Also absent, deliberately: modules, netfilter, BPF, tracing, cgroups, namespaces, USB, sound, and
 every filesystem but ramfs, tmpfs, proc and sysfs.
@@ -662,8 +686,8 @@ the GPT layout, the ESP type GUID, and booting the same bytes as a raw disk unde
 AWS documentation for the two API calls. Nobody has launched it. Two claims in particular are
 untested and would show up immediately if wrong:
 
-- **The backup GPT header is not at the volume's last LBA.** The upload is ~14 MB and the volume
-  rounds up to 1 GiB, so the backup header sits ~14 MB in rather than at the end of the disk.
+- **The backup GPT header is not at the volume's last LBA.** The upload is ~5.3 MB and the volume
+  rounds up to 1 GiB, so the backup header sits ~5.3 MB in rather than at the end of the disk.
   Firmware generally boots from the primary header alone. *Generally* is not a test.
 - **`ena` binding on a real Nitro instance.** The driver is compiled in and has never seen the
   hardware.

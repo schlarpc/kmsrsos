@@ -72,6 +72,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 37 | ~~Hermit build~~ | Removed with the target (#334). Kept in history because `PKG-013`/`PKG-014` (#250, #251) are cited in commits |
 | 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
 | 39 | Host clock in the request path | One start-up reading, projected by the monotonic clock and re-anchored when SNTP corrects it, [see below](#the-host-clock-is-projected-and-re-anchored-pol-020-346) (#346) |
+| 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -155,43 +156,108 @@ the *disable* list for two issues and was on in every build, because `tinyconfig
 entry was a statement the build could not make; it is replaced by the ten options underneath it that
 would cost something.
 
-### The kernel is in the ISO twice, and stays there (`OS-023`, #339)
+### The kernel is in the ISO once (`OS-023`, #339; `OS-030`, #348)
 
-The `bzImage` appears once in the ISO9660 filesystem for isolinux and once inside the FAT ESP for
-firmware, because the two read different filesystems and neither reads the other's.
+**Superseded.** `OS-023` declined GRUB and kept the kernel in the image twice. `OS-030` re-took that
+decision against measured numbers and **took GRUB**. What follows is the decision as it now stands,
+with the reasoning that changed.
 
-**It appeared a third time**, which was not noticed while this decision was being taken: `-e
-efi.img` booted the ESP as a file in the ISO tree while `-append_partition` appended a *second copy*
-of that same ESP for the GPT partition `OS-027` (#344) needs. Three kernels was 10.6 MB of a 16.3 MB
-image. `OS-029` (#347) removed it by pointing El Torito at the appended partition —
-`-e --interval:appended_partition_2:all::` — which took the ISO to **8.3 MB**, a 49 % cut, with no
-new component. What follows is about the two copies that remain. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
-only a ~1 MB `grubx64.efi` would need to live in the ESP.
+#### Why it was declined, and what was wrong with the arithmetic
 
-**Keep the duplication.** Four reasons, in the order they matter:
+`OS-023` recorded the saving as **"~2.7 MB"**, which was wrong twice over. It counted two kernel
+copies where there were three — `-e efi.img` pointed El Torito at a copy of the ESP inside the ISO9660
+tree while `-append_partition` appended a byte-identical second copy for the GPT — and it predated the
+kernel reaching 3.4 MB. `OS-029` (#347) removed the third copy for nothing, taking the image 16.3 MB →
+8.3 MB, so the question had to be asked again against a different number.
 
-1. **It would put a bootloader in an image whose contents are enumerable in a sentence.** GRUB is a
-   program with a configuration language, a module loader and a filesystem stack. Today the UEFI
-   path has *no bootloader at all* — `CONFIG_EFI_STUB` makes the kernel the EFI executable — and
-   that is a TCB statement, not a size one.
-2. **It would give the UEFI path something to go wrong.** Nothing is registered in NVRAM and nothing
-   is chainloaded, which is why a fresh Proxmox VM boots on its first try and `OS-004` (#255) is not
-   a problem here. Adding a stage between firmware and kernel adds a stage that can fail.
-3. **The ESP is load-bearing now.** `OS-027` (#344) makes the same file a GPT disk with a typed EFI
-   System Partition, which is what the EC2 pipeline imports. Replacing the kernel in the ESP with a
-   bootloader that reads ISO9660 works for a CD and not for a raw disk import.
-4. **Nothing is paying for it at runtime.** The machine runs from RAM; the ISO is downloaded once and
-   attached. The duplication is a transfer cost, not a memory or a boot cost.
+#### The measured numbers
 
-The related proposal on the same issue — dropping `-append_partition` to recover ~5 MB — is declined
-for reason 3 alone: that partition *is* the EFI System Partition, and `OS-027` (#344) needs it.
+| layout | kernel copies | ISO | vs. before |
+|---|---|---|---|
+| before `OS-029` | 3 | 16.3 MiB | |
+| after `OS-029` | 2 | **8.32 MiB** | baseline |
+| **with GRUB (shipping)** | **1** | **5.32 MiB** | **−3.00 MiB, −36 %** |
 
-**This decision is worth re-taking, and #348 is where.** It was argued against a saving of "~2.7 MB",
-which was wrong twice over: it counted two kernel copies where there were three, and it predates the
-kernel reaching 3.4 MB. With `OS-029` (#347) landed, GRUB would take the image from 8.3 MB to roughly
-5 MB. Reasons 1 and 2 above are about the trusted computing base rather than about size and are
-unaffected either way — but a 40 % saving deserves to be argued against the real number rather than
-the one that was recorded.
+The saving is exactly one copy of the kernel, less the loader that replaced it: the ESP went from
+4 MiB holding a 3.38 MiB kernel to 1 MiB holding a **278 KiB** `grubx64.efi`.
+
+That 278 KiB is the number that actually decided this, and it is a quarter of the ~1 MB the issue
+estimated. It is small because of *how* the loader is built, which is the same thing that answers the
+objection below.
+
+#### What changed the TCB argument
+
+`OS-023`'s two real reasons were never about size, and they were right:
+
+1. It puts a bootloader in an image whose contents are enumerable in a sentence. GRUB has a
+   configuration language, a module loader and a filesystem stack.
+2. It gives the UEFI path something to go wrong. `CONFIG_EFI_STUB` makes the kernel *itself* the EFI
+   executable, so nothing is chainloaded and nothing is registered in NVRAM.
+
+What changed is that reason 1 is a statement about *a* GRUB, not about GRUB. The one in this image is
+built with `grub-mkimage` and:
+
+- **six modules, enumerated in the build** — `part_gpt`, `part_msdos`, `iso9660`, `search`,
+  `search_label`, `linux`, plus `halt` for the failure path. There is no module directory in the ESP,
+  so the module loader has nothing it *can* load.
+- **an empty `--prefix`**, so there is nowhere to look for modules or for a `grub.cfg` at run time.
+- **the configuration embedded in the PE file**, not on the filesystem. There is no `grub.cfg` in the
+  ESP to edit. That is axiom A3 applied to the bootloader exactly as `CONFIG_CMDLINE_OVERRIDE` applies
+  it to the kernel command line.
+- **no `normal` module**, so the embedded config runs under the rescue parser: a list of commands, no
+  `if`, no functions, no `menuentry`. The configuration-language objection is answered by not shipping
+  the interpreter for it.
+
+The whole configuration is four commands, and two of them are the failure path:
+
+```
+search --no-floppy --set=root --label KMSRSOS
+linux /bzImage
+boot
+halt
+```
+
+Reason 2 stands and is the honest cost: the UEFI path now has a stage between firmware and kernel that
+it did not have. It is paid for by `linux-iso-layout` and `linux-boot` between them observing **all
+four** combinations — `{CD-ROM, raw disk} × {SeaBIOS, OVMF}` — on every `nix flake check`, which is
+more than the EFI-stub path ever had asserted about it.
+
+Reason 3 from `OS-023`, "the ESP is load-bearing for EC2", survives and is no longer an argument
+either way: the ESP still exists and is still a typed EFI System Partition, it just holds a loader
+instead of a kernel, so `OS-027` (#344)'s raw-disk import is unaffected — and is observed.
+
+#### The FAT-only alternative, priced
+
+`OS-030` asked for this to be dispositioned rather than left as a footnote. Drop ISO9660 entirely and
+ship a hybrid image whose single FAT partition holds the kernel once, at `/EFI/BOOT/BOOTX64.EFI`,
+loaded directly by firmware through `CONFIG_EFI_STUB` and by syslinux for BIOS. No GRUB, no second
+filesystem, and the EFI-stub property preserved — on the face of it the best option available.
+
+Built and booted rather than estimated:
+
+| | size | disk/BIOS | disk/UEFI | CD/BIOS | CD/UEFI |
+|---|---|---|---|---|---|
+| GRUB ISO (shipping) | 5.32 MiB | yes | yes | yes | yes |
+| FAT-only `.img` | **4.69 MiB** | yes | yes | **cannot** | **cannot** |
+
+**Declined, on a structural fact rather than a preference.** An `.iso` that boots BIOS from a FAT
+partition needs El Torito *hard-disk emulation*, and `xorriso` refuses:
+
+```
+libisofs: FAILURE : Appended partition cannot serve as El Torito boot image with FD/HD emulation
+```
+
+An HD-emulation boot image has to be a **file in the ISO9660 tree**, not an appended partition. So a
+FAT-only ISO must carry the FAT image once in the tree for El Torito and once appended for the GPT
+that `OS-027` (#344) needs — which is two copies of the kernel again, and is precisely the bug shape
+`OS-029` (#347) removed. FAT-only can be one copy, or it can be an `.iso`. Not both.
+
+Shipping it as a raw `.img` instead would trade 0.64 MiB for the deployment procedure:
+`docs/deployment.md` says "upload it to your ISO storage, attach it to the CD-ROM drive, and boot it.
+That is the whole procedure", and CD-ROM-from-SeaBIOS is the *default* path on the supported platform.
+Twelve per cent is not worth the supported platform's default path, and the size argument is weak
+anyway: de-duplicating the kernel is worth 3.00 MiB and both options get that; the choice between them
+is worth 0.64 MiB.
 
 ### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
 
