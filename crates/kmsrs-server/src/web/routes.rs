@@ -652,6 +652,45 @@ fn products_page() -> String {
         );
     }
     body.push_str("</table>");
+
+    // `DB-013` (#137): the keys themselves, which is what the instructions page
+    // has always sent people here for.
+    //
+    // A second table rather than a column on the first, and deliberately so.
+    // The two come from different Microsoft sources that identify an edition
+    // differently — `pkeyconfig` by `EditionId`, the published key tables by a
+    // name written for a person — and nothing connects them. Rendering them
+    // side by side under one heading would imply a row-for-row correspondence
+    // that does not exist, and inventing one is how a real edition ends up
+    // shown with another edition's key (`DB-009`, #133).
+    let _: core::fmt::Result = write!(
+        body,
+        "<h2>Client setup keys</h2>\
+         <p>{} keys, as Microsoft publishes them. Install the one for the \
+         edition you have with <code>slmgr /ipk</code>, then follow \
+         <a href=\"/instructions\">the instructions</a>. These never travel \
+         over the wire — this host is not sent a key and could not check \
+         one.</p>\
+         <p>Grouped by release, because an edition name alone is not unique: \
+         three releases each publish a <code>Windows Server Datacenter</code>, \
+         with three different keys.</p>",
+        kmsrs_db::GVLKS.len()
+    );
+
+    body.push_str("<table><tr><th>Release</th><th>Edition</th><th>Key</th></tr>");
+    // Bounded by the shipped table, which is a compile-time constant, so this
+    // render cannot grow with uptime (`OBS-012`, #188).
+    for gvlk in kmsrs_db::GVLKS {
+        let _: core::fmt::Result = write!(
+            body,
+            "<tr><td>{}</td><td>{}</td><td><code>{}</code></td></tr>",
+            escape(gvlk.release),
+            escape(gvlk.edition),
+            escape(gvlk.key)
+        );
+    }
+    body.push_str("</table>");
+
     page("Products", &body)
 }
 

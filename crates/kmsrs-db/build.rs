@@ -100,6 +100,7 @@ fn generate(document: &toml::Table) -> String {
     write_csvlks(&mut out, &products);
     write_counted_ids(&mut out, &products);
     write_host_builds(&mut out, document);
+    write_gvlks(&mut out, document);
     write_lcids(&mut out, document);
     write_assertions(&mut out);
     out
@@ -270,6 +271,89 @@ fn write_lcids(out: &mut String, document: &toml::Table) {
         );
     }
     out.push_str("];\n\n");
+}
+
+/// Emit the KMS client setup keys (`DB-013`, #137).
+///
+/// These are inert as far as activation is concerned — a KMS host is never sent
+/// a key — so nothing here is consulted by the wire path. They exist for the
+/// instructions page.
+///
+/// The shape is still checked, for the same reason every other table is: a
+/// scrape that started returning half-rows would otherwise ship a page telling
+/// operators to type a truncated key.
+fn write_gvlks(out: &mut String, document: &toml::Table) {
+    let rows = document
+        .get("gvlk")
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{DATA} has no [[gvlk]] rows"));
+
+    let mut keys: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|row| {
+            let release = field(row, "release", "gvlk").to_owned();
+            let edition = field(row, "edition", "gvlk").to_owned();
+            let key = field(row, "key", "gvlk").to_owned();
+            assert!(
+                is_product_key(&key),
+                "the GVLK for {release:?} / {edition:?} is {key:?}, which is not \
+                 a XXXXX-XXXXX-XXXXX-XXXXX-XXXXX product key"
+            );
+            assert!(!edition.is_empty(), "a [[gvlk]] row has an empty edition");
+            assert!(!release.is_empty(), "a [[gvlk]] row has an empty release");
+            (release, edition, key)
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+
+    // `(release, edition)` and not `edition` alone. An edition name is not
+    // unique on Microsoft's page — three rows read `Windows Server Datacenter`
+    // with three different keys, one per release — so keying on the edition
+    // would be asserting something false about the source (`DB-013`, #137).
+    //
+    // The pair must still be unique, because a duplicate there would render
+    // twice and leave an operator choosing between two keys with nothing to
+    // choose on.
+    let mut seen = std::collections::BTreeSet::new();
+    for (release, edition, _) in &keys {
+        assert!(
+            seen.insert((release.clone(), edition.clone())),
+            "{release:?} lists the edition {edition:?} more than once, with \
+             different keys"
+        );
+    }
+    assert!(!keys.is_empty(), "{DATA} defines no GVLKs");
+
+    let _ = writeln!(
+        out,
+        "/// KMS client setup keys, sorted by release then edition\n\
+         /// (`DB-013`, #137).\n\
+         ///\n\
+         /// Never sent or received: a KMS host is not given a key and could not\n\
+         /// check one. This is what the instructions page renders.\n\
+         pub static GVLKS: [Gvlk; {}] = [",
+        keys.len()
+    );
+    for (release, edition, key) in &keys {
+        let _ = writeln!(
+            out,
+            "    Gvlk {{ release: {release:?}, edition: {edition:?}, key: {key:?} }},"
+        );
+    }
+    out.push_str("];\n\n");
+}
+
+/// Whether `text` is a `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX` product key.
+fn is_product_key(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups.iter().all(|group| {
+            group.len() == 5
+                && group
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        })
 }
 
 /// A required integer field.
@@ -778,6 +862,7 @@ const _: () = {
         index += 1;
     }
     assert!(!LCIDS.is_empty(), "no locale to draw from");
+    assert!(!GVLKS.is_empty(), "no client setup key to show an operator");
 
     // Every CSVLK must be able to produce an ePID.
     let mut index = 0;

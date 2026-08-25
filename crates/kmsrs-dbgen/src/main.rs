@@ -16,7 +16,9 @@
 //! is about a service whose configuration must be decided when it is built.
 
 use kmsrs_dbgen::error::{Context, Error, Result};
-use kmsrs_dbgen::{GENERATOR_VERSION, Origin, SOURCES, emit, extract, fetch, hostbuild, lcid};
+use kmsrs_dbgen::{
+    GENERATOR_VERSION, Origin, SOURCES, emit, extract, fetch, gvlk, hostbuild, lcid,
+};
 use sha2::Digest as _;
 use std::path::{Path, PathBuf};
 
@@ -135,7 +137,22 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
         match source.origin {
             Origin::Specification { url } => {
                 eprintln!("fetching {}", source.id);
-                database.lcids = lcid::fetch(url)?;
+                // Dispatched on the source id rather than on the order of this
+                // list. There is more than one specification page now
+                // (`DB-013`, #137), and a positional assumption is the kind
+                // that keeps compiling after a source is inserted above it.
+                match source.id {
+                    "ms-lcid" => database.lcids = lcid::fetch(url)?,
+                    "ms-gvlk-windows" | "ms-gvlk-office" => {
+                        database.gvlks.extend(gvlk::fetch(url, source.id)?);
+                    }
+                    other => {
+                        return Err(Error::new(format!(
+                            "no parser is wired up for the specification source \
+                             {other:?}; add one in `extract_all`"
+                        )));
+                    }
+                }
                 database.sources.push(kmsrs_dbgen::model::Source {
                     id: source.id.to_owned(),
                     description: source.description.to_owned(),
@@ -181,7 +198,7 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
 
     eprintln!(
         "wrote {} ({} sources, {} applications, {} products, {} counted IDs, \
-         {} host builds, {} locales)",
+         {} host builds, {} locales, {} GVLKs)",
         output.display(),
         database.sources.len(),
         database.applications.len(),
@@ -192,7 +209,8 @@ fn extract_all(from: &Path, output: &Path) -> Result<()> {
             .map(|product| product.counted_ids.len())
             .sum::<usize>(),
         database.host_builds.len(),
-        database.lcids.len()
+        database.lcids.len(),
+        database.gvlks.len()
     );
     Ok(())
 }

@@ -68,6 +68,20 @@ fn run(arguments: &Arguments) -> i32 {
         logger
     };
 
+    // `CLI-008` (#214): before the target is required, because this mode has no
+    // host to talk to. Everything it prints is a `static` in this binary, which
+    // is what makes it answer "what would this activate" rather than "what did
+    // that host do".
+    if let Mode::List(listing) = arguments.mode {
+        let rendered = if arguments.format == LogFormat::Json {
+            kmsrs_client::catalog::render_json(listing)
+        } else {
+            kmsrs_client::catalog::render_text(listing)
+        };
+        print!("{rendered}");
+        return 0;
+    }
+
     let Some(target) = arguments.target else {
         logger.message(Severity::Error, "usage", "no target given");
         return EXIT_BAD_USAGE;
@@ -89,6 +103,10 @@ fn run(arguments: &Arguments) -> i32 {
     // failed on a finding would take a working service out of rotation for a
     // cosmetic reason.
     match arguments.mode {
+        // Handled above, before a target was required, because it needs no
+        // host (`CLI-008`, #214). Named here rather than caught by a wildcard
+        // so that a new mode is a compile error in both places.
+        Mode::List(_) => return 0,
         Mode::HealthCheck => {
             return match probe.health_check(&mut entropy) {
                 Ok(exchange) => {
@@ -313,6 +331,10 @@ enum Mode {
     /// Activations from fresh machines until the count reaches the threshold
     /// (`CLI-007`, #213).
     Charge,
+    /// List what this build knows about, and exit (`CLI-008`, #214).
+    ///
+    /// The only mode that needs no host: everything it prints is compiled in.
+    List(kmsrs_client::Listing),
 }
 
 /// What the command line asked for.
@@ -393,6 +415,16 @@ impl Arguments {
                         .map_err(|_| format!("--soak wants a request count, got {value}"))?;
                 }
                 "--charge" => parsed.mode = Mode::Charge,
+                // `CLI-008` (#214). Three spellings rather than one flag with a
+                // value, because each is a whole answer to a different question
+                // and an operator should not have to learn a vocabulary to ask
+                // "what keys do you have".
+                "--products" => parsed.mode = Mode::List(kmsrs_client::Listing::Products),
+                "--keys" => parsed.mode = Mode::List(kmsrs_client::Listing::Keys),
+                // One spelling, not two. An undocumented alias is exactly
+                // vlmcsd's `-h`/`-?` — an option that exists, works, and is in
+                // no manual (`CLI-009`, #215).
+                "--catalog" => parsed.mode = Mode::List(kmsrs_client::Listing::Both),
                 "--charge-limit" => {
                     let value = take("--charge-limit")?;
                     parsed.charge_limit = value
@@ -451,7 +483,12 @@ impl Arguments {
             index = index.saturating_add(1);
         }
 
-        if parsed.target.is_none() && !parsed.help {
+        // `--help` and the listing modes are the two kinds of run that have no
+        // host to talk to (`CLI-008`, #214). Every other mode needs one, and
+        // saying so here rather than at the point of use is what keeps the
+        // error a usage error rather than a failed connection.
+        let needs_a_target = !parsed.help && !matches!(parsed.mode, Mode::List(_));
+        if parsed.target.is_none() && needs_a_target {
             return Err(String::from("no target given"));
         }
         Ok(parsed)
@@ -556,6 +593,12 @@ OPTIONS:
         --soak <N>             Send N requests and report what happened
         --charge               Activate from fresh machines until the reported
                                count reaches --n-policy
+        --products             List the product key configurations this build
+                               knows about, then exit. Needs no address
+        --keys                 List the KMS client setup keys, then exit. These
+                               never travel over the wire; they are what an
+                               operator types into slmgr /ipk
+        --catalog              Both of the above
 
 SOAK OPTIONS:
         --concurrency <N>      Workers sending them (default 1). vlmcs has none

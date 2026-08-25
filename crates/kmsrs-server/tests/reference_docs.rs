@@ -238,6 +238,7 @@ fn database_section(out: &mut String) {
          | Host builds | {} |\n\
          | Host builds an ePID may claim | {} |\n\
          | Locales | {} |\n\
+         | Client setup keys | {} |\n\
          \n\
          The arrays occupy {} bytes, against a {}-byte ceiling asserted at\n\
          compile time (`DB-018`, #142) — on the bare-metal target every byte\n\
@@ -249,6 +250,7 @@ fn database_section(out: &mut String) {
         kmsrs_db::HOST_BUILDS.len(),
         kmsrs_db::EPID_HOST_BUILDS.len(),
         kmsrs_db::LCIDS.len(),
+        kmsrs_db::GVLKS.len(),
         kmsrs_db::TABLE_BYTES,
         kmsrs_db::size::BUDGET_BYTES,
     );

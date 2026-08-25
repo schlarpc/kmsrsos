@@ -97,6 +97,7 @@ pub fn to_toml(database: &Database, generator_version: &str) -> String {
     }
 
     write_host_builds(&mut out, database);
+    write_gvlks(&mut out, database);
     write_lcids(&mut out, database);
 
     out
@@ -129,6 +130,40 @@ fn write_host_builds(out: &mut String, database: &Database) {
         let _ = writeln!(out, "ndr64 = {}", entry.ndr64);
         let _ = writeln!(out, "description = {}", quote(&entry.description));
         let _ = writeln!(out, "source = \"research\"");
+    }
+}
+
+/// Render the KMS client setup keys (`DB-013`, #137).
+fn write_gvlks(out: &mut String, database: &Database) {
+    let _ = writeln!(
+        out,
+        "\n# KMS client setup keys (`DB-013`, #137), from Microsoft's own\n\
+         # published tables. These never appear on the wire — a KMS host is not\n\
+         # sent a key and could not check one — so nothing in activation reads\n\
+         # this. It exists because the operator reading /instructions needs the\n\
+         # key for their edition, and the alternative is a forum post.\n\
+         #\n\
+         # Deliberately not joined to the product table. Microsoft's tables name\n\
+         # an edition the way a person would and pkeyconfig names it by\n\
+         # `EditionId`; there is no identifier in common, so a join would be a\n\
+         # name mapping somebody authored, and a wrong row would pair a real\n\
+         # edition with a real key belonging to a different one — which is\n\
+         # exactly the class of error `DB-009` (#133) is about.\n\
+         #\n\
+         # `release` is not decoration. An edition name is not unique on the\n\
+         # page: three rows read `Windows Server Datacenter` with three\n\
+         # different keys, one per release tab, and this is the only field that\n\
+         # tells them apart."
+    );
+    for entry in &database.gvlks {
+        let _ = writeln!(
+            out,
+            "[[gvlk]]\nrelease = {}\nedition = {}\nkey = {}\nsource = {}",
+            quote(&entry.release),
+            quote(&entry.edition),
+            quote(&entry.key),
+            quote(&entry.source)
+        );
     }
 }
 
@@ -236,7 +271,7 @@ mod tests {
 
     use super::{quote, to_toml};
     use crate::guid::Guid;
-    use crate::model::{Application, Database, HostBuild, KeyBlock, Lcid, Product, Source};
+    use crate::model::{Application, Database, Gvlk, HostBuild, KeyBlock, Lcid, Product, Source};
 
     fn sample() -> Database {
         Database {
@@ -283,6 +318,12 @@ mod tests {
                 use_for_epid: true,
                 ndr64: true,
                 description: "Windows 11 24H2".to_owned(),
+            }],
+            gvlks: vec![Gvlk {
+                release: "Windows Server 2025".to_owned(),
+                edition: "Windows Server 2025 Datacenter".to_owned(),
+                key: "D764K-2NDRG-47T6Q-P8T8W-YP6DF".to_owned(),
+                source: "ms-gvlk-windows".to_owned(),
             }],
             lcids: vec![Lcid {
                 value: 1033,

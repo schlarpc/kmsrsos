@@ -323,6 +323,68 @@ fn every_page_matches_its_committed_snapshot() {
     }
 }
 
+/// **Every page fits the ceiling that decides whether it is sent at all**
+/// (`OBS-017`, #352).
+///
+/// `driver.rs` refuses to write a response larger than `MAX_WEB_OUTBOUND` and
+/// closes the connection. That is the right behaviour for a peer that has
+/// stopped reading and the wrong one for a page this build generated — the
+/// browser gets nothing, with no status line to explain it.
+///
+/// The ceiling used to be `MAX_OUTBOUND`, which is sized from a KMS PDU at
+/// 8 KiB, and nothing had noticed because no page had ever been that large.
+/// `DB-013` (#137) took `/products` from 4 KB to 24 KB and it stopped being
+/// served, silently. So the relationship between "how big a page can be" and
+/// "how big a response may be" is asserted here rather than left to be
+/// rediscovered.
+///
+/// Every page is bounded by compile-time data rather than by uptime
+/// (`OBS-012`, #188), so this is a real bound and not a sample: the product and
+/// key tables are `static`, and `/events` renders a bounded ring buffer.
+#[test]
+fn every_page_fits_the_outbound_ceiling() {
+    use kmsrs_server::net::driver::MAX_WEB_OUTBOUND;
+
+    /// The fraction of the ceiling the largest page may occupy.
+    ///
+    /// Headroom rather than a hard edge: a page that has grown to fill the
+    /// ceiling is one regeneration away from being dropped, and the point of
+    /// this test is to complain while there is still room to think about it.
+    const HEADROOM: usize = 2;
+
+    let fixture = Fixture::new();
+    let mut largest = ("", 0);
+
+    for target in [
+        "/",
+        "/events",
+        "/instructions",
+        "/products",
+        "/healthz",
+        "/metrics",
+    ] {
+        let rendered = render(&fixture, target).len();
+        if rendered > largest.1 {
+            largest = (target, rendered);
+        }
+    }
+
+    eprintln!(
+        "largest page: {} at {} bytes, against a {MAX_WEB_OUTBOUND}-byte ceiling",
+        largest.0, largest.1
+    );
+
+    assert!(
+        largest.1.saturating_mul(HEADROOM) <= MAX_WEB_OUTBOUND,
+        "{} renders to {} bytes, which is over half the {MAX_WEB_OUTBOUND}-byte \
+         outbound ceiling. Past the ceiling the page is not truncated, it is \
+         dropped — the connection closes with nothing sent. Either raise \
+         MAX_WEB_OUTBOUND deliberately or make the page smaller",
+        largest.0,
+        largest.1
+    );
+}
+
 /// The unhealthy pages too, because they are the ones an operator reads under
 /// pressure and the ones nobody looks at until then.
 #[test]
