@@ -17,12 +17,14 @@
 // `fmt::Result` and the discipline buys nothing.
 #![deny(clippy::let_underscore_untyped)]
 
+pub mod catalog;
 pub mod load;
 pub mod names;
 pub mod probe;
 pub mod request;
 pub mod session;
 
+pub use catalog::Listing;
 pub use load::{Charge, Charged, Soak, SoakReport};
 pub use probe::{Finding, Probe, Report};
 pub use request::{RequestError, RequestFields};
