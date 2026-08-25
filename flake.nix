@@ -1279,6 +1279,120 @@
       #   * Every version in it comes from `flake.lock` and `Cargo.lock`, both
       #     exact. edgd1er's move from pinned pip to apk floors is what
       #     `PKG-006` (#243) exists about, and there is no apk here to float.
+      # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
+      #
+      # Kept in `os/linux/` rather than inline, because unlike the Hermit
+      # artefacts this one is mostly a kernel configuration, and a 2790-line
+      # allowlist is the statement of what is in the machine's TCB. It belongs
+      # in a file a reviewer can read, not spliced into this one.
+      linuxFor = system:
+        let pkgs = pkgsFor system;
+        in import ./os/linux {
+          inherit pkgs;
+          server = (mkKmsrsos { inherit system; }).server;
+        };
+
+      # `OS-017` (#333): the Linux target boots into service on the device
+      # topology that defeats Hermit, from *both* firmwares, with no `--args`.
+      #
+      # Three things are deliberately absent from the command line and each
+      # absence is the assertion:
+      #
+      #   * No `disable-legacy=on`. The NIC sits on `pci.0` behind the bridge
+      #     pair, exactly as `qemu-server` emits it, so the device is
+      #     transitional (`0x1000`). That is `OS-004` (#255), the thing Hermit
+      #     refuses and this target does not.
+      #   * No `rdseed`/`rdrand` in the CPU model. `qemu64` has neither, which
+      #     is the condition behind `OS-016` (#332). Linux seeds its CRNG
+      #     anyway, so `getrandom(2)` never returns predictable bytes.
+      #   * No `-enable-kvm`. A build sandbox has no `/dev/kvm`, and TCG is fast
+      #     enough.
+      linuxBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor system;
+
+          # Exactly what `qemu-server` emits for a q35 VM with one virtio NIC.
+          proxmoxTopology = builtins.concatStringsSep " " [
+            "-device i82801b11-bridge,id=pci.1,bus=pcie.0,addr=0x1e"
+            "-device pci-bridge,id=pci.0,chassis_nr=1,bus=pci.1,addr=0x1"
+            "-netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688"
+            "-device virtio-net-pci,netdev=u1,bus=pci.0,addr=0x12,id=net0"
+          ];
+        in
+        pkgs.runCommand "linux-boot"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 900;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          # `firmware` is `bios` or `uefi`. The same ISO, the same bytes of
+          # kernel, reached two different ways: SeaBIOS through isolinux and
+          # the Linux boot protocol, OVMF through the PE header. One file is
+          # both, which is the whole point of `CONFIG_EFI_STUB`.
+          boot() {
+            local firmware="$1"
+            local serial="$PWD/$firmware.log"
+            local fw=""
+
+            if [ "$firmware" = uefi ]; then
+              cp ${pkgs.OVMF.variables} "$PWD/$firmware-vars.fd"
+              chmod +w "$PWD/$firmware-vars.fd"
+              fw="-drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware}"
+              fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
+            fi
+
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              $fw \
+              -drive file=${linux.iso},media=cdrom,readonly=on \
+              ${proxmoxTopology} &
+            qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 120); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:1688; then
+                kill $qemu 2>/dev/null || true
+                wait $qemu 2>/dev/null || true
+                cp "$serial" $out/$firmware.log
+                return 0
+              fi
+              if ! kill -0 $qemu 2>/dev/null; then
+                echo "qemu exited before the guest answered ($firmware)" >&2
+                cat "$serial" >&2 || true
+                return 1
+              fi
+              sleep 1
+            done
+
+            echo "the guest never answered on $firmware" >&2
+            cat "$serial" >&2 || true
+            kill $qemu 2>/dev/null || true
+            return 1
+          }
+
+          boot bios
+          boot uefi
+
+          # The transitional device must have *attached*, not been skipped. If
+          # this ever stops holding, the interesting question is what changed.
+          for f in bios uefi; do
+            grep -q '"event":"listening"' $out/$f.log || {
+              echo "no listener reported on $f" >&2; exit 1; }
+            if grep -qi 'unable to open an initial console' $out/$f.log; then
+              echo "init had no stdio on $f: the /dev/console node is missing \
+          from the initramfs manifest (OS-017, #333)" >&2
+              exit 1
+            fi
+          done
+        '';
+
       containerFor = { pkgs, system, server, client }:
         pkgs.dockerTools.buildLayeredImage {
           name = "kmsrsos";
@@ -1384,6 +1498,18 @@
           # only artefact deployable from the Proxmox web UI, which has an ISO
           # upload button and no disk-import one.
           osIso = configured.osIso;
+
+          # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
+          #
+          # The second bare-metal target: the same `kmsrs-server` binary as pid
+          # 1 on a `tinyconfig`-derived kernel, with no other userland. It exists
+          # because the Hermit image does not boot into service on a stock
+          # Proxmox VM — `OS-004` (#255) needs `qm set --args`, which has no GUI
+          # field — and this one does, from BIOS or UEFI, unmodified.
+          #
+          # Which of the two ships is `OS-018` (#334), and is not decided here.
+          linuxIso = (linuxFor system).iso;
+          linux-kernel = (linuxFor system).kernel;
 
           # --- OS packages (PKG-009, #246) ---
           #
@@ -1591,6 +1717,10 @@
           # `OS-002` (#253): and the *image* boots, from firmware, with nothing
           # on the command line — plus the bootargs file on its ESP is honoured.
           hermit-image-boot = hermitImageBootCheckFor system;
+
+          # `OS-017` (#333): boots and serves on the topology Hermit cannot,
+          # from BIOS and UEFI, with no `--args`.
+          linux-boot = linuxBootCheckFor system;
 
           # `OS-004` (#255): on the device topology Proxmox emits, virtio-net
           # is rejected, the program refuses to start rather than serving

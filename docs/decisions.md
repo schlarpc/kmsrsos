@@ -70,6 +70,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
 | 37 | Hermit build | Kernel as its own derivation; the `hermit` crate is never a dependency, [see below](#the-hermit-build-does-not-use-the-hermit-crate-pkg-013-250) (#250, #251) |
+| 38 | Second bare-metal target | Linux with `kmsrs-server` as PID 1, built and checked; boots on stock Proxmox where Hermit does not. Reverses [D16](#d16). Which one ships is open (#333, #334) |
 
 ### Notes on the three decisions that took the most argument
 
@@ -228,11 +229,27 @@ BIND-style managed DNS, a static record added once is equally easy and more audi
 embed a secret in the shipped artifact, so the published container could never enable it. The
 instructions page (#148) delivers the value instead.
 
-<a id="d16"></a>**D16 — Linux appliance image (kernel + initramfs).** Not the hedge it appeared to be:
-if Hermit-on-Proxmox fails, the fallback is a normal Linux VM running the container or the `.deb`,
-which needs nothing from us. Its only unique property is minimalism, which is Hermit's entire reason
-for existing. Revisit only if Hermit is abandoned, at which point it replaces rather than supplements
-the OS image.
+<a id="d16"></a>**D16 — Linux appliance image (kernel + initramfs). ~~Declined~~ — reopened, see
+`OS-017` (#333).** The original reasoning was: if Hermit-on-Proxmox fails, the fallback is a normal
+Linux VM running the container or the `.deb`, which needs nothing from us; its only unique property
+is minimalism, which is Hermit's entire reason for existing.
+
+The premise did not survive being built. Minimalism is not where a Linux appliance loses — a
+`tinyconfig`-derived kernel with `kmsrs-server` as PID 1 and no other userland produces a *smaller*
+ISO than the Hermit image (14 MB against 17 MB) and a *stronger* version of axiom A5, because
+`CONFIG_BLOCK` is unset: there is no block layer, not merely no block drivers. What it actually has
+that Hermit does not is that it boots into service on a Proxmox VM with nothing changed from the
+defaults, where the Hermit image needs `qm set --args` (`OS-004`, #255) and a CPU-model change
+(`OS-016`, #332), neither of which the web UI can express.
+
+Also wrong: "it replaces rather than supplements the OS image" assumed the choice would be forced by
+Hermit failing. It was not — Hermit works, on a VM configured for it. So the disposition is a real
+decision rather than a fallback, and it is `OS-018` (#334).
+
+Note what is *not* the argument. The TCB case for either kernel does not survive `SEC-013` (#205):
+nothing secret ships, so the blast radius of a compromise is a box that answers KMS on a LAN. A
+unikernel also has no privilege separation at all, so "fewer lines" and "smaller attack surface" are
+not the same claim. Whichever way #334 goes, it should not go that way because of TCB size.
 
 <a id="d17"></a>**D17 — Helm chart.** Helm's value is parameterization, and the parameter operators
 would reach for first — `replicaCount` — is the one that must never change, because multi-replica
