@@ -159,12 +159,12 @@ would cost something.
 The `bzImage` appears once in the ISO9660 filesystem for isolinux and once inside the FAT ESP for
 firmware, because the two read different filesystems and neither reads the other's.
 
-**It also appears a third time**, which was not noticed while this decision was being taken: `-e
-efi.img` boots the ESP as a file in the ISO tree, and `-append_partition` appends a *second copy* of
-that same ESP to serve as the GPT partition `OS-027` (#344) needs. Three kernels is 10.6 MB of a
-16.3 MB image. That duplicate is a separate question with a different answer — it needs no
-bootloader, only a different xorriso incantation — and is #347. What follows is about the first two
-only. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
+**It appeared a third time**, which was not noticed while this decision was being taken: `-e
+efi.img` booted the ESP as a file in the ISO tree while `-append_partition` appended a *second copy*
+of that same ESP for the GPT partition `OS-027` (#344) needs. Three kernels was 10.6 MB of a 16.3 MB
+image. `OS-029` (#347) removed it by pointing El Torito at the appended partition —
+`-e --interval:appended_partition_2:all::` — which took the ISO to **8.3 MB**, a 49 % cut, with no
+new component. What follows is about the two copies that remain. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
 only a ~1 MB `grubx64.efi` would need to live in the ESP.
 
 **Keep the duplication.** Four reasons, in the order they matter:
@@ -180,10 +180,17 @@ only a ~1 MB `grubx64.efi` would need to live in the ESP.
    System Partition, which is what the EC2 pipeline imports. Replacing the kernel in the ESP with a
    bootloader that reads ISO9660 works for a CD and not for a raw disk import.
 4. **Nothing is paying for it at runtime.** The machine runs from RAM; the ISO is downloaded once and
-   attached. 2.7 MB is a transfer cost, not a memory or a boot cost.
+   attached. The duplication is a transfer cost, not a memory or a boot cost.
 
 The related proposal on the same issue — dropping `-append_partition` to recover ~5 MB — is declined
 for reason 3 alone: that partition *is* the EFI System Partition, and `OS-027` (#344) needs it.
+
+**This decision is worth re-taking, and #348 is where.** It was argued against a saving of "~2.7 MB",
+which was wrong twice over: it counted two kernel copies where there were three, and it predates the
+kernel reaching 3.4 MB. With `OS-029` (#347) landed, GRUB would take the image from 8.3 MB to roughly
+5 MB. Reasons 1 and 2 above are about the trusted computing base rather than about size and are
+unaffected either way — but a 40 % saving deserves to be argued against the real number rather than
+the one that was recorded.
 
 ### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
 

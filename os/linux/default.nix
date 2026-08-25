@@ -103,9 +103,33 @@ let
   };
 
   # UEFI reads only FAT, so the firmware path needs the image in an ESP.
+  #
+  # Sized from the kernel plus a measured margin, not a round number. This used
+  # to be `bzImage / 1 MiB + 3`, which had two problems (`OS-029`, #347):
+  #
+  #   * **The 3 MiB was 85 times what FAT needs.** Measured by binary search on
+  #     the real kernel: the smallest image `mkfs.vfat` will take the file in is
+  #     3488 KiB against a 3457 KiB kernel, so the overhead is **31 KiB**.
+  #   * **The division truncated**, so the margin shrank as the kernel grew
+  #     towards the next megabyte. Harmless at +3 and a latent failure at +1,
+  #     which is where this is going.
+  #
+  # So: round the kernel up to a megabyte having first added 256 KiB, which is
+  # eight times the measured overhead and leaves the result monotonic in the
+  # kernel size. Today that is 4 MiB for a 3.38 MiB kernel, against 6 MiB before.
+  #
+  # The filesystem is **FAT12** either way — checked, because the obvious worry
+  # is that shrinking crosses a FAT12/16 boundary and changes what firmware will
+  # accept. It does not: `mkfs.vfat` picks FAT12 for everything up to 8 MiB, so
+  # 6 MiB was already FAT12 and this changes no compatibility variable. (The
+  # UEFI specification asks for FAT32 on a *fixed* system partition and FAT12 or
+  # FAT16 on removable media; this image has been FAT12 since `OS-017` (#333)
+  # and boots OVMF, but see #347 for the note that EC2's fixed-disk path is
+  # still unobserved.)
   esp = pkgs.runCommand "kmsrsos-linux-esp"
     { nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ]; } ''
-    sz=$(( ( $(stat -Lc %s ${kernel}/bzImage) / 1048576 + 3 ) ))
+    bytes=$(stat -Lc %s ${kernel}/bzImage)
+    sz=$(( (bytes + 262144 + 1048575) / 1048576 ))
     truncate -s "''${sz}M" esp.img
     mkfs.vfat -n ESP esp.img
     mmd -i esp.img ::/EFI ::/EFI/BOOT
@@ -113,20 +137,25 @@ let
     cp esp.img $out
   '';
 
-  # The bzImage appears **three** times, and only two of them were intended:
+  # The bzImage appears **twice**, and that is now the floor without a
+  # bootloader (`OS-029`, #347):
   #
-  #   1. `/bzImage` in ISO9660, which isolinux boots.
-  #   2. inside `/efi.img`, the FAT ESP, which El Torito boots under UEFI-from-CD.
-  #   3. inside the *appended* copy of the same `efi.img`, which is the GPT EFI
-  #      System Partition that `OS-027` (#344) needs for UEFI-from-disk.
+  #   1. `/bzImage` in ISO9660, which isolinux boots — BIOS, from a CD.
+  #   2. inside the appended FAT ESP, which serves *both* remaining firmware
+  #      paths: El Torito for UEFI-from-CD, and the GPT EFI System Partition
+  #      for UEFI-from-disk that `OS-027` (#344) needs.
   #
-  # 2 and 3 are the same six megabytes twice, because `-e efi.img` reads the
-  # file in the tree while `-append_partition` appends a separate copy. Three
-  # kernels is 10.6 MB of a 16.3 MB image. Deduplicating them is #347.
+  # It used to appear three times. `-e efi.img` pointed El Torito at a copy of
+  # the ESP inside the ISO9660 tree while `-append_partition` appended a second,
+  # byte-identical copy for the GPT — six megabytes of the same kernel twice, in
+  # a 16.3 MB image. `-e --interval:appended_partition_2:all::` points El Torito
+  # at the appended partition instead, so the file in the tree is not needed at
+  # all. This is the recipe Debian and Arch build with.
   #
-  # `OS-023` (#339) decided *not* to spend a GRUB to collapse 1 and 2: that
-  # would put a bootloader in an image whose contents are enumerable in a
-  # sentence, and today the UEFI path has none at all. See `docs/decisions.md`.
+  # 1 and 2 cannot be collapsed without a bootloader that reads ISO9660: the two
+  # firmware paths read different filesystems and neither reads the other's.
+  # `OS-023` (#339) declined to spend a GRUB on that, and #348 re-examines the
+  # decision against the corrected numbers. See `docs/decisions.md`.
   iso = pkgs.runCommand "kmsrsos-linux.iso"
     { nativeBuildInputs = [ pkgs.xorriso pkgs.syslinux ]; } ''
     mkdir -p iso/isolinux
@@ -146,7 +175,9 @@ let
     EOF
     sed -i 's/^ *//' iso/isolinux/isolinux.cfg
 
-    cp ${esp} iso/efi.img
+    # No `cp ${esp} iso/efi.img`: the ESP is *appended* below and El Torito is
+    # pointed at the appended partition, so a copy in the tree would be six
+    # megabytes nothing reads (`OS-029`, #347).
 
     # `-isohybrid-mbr` and `-appended_part_as_gpt` are `OS-027` (#344), and
     # they fix something that was silently doing nothing.
@@ -181,11 +212,12 @@ let
     xorriso -as mkisofs -V KMSRSOS \
       -b isolinux/isolinux.bin -c isolinux/boot.cat \
       -no-emul-boot -boot-load-size 4 -boot-info-table \
-      -eltorito-alt-boot -e efi.img -no-emul-boot \
+      -eltorito-alt-boot \
+      -e --interval:appended_partition_2:all:: -no-emul-boot \
       -isohybrid-mbr ${pkgs.syslinux}/share/syslinux/isohdpfx.bin \
       -isohybrid-gpt-basdat \
       -appended_part_as_gpt \
-      -append_partition 2 0xef iso/efi.img \
+      -append_partition 2 0xef ${esp} \
       -o $out iso/
   '';
 in

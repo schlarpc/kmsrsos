@@ -710,6 +710,12 @@
       # by `linux-boot` on the supported topology; what varies here is the
       # driver, and doubling the matrix to prove that a NIC driver does not
       # depend on the firmware would be buying nothing.
+      # Port 11688, not 1688, and that is load-bearing rather than arbitrary:
+      # `nix flake check` runs checks in parallel, and `linux-boot` already
+      # forwards 1688. Two qemus asking for the same host port means the second
+      # one **exits at start-up**, which presents as a guest that booted to a
+      # completely empty console and "never served" — a failure that blames the
+      # kernel config for a port clash. Observed once; hence the comment.
       nicBootCheckFor = system:
         let
           pkgs = pkgsFor system;
@@ -746,14 +752,14 @@
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$serial" \
               -drive file=${linux.iso},media=cdrom,readonly=on \
-              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:11688-:1688 \
               -device "$model,netdev=u1,id=net0" &
             local qemu=$!
 
             local attempt
             for attempt in $(seq 1 120); do
               if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
-                   127.0.0.1:1688; then
+                   127.0.0.1:11688; then
                 kill $qemu 2>/dev/null || true
                 wait $qemu 2>/dev/null || true
                 cp "$serial" $out/$driver.log
@@ -819,6 +825,120 @@
           whatever route it does have — refusing to start is not the behaviour \
           OS-025 (#342) asked for" >&2
             cat $out/no-nic.log >&2; exit 1; }
+        '';
+
+      # `OS-029` (#347): the kernel appears exactly twice in the ISO, and the
+      # image boots as a raw disk on both firmwares.
+      #
+      # Counted in the bytes, not read off the recipe. It was three for two
+      # issues — `-e efi.img` pointed El Torito at a copy of the ESP inside the
+      # ISO9660 tree while `-append_partition` appended a byte-identical second
+      # copy for the GPT — and the comment in `default.nix` said "twice" the
+      # whole time. A count is the only form of this claim that cannot drift.
+      #
+      # Two is the floor without a bootloader that reads ISO9660: isolinux reads
+      # ISO9660, UEFI reads only FAT, and neither reads the other's. #348 is
+      # where spending a GRUB to reach one gets re-argued.
+      isoLayoutCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          linux = linuxFor system;
+        in
+        pkgs.runCommand "linux-iso-layout"
+          {
+            nativeBuildInputs = [ pkgs.python3 pkgs.qemu_kvm ];
+            meta.timeout = 900;
+          } ''
+          mkdir -p $out
+          python3 - <<'PYTHON' | tee $out/report
+          import pathlib
+          iso = pathlib.Path("${linux.iso}").read_bytes()
+          kernel = pathlib.Path("${linux.kernel}/bzImage").read_bytes()
+
+          # A run from the middle of the kernel, long enough not to collide by
+          # accident and far enough in to miss the headers that also appear in
+          # the El Torito boot catalogue.
+          needle = kernel[1_000_000:1_000_256]
+          at, hits = 0, []
+          while (i := iso.find(needle, at)) != -1:
+              hits.append(i)
+              at = i + 1
+
+          print(f"ISO      {len(iso)} bytes")
+          print(f"bzImage  {len(kernel)} bytes")
+          print(f"copies   {len(hits)} at {[hex(h) for h in hits]}")
+
+          assert len(hits) == 2, (
+              f"the kernel appears {len(hits)} times in the ISO and should appear "
+              "twice: once in ISO9660 for isolinux, once in the appended FAT ESP "
+              "for both UEFI paths. Three means El Torito is reading a copy of "
+              "the ESP from the ISO tree instead of the appended partition "
+              "(OS-029, #347); one means a firmware path lost its kernel"
+          )
+
+          # And the ISO must not have quietly grown back. 12 MB is generous
+          # against the 8.3 MB it is, and tight enough to notice a third copy
+          # of anything.
+          assert len(iso) < 12_000_000, f"the ISO is {len(iso)} bytes"
+          PYTHON
+
+          # And the layout is not just counted, it is booted — **as a raw
+          # disk**, which is the path `OS-027` (#344) exists for and which
+          # nothing else here exercises. `linux-boot` and `linux-nics` both
+          # attach the image as a CD-ROM, so until now the GPT and the
+          # protective MBR were asserted by reading `fdisk` output and by one
+          # manual test.
+          #
+          # That gap is not hypothetical. `OS-029` (#347) looked like it had
+          # broken both disk paths, for half an hour, on no evidence but a
+          # hand-run qemu that was failing for an unrelated reason — the store
+          # path is mode 444 and a writable `if=virtio` drive cannot open it.
+          # Hence the copy below, and hence this check.
+          cp ${linux.iso} disk.img
+          chmod +w disk.img
+
+          disk() {
+            local firmware="$1"
+            local log="$PWD/disk-$firmware.log"
+            local fw=""
+            if [ "$firmware" = uefi ]; then
+              cp ${pkgs.OVMF.variables} "$PWD/$firmware-vars.fd"
+              chmod +w "$PWD/$firmware-vars.fd"
+              fw="-drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware}"
+              fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
+            fi
+
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$log" \
+              $fw \
+              -drive file=disk.img,format=raw,if=virtio \
+              -nic none &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 180); do
+              grep -q '"event":"listening"' "$log" 2>/dev/null && break
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$log" $out/disk-$firmware.log 2>/dev/null || true
+
+            grep -q '"event":"listening"' $out/disk-$firmware.log || {
+              echo "the ISO does not boot as a raw disk on $firmware. That is \
+          the path the EC2 pipeline uses (OS-027, #344), and the partition \
+          layout OS-029 (#347) touches is what decides it" >&2
+              cat $out/disk-$firmware.log >&2 || true
+              exit 1
+            }
+            echo "boots as a raw disk on $firmware"
+          }
+
+          disk bios
+          disk uefi
         '';
 
       containerFor = { pkgs, system, server, client }:
@@ -1187,6 +1307,9 @@
           # that the machine *serves* — plus the machine with no NIC at all,
           # which must say so rather than reporting `listening` and going quiet.
           linux-nics = nicBootCheckFor system;
+
+          # `OS-029` (#347): the kernel is in the ISO exactly twice, counted.
+          linux-iso-layout = isoLayoutCheckFor system;
 
 
 
