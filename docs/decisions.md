@@ -73,6 +73,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
 | 39 | Host clock in the request path | One start-up reading, projected by the monotonic clock and re-anchored when SNTP corrects it, [see below](#the-host-clock-is-projected-and-re-anchored-pol-020-346) (#346) |
 | 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
+| 41 | SRV weighting | RFC 2782's running-sum selection, **not** the `isqrt` formula `DISC-001` quoted from vlmcsd, [see below](#the-srv-weighting-is-the-specifications-not-vlmcsds-disc-001-143) (#143) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -362,6 +363,35 @@ round: the activation date is a year and a day-of-year buried in an ePID, and a 
 to move it is one this host would have to restart to reflect anyway, while the skew measurement is
 compared against a four-hour band on every request. Make the accurate thing accurate and leave the
 stable thing stable, rather than keeping two values consistent and both wrong.
+
+### The SRV weighting is the specification's, not vlmcsd's (`DISC-001`, #143)
+
+`DISC-001` specifies the ordering as `random_weight = (rand % 256) * isqrt(weight * 1000)`, sorted
+descending. That is vlmcsd's formula, and the same issue's definition of done says "ordering matches
+RFC 2782". **Those are two different things**, so the code implements the second and this records
+why.
+
+RFC 2782 asks for a *selection probability proportional to the weight*, achieved by a running sum:
+add up the weights in a priority, draw uniformly from `0..=total`, take the first record whose
+running sum reaches the draw, remove it, repeat.
+
+vlmcsd's formula gives each record a sort key of `uniform(0, 255) × sqrt(1000w)`, so its expected key
+is proportional to **`sqrt(w)`** rather than to `w`. With records weighted 1 and 100 the
+specification picks the heavy one about 99 % of the time; the formula picks it about 91 %.
+
+Two reasons to prefer the specification here rather than matching the incumbent:
+
+- **The client is a conformance tool.** Its purpose is to answer "would a real client find this
+  host?", and a real client is Windows' resolver following RFC 2782 — not vlmcsd. Reproducing
+  vlmcsd's approximation would make the tool agree with the wrong reference.
+- **Nothing is lost.** The two agree exactly for one host and for equal weights, which is every
+  deployment `docs/deployment.md` describes: the instructions page tells operators to publish
+  `0 0 1688`, because a single host needs neither priority nor weight.
+
+The weight-zero case is also the specification's rather than the common shortcut. RFC 2782 gives a
+zero-weight record "a small chance of being selected", which the running-sum method produces for
+free; implementations that sort zero-weight records last never try them first, and since the
+recommended zone has *every* record at weight zero, that difference is the whole ordering.
 
 ### Notes on the three decisions that took the most argument
 

@@ -21,12 +21,26 @@ kmsrs-crypto.workspace = true
 # (CLI-015, #221).
 kmsrs-server.workspace = true
 getrandom = { workspace = true, features = ["std"] }
+# `DISC-001` (#143): the SRV lookup. `system-config` is on here and off for
+# `kmsrs-os`, and the difference is the point — the bare-metal target has no
+# `/etc/resolv.conf` (axiom A5) and configures its resolver from DHCP option 6,
+# while this is a diagnostic tool whose job is to do what a real client does,
+# which means using the resolver the machine is actually configured with.
+#
+# Measured before enabling: `cargo build -p kmsrs-os --release` produces a
+# byte-identical binary either way, so the feature costs the bare-metal image
+# nothing. It adds ten crates to the lockfile, all of them behind
+# `cfg(target_os)` gates for platforms `deny.toml`'s `targets` list already
+# excludes from auditing.
+hickory-resolver = { workspace = true, features = ["system-config"] }
+# `DISC-001` (#143): `hickory-resolver` is async and this client is blocking
+# `std::net` everywhere else on purpose. One current-thread runtime is built for
+# the lookup and dropped; making the whole client async to accommodate one DNS
+# query would be the tail wagging the dog.
+tokio.workspace = true
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-# The server's driver is async (`OS-024`, #340), and `probe_our_server` runs a
-# real one on a thread to probe it. Only the test needs this.
-tokio.workspace = true
 # The probe's headline test runs against our own server, which is the point of
 # CLI-002 (#208): the suite is only meaningful if it is pointed at the thing
 # this repository builds.
