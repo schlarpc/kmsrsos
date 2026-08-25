@@ -136,7 +136,7 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 
 ## Architecture
 
-Seven crates in one workspace. The split is load-bearing, not cosmetic — see `ARCH-001` (#1).
+Eight crates in one workspace. The split is load-bearing, not cosmetic — see `ARCH-001` (#1).
 
 | Crate | `no_std`? | Contents |
 |---|---|---|
@@ -146,6 +146,7 @@ Seven crates in one workspace. The split is load-bearing, not cosmetic — see `
 | `kmsrs-dbgen` | std, host-only | Extracts product data from Microsoft `pkeyconfig` artifacts |
 | `kmsrs-policy` | `no_std + alloc` | Activation policy, host-state model, identity, event log. Sans-io. |
 | `kmsrs-server` | std | Platform layer, listeners, concurrency, HTTP responder, wiring |
+| `kmsrs-os` | std | PID 1 on the bare-metal target: mounts, reaper, then `serve` (`OS-021`, #337) |
 | `kmsrs-client` | std | Diagnostic / validation / soak client |
 
 Plus `kmsrs-fuzz` and `kmsrs-vectors` for test infrastructure.

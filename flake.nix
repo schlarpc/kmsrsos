@@ -329,11 +329,16 @@
           });
 
           server = buildOne { pname = "kmsrsos"; package = "kmsrs-server"; };
+
+          # `OS-021` (#337): pid 1 on the bare-metal target. The same server,
+          # with the handful of duties the kernel does not perform for process
+          # 1 done first — mounts and a reaper.
+          os = buildOne { pname = "kmsrsos-os"; package = "kmsrs-os"; };
           client = buildOne { pname = "kmsrs-client"; package = "kmsrs-client"; };
 
         in
         rec {
-          inherit server client;
+          inherit server client os;
           container = containerFor { inherit pkgs system server client; };
 
         };
@@ -395,7 +400,7 @@
         let pkgs = pkgsFor system;
         in import ./os/linux {
           inherit pkgs;
-          server = (mkKmsrsos { inherit system; }).server;
+          init = (mkKmsrsos { inherit system; }).os;
         };
 
       # `OS-017` (#333): the Linux target boots into service on the device
@@ -491,6 +496,17 @@
           for f in bios uefi; do
             grep -q '"event":"listening"' $out/$f.log || {
               echo "no listener reported on $f" >&2; exit 1; }
+            # `OS-021` (#337): pid 1 mounted the pseudo-filesystems. Asserted
+            # positively — the absence of a warning is equally consistent with
+            # the code never having run.
+            grep -q '"event":"pid1".*devtmpfs\|"event":"pid1"' $out/$f.log || {
+              echo "pid 1 did not report its mounts on $f (OS-021, #337)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q 'mounted /dev /proc /sys' $out/$f.log || {
+              echo "pid 1 did not mount all three pseudo-filesystems on $f \
+          (OS-021, #337)" >&2
+              cat $out/$f.log >&2; exit 1; }
+
             if grep -qi 'unable to open an initial console' $out/$f.log; then
               echo "init had no stdio on $f: the /dev/console node is missing \
           from the initramfs manifest (OS-017, #333)" >&2

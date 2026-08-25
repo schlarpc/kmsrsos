@@ -31,7 +31,7 @@ const QUARANTINED_CRATE: &str = "kmsrs-dbgen";
 /// The binaries whose dependency closure is audited. `kmsrs-vectors` is test
 /// infrastructure and `kmsrs-dbgen` is the quarantine subject, so neither is a
 /// shipped artifact.
-const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client"];
+const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client", "kmsrs-os"];
 
 // No crate is permitted to define its own lint table any more. `kmsrs-os` held
 // the single documented unsafe boundary (`SEC-001`, #193; `OS-013`, #264) and

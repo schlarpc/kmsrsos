@@ -18,6 +18,7 @@ members = [
     "crates/kmsrs-db",
     "crates/kmsrs-dbgen",
     "crates/kmsrs-policy",
+    "crates/kmsrs-os",
     "crates/kmsrs-server",
     "crates/kmsrs-client",
     "crates/kmsrs-vectors",
@@ -80,6 +81,14 @@ socket2 = { version = "=0.6.5" }
 # timers, a current-thread scheduler and signals, and nothing else. `full`
 # would pull in the process and filesystem drivers, and A5 says there is no
 # filesystem to drive.
+# `OS-021` (#337). Safe bindings to the syscalls pid 1 needs — `mount`,
+# `waitpid`, `mkdir`. Every one of them would otherwise be an `unsafe` libc
+# call, and axiom A1 is `forbid(unsafe_code)` with no exception since #334.
+# Features are named rather than defaulted: this needs two of them.
+rustix = { version = "=1.1.4", default-features = false, features = [
+  "std", "fs", "mount", "process",
+] }
+
 tokio = { version = "=1.53.1", default-features = false, features = [
   "rt", "net", "time", "io-util", "sync", "macros", "signal",
 ] }

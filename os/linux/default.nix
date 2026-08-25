@@ -19,7 +19,10 @@
 # BIOS. That is why the ISO boots on a Proxmox VM with nothing changed from the
 # defaults, which the Hermit image cannot do (`OS-004`, #255).
 { pkgs
-, server
+  # `kmsrs-os` (`OS-021`, #337), not `kmsrs-server`: pid 1 mounts devtmpfs,
+  # `/proc` and `/sys` and installs a reaper before handing over to the same
+  # `serve` the Linux and Windows builds run.
+, init
   # `ip=dhcp` is the kernel's built-in client and is a stopgap: it takes a lease
   # and never renews it. `OS-019` (#335) replaces it with a real client in
   # `kmsrs-os` and drops `CONFIG_IP_PNP_DHCP`.
@@ -56,7 +59,7 @@ let
   manifest = pkgs.writeText "kmsrsos-initramfs-manifest" ''
     dir /dev 0755 0 0
     nod /dev/console 0600 0 0 c 5 1
-    file /init ${server}/bin/kmsrsos 0755 0 0
+    file /init ${init}/bin/kmsrs-os 0755 0 0
   '';
 
   configfile = pkgs.runCommand "kmsrsos-linux-config" { } ''

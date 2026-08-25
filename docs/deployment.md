@@ -416,11 +416,17 @@ The userland is one program, and several things a normal userland provides are n
 |---|---|
 | DHCP lease renewal | `OS-019` (#335) |
 | Clock discipline (NTP) | `OS-020` (#336) — kvmclock only, today |
-| Reaper, `/proc` and `/dev` mounts, ACPI shutdown | `OS-021` (#337) |
 | Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
 
-Until `OS-021`, `qm shutdown` does nothing — the ACPI power-button event has no userland to act on
-it — and only `qm stop` will stop the VM.
+**`qm shutdown` does nothing; use `qm stop`.** The button sends an ACPI event, which the kernel turns
+into an input event on `/dev/input/eventN` that `acpid` would normally consume. There is no userland
+here to consume it. Fixing that means adding the input subsystem to the kernel's allowlist as well as
+code, so it is `OS-025` (#343) rather than something done quietly.
+
+What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
+orphaned children. It reports what it mounted on the console at boot —
+`{"event":"pid1","detail":"mounted /dev /proc /sys"}` — which is the line to look for if a guest
+misbehaves.
 
 ## What is not in the artifact
 

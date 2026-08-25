@@ -1,0 +1,23 @@
+[package]
+name = "kmsrs-os"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "kmsrs-os"
+path = "src/main.rs"
+
+[dependencies]
+kmsrs-server.workspace = true
+
+# `OS-021` (#337): the syscalls pid 1 needs, without `unsafe`. This crate used
+# to be the Hermit unikernel binary and held the one documented unsafe boundary
+# (`OS-013`, #264); it never contained any, and it does not now — rustix is the
+# reason that stayed true when the duties became `mount(2)` and `waitpid(2)`.
+rustix.workspace = true
+
+[lints]
+workspace = true
