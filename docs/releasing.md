@@ -16,13 +16,17 @@ was tested is a release nobody tested.
 | `kmsrsos-X.Y.Z-1.{x86_64,aarch64}.rpm` | the same payload |
 | `ghcr.io/schlarpc/kmsrsos:X.Y.Z` | multi-arch; two static binaries and nothing else |
 | `kmsrsos.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+| `kmsrsos-x86_64.iso` | the bootable bare-metal image (`OS-017`, #333); x86_64 only, uncompressed |
 | `sbom-*.cdx.json` | CycloneDX, derived from the lockfile |
 | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksum file |
 
 There is no apt or yum repository and no Homebrew tap (decision 26): a repository is ongoing
 infrastructure with signing keys that have to be rotated, a downloadable package captures most of the
-value, and macOS is not a target. The Hermit OS image joins the list when `PKG-013` (#250) can build
-one.
+value, and macOS is not a target.
+
+The ISO is shipped **uncompressed**. It is 5.3 MiB since `OS-030` (#348), and a `.iso.gz` is one more
+step between an operator and a running host when the whole procedure is "upload it, attach it, boot
+it".
 
 **One signature, over the checksums.** Verifying that file then verifies everything in it, which is a
 smaller thing for somebody to get right than eight signatures — and each machine's checksums were
@@ -38,6 +42,52 @@ cosign verify-blob SHA256SUMS \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sha256sum -c SHA256SUMS
 ```
+
+---
+
+## The `latest` snapshot (`PKG-015`, #364)
+
+There is a second channel, and it is deliberately a smaller one. Every push to `main` that passes the
+**whole** gate moves a rolling prerelease at the tag `latest`, carrying the bootable ISO, the two
+Windows binaries, and a signed checksum file.
+
+```
+https://github.com/schlarpc/kmsrsos/releases/download/latest/kmsrsos-x86_64.iso
+```
+
+**It is not a release, and the differences are the point.** The tag moves without warning, there is no
+version number to put in a bug report, and it carries no SBOM, `.deb`, `.rpm` or container image —
+those are things a tag produces. GitHub's "Latest" badge stays on the newest real tag, because the
+snapshot release never sets `make_latest`.
+
+It exists for one thing: booting a change before it is tagged. The ISO's entire surface is *does it
+boot on your hypervisor*, and `linux-boot` can only answer that for QEMU.
+
+**"All green" means every job.** Actions has no way to say "everything" — `needs` is a list of names —
+so `the_latest_pointer_waits_for_every_job` reads the workflow and fails if any job is missing from
+that list. A job added later and not added there would leave the pointer moving on a build that job
+had failed, silently, and the artifact would look blessed. That is worse than having no pointer.
+
+**It is signed, for the same reason a release is.** An unverifiable bootable image that people
+download is worse than one they can check, and keyless signing records the workflow path in the
+certificate — so the signature itself says which channel it came from, rather than a promise in the
+notes. Verification is the same procedure with one substitution:
+
+```sh
+cosign verify-blob SHA256SUMS \
+  --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
+  --certificate-identity-regexp 'https://github.com/schlarpc/kmsrsos/.github/workflows/test.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum -c SHA256SUMS
+```
+
+Note `test.yml` where a release says `release.yml`. A snapshot signature will not verify against the
+release identity and a release signature will not verify against this one, which is the property
+worth having.
+
+The artifacts are also uploaded as ordinary workflow artifacts on **every** run, pull requests
+included, under `snapshot-x86_64`. Those expire and have no stable URL; they are there so a reviewer
+can boot a branch.
 
 ---
 

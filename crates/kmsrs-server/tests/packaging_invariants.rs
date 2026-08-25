@@ -42,6 +42,197 @@ fn read(root: &Path, relative: &str) -> String {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
+/// Every job in the gate, by name.
+///
+/// A two-space-indented `name:` under `jobs:`. Structural rather than a parsed
+/// document because this workspace has no YAML dependency and adding one to
+/// read two lists would be a strange thing to pay for — but structural enough
+/// that adding a job cannot slip past it, which is the whole point.
+fn workflow_jobs(workflow: &str) -> Vec<String> {
+    let mut inside_jobs = false;
+    let mut jobs = Vec::new();
+
+    for line in workflow.lines() {
+        if line.starts_with("jobs:") {
+            inside_jobs = true;
+            continue;
+        }
+        // A top-level key ends the `jobs:` mapping.
+        if inside_jobs && !line.starts_with(' ') && !line.trim().is_empty() {
+            break;
+        }
+        if !inside_jobs {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("  ") else {
+            continue;
+        };
+        if rest.starts_with(' ') || rest.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = rest.strip_suffix(':')
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            jobs.push(name.to_owned());
+        }
+    }
+    jobs
+}
+
+/// The `needs:` list of one job.
+fn job_needs(workflow: &str, job: &str) -> Vec<String> {
+    let mut lines = workflow
+        .lines()
+        .skip_while(|line| *line != format!("  {job}:"));
+    let mut needs = Vec::new();
+    let mut inside_needs = false;
+
+    for line in lines.by_ref().skip(1) {
+        // The next job ends this one.
+        if line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':') {
+            break;
+        }
+        if line.trim() == "needs:" {
+            inside_needs = true;
+            continue;
+        }
+        if inside_needs {
+            match line.trim().strip_prefix("- ") {
+                Some(name) => needs.push(name.trim().to_owned()),
+                None => inside_needs = false,
+            }
+        }
+    }
+    needs
+}
+
+/// **`PKG-015` (#364): "all green" means *all*.**
+///
+/// The `latest` job moves a pointer that people download from, so it must wait
+/// for every other job in the gate. Actions has no way to say "everything" —
+/// `needs` is a list of names — so a job added later and not added to that list
+/// would leave the pointer moving on a build that job had failed.
+///
+/// That failure is silent and the artifact looks blessed, which is worse than
+/// having no pointer at all. So the two lists are compared here rather than
+/// trusted to stay in step.
+#[test]
+fn the_latest_pointer_waits_for_every_job() {
+    let root = workspace_root();
+    let workflow = read(&root, ".github/workflows/test.yml");
+
+    let jobs = workflow_jobs(&workflow);
+    assert!(
+        jobs.len() >= 5,
+        "only found {jobs:?} in test.yml, so this test is not reading the \
+         workflow it thinks it is"
+    );
+    assert!(
+        jobs.iter().any(|job| job == "latest"),
+        "test.yml has no `latest` job, so nothing moves the pointer: {jobs:?}"
+    );
+
+    let needs = job_needs(&workflow, "latest");
+    assert!(
+        !needs.is_empty(),
+        "the `latest` job needs nothing, so it runs whatever else happened"
+    );
+
+    let missing: Vec<&String> = jobs
+        .iter()
+        .filter(|job| *job != "latest" && !needs.contains(job))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the `latest` job does not wait for {missing:?}. It moves a pointer \
+         people download from, so every job in the gate has to be in its \
+         `needs` list — otherwise the pointer moves on a build one of them \
+         failed, silently, and the artifact looks blessed (PKG-015, #364)"
+    );
+
+    // And the reverse: a name in `needs` that is not a job is a typo Actions
+    // reports as a skipped workflow rather than an error, which is the same
+    // failure wearing a different hat.
+    let unknown: Vec<&String> = needs.iter().filter(|need| !jobs.contains(need)).collect();
+    assert!(
+        unknown.is_empty(),
+        "the `latest` job waits for {unknown:?}, which are not jobs in this \
+         workflow"
+    );
+}
+
+/// `PKG-015` (#364): a pull request cannot move the pointer.
+///
+/// The artifacts are built on every run, including from forks, and that is
+/// deliberate — a workflow artifact on a pull request is how somebody boots the
+/// change before it merges. Publishing one is a different thing, and a fork's
+/// branch must not be able to do it.
+#[test]
+fn only_a_push_to_main_moves_the_pointer() {
+    let root = workspace_root();
+    let workflow = read(&root, ".github/workflows/test.yml");
+
+    let start = workflow
+        .find("\n  latest:\n")
+        .expect("test.yml has a `latest` job");
+    let job = &workflow[start..];
+
+    assert!(
+        job.contains("github.event_name == 'push'"),
+        "the `latest` job is not gated to a push, so a pull request would move \
+         the pointer"
+    );
+    assert!(
+        job.contains("github.ref == 'refs/heads/main'"),
+        "the `latest` job is not gated to main, so any branch would move the \
+         pointer"
+    );
+}
+
+/// `PKG-015` (#364): the snapshot is built by the flake, like everything else.
+///
+/// The same assertion `the_release_workflow_builds_what_the_gate_checks` makes
+/// about a tag, for the same reason: an artifact built by a path nothing else
+/// exercises is an artifact nothing has tested. A snapshot is downloaded and
+/// booted, so it earns the same rule.
+#[test]
+fn the_snapshot_is_built_by_the_flake() {
+    let root = workspace_root();
+    let workflow = read(&root, ".github/workflows/test.yml");
+
+    for output in [".#linuxIso", ".#windows"] {
+        assert!(
+            workflow.contains(output),
+            "the snapshot does not build {output} (PKG-015, #364)"
+        );
+    }
+    for bypass in [
+        "cargo build --release",
+        "cargo install --path",
+        "docker build",
+    ] {
+        assert!(
+            !workflow.contains(bypass),
+            "test.yml uses {bypass}, which is a build path nothing else \
+             exercises"
+        );
+    }
+    // Checksums are produced beside the build rather than centrally, so they
+    // are a statement by the machine that made the bytes (`SEC-010`, #202).
+    assert!(
+        workflow.contains("sha256sum * > SHA256SUMS"),
+        "the snapshot artifacts carry no checksums"
+    );
+    assert!(
+        workflow.contains("cosign sign-blob"),
+        "the snapshot checksums are not signed, so a downloaded ISO cannot be \
+         verified at all"
+    );
+}
+
 /// `PKG-005` (#242): the image is built from the local tree and nothing else.
 ///
 /// Structural rather than enforced. `dockerTools.buildLayeredImage` takes store
