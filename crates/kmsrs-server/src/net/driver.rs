@@ -684,13 +684,18 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, mut session: Session, ct
                 return;
             }
 
+            // `POL-020` (#346): the host's wall clock, so the skew against the
+            // client's timestamp is actually measured. Projected from an anchor
+            // rather than read here — `OS-007` (#258) permits `CLOCK_REALTIME`
+            // in two files and this is not one of them, and a monotonic read is
+            // what `ctx.now()` above already did.
             let context = RequestContext {
                 peer: Some(Peer {
                     address: peer.ip(),
                     port: peer.port(),
                 }),
                 now,
-                host_time: None,
+                host_time: shared.server.host_time(),
             };
 
             let handled = match &mut session {

@@ -31,7 +31,7 @@ pub(crate) mod lease;
 pub(crate) mod link;
 pub(crate) mod sntp;
 
-use kmsrs_server::facts::Facts;
+use kmsrs_server::entry::Housekeeping;
 
 /// Start everything pid 1 owns on the network (`OS-019`, #335; `OS-020`, #336).
 ///
@@ -40,8 +40,13 @@ use kmsrs_server::facts::Facts;
 /// client reads it, so a renewal that changes the NTP servers is picked up on
 /// the next poll rather than needing a restart — and the SNTP client does not
 /// have to know that DHCP exists.
-pub(crate) fn spawn(facts: Facts, seed: u32) {
+///
+/// The SNTP client also gets the server's [`kmsrs_server::WallClock`], so a
+/// correction reaches the value the request path measures client skew against
+/// rather than only `CLOCK_REALTIME` (`POL-020`, #346).
+pub(crate) fn spawn(housekeeping: Housekeeping, seed: u32) {
+    let Housekeeping { facts, wall_clock } = housekeeping;
     let (sources, watch) = tokio::sync::watch::channel(sntp::Sources::default());
     client::spawn(facts, seed, sources);
-    sntp::spawn(watch);
+    sntp::spawn(watch, wall_clock);
 }

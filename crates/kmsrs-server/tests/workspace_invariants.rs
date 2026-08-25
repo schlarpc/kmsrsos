@@ -331,6 +331,20 @@ fn every_declared_feature_is_referenced_in_source() {
     );
 }
 
+/// A copy of `text` with `//` line comments removed.
+///
+/// Doc comments start with `//` too, so this takes those as well, which is what
+/// is wanted: a `///` block is prose about the code, not code.
+fn without_line_comments(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.find("//") {
+            Some(at) => line.split_at(at).0,
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `SEC-011` (#203): exactly one type in the shipped tree can be built from a
 /// serialised document, and it is the one the escape hatch names.
 ///
@@ -585,8 +599,15 @@ fn the_wall_clock_is_read_in_exactly_two_places() {
             continue;
         }
         for (path, text) in rust_sources_with_paths(&source_dir) {
+            // Comments stripped first (`POL-020`, #346). The rule is about what
+            // the program *does*, and a module that explains why it may not
+            // read the wall clock has to be able to name the call it is not
+            // making. `platform_invariants.rs`'s sibling check has always done
+            // this; matching raw text here meant the prose was linted instead
+            // of the code.
+            let code = without_line_comments(&text);
             for needle in READS_THE_WALL_CLOCK {
-                if !text.contains(needle) {
+                if !code.contains(needle) {
                     continue;
                 }
                 let file = path

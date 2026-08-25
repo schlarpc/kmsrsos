@@ -15,19 +15,22 @@
 //!   `CLOCK_MONOTONIC`. So a step here **cannot** be observed by
 //!   `kmsrs-policy` as time going backwards — not because this code is careful
 //!   about it, but because there is no path by which it could be.
-//! * **The wall clock is read exactly once**, by `entry::today`, to bound the
-//!   randomised activation date in the ePID (`ID-007`, #112). That happens at
-//!   start-up, before this task can have corrected anything, and the value is
-//!   then stable for the life of the process — which `ID-001` (#106) requires.
-//! * **The skew check does not run at all today.** `driver.rs` passes
-//!   `host_time: None`, so `POL-011` (#99) is inert and `strict-clock-skew`
-//!   changes nothing. That is #346 (`POL-020`), filed rather than fixed here.
+//! * **The ePID's activation date does not move.** `entry::today` draws it at
+//!   start-up, before this task can have corrected anything, and it stays there
+//!   for the life of the process — which `ID-001` (#106) requires. A correction
+//!   large enough to change it is one this host would have to restart to
+//!   reflect.
+//! * **The skew check does run, and this is what it measures against.** Since
+//!   `POL-020` (#346) the request path projects the host's wall clock from an
+//!   anchor, and [`apply`] re-anchors it here. Without that the correction
+//!   would move `CLOCK_REALTIME` and nothing else: the host would keep
+//!   measuring every client against the clock it booted with, and under
+//!   `strict-clock-skew` would refuse correctly-set clients for the life of the
+//!   process.
 //!
-//! So the honest summary is that this makes the *log* truthful and prepares the
-//! ground for #346, rather than fixing a live activation bug. That is a good
-//! enough reason — a host whose console timestamps are hours out is a host
-//! nobody can correlate with anything — and it is not a good enough reason to
-//! refuse to serve over, which is what decides the question below.
+//! So this makes the log truthful *and* makes `POL-011` (#99) measure against a
+//! disciplined clock. Neither is a good enough reason to refuse to serve over,
+//! which is what decides the question below.
 //!
 //! # What happens when no server answers
 //!
@@ -54,6 +57,7 @@ use core::time::Duration;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use kmsrs_server::clock::{FileTime, WallClock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
@@ -344,9 +348,13 @@ pub(crate) struct Sources {
 /// Spawned on the one runtime, beside the DHCP client and the KMS listeners.
 /// `lease` is how it learns what the lease said; a renewal that changes the NTP
 /// servers is picked up on the next poll rather than needing a restart.
-pub(crate) fn spawn(lease: tokio::sync::watch::Receiver<Sources>) {
+///
+/// `wall_clock` is the server's, and stepping `CLOCK_REALTIME` without also
+/// re-anchoring it would leave the correction invisible to the only part of the
+/// program that reads a wall clock at all (`POL-020`, #346).
+pub(crate) fn spawn(lease: tokio::sync::watch::Receiver<Sources>, wall_clock: WallClock) {
     tokio::spawn(async move {
-        discipline(lease).await;
+        discipline(lease, wall_clock).await;
     });
 }
 
@@ -356,7 +364,7 @@ fn say(level: &str, detail: &str) {
 }
 
 /// Poll, step, repeat.
-async fn discipline(mut lease: tokio::sync::watch::Receiver<Sources>) {
+async fn discipline(mut lease: tokio::sync::watch::Receiver<Sources>, wall_clock: WallClock) {
     // Said once, not once per failed round. A host that cannot reach a time
     // server is a host serving with the clock it booted with, which is a fact
     // an operator wants exactly one line about.
@@ -370,7 +378,7 @@ async fn discipline(mut lease: tokio::sync::watch::Receiver<Sources>) {
         if let Some(reading) = best(&addresses).await {
             complained = false;
             ever_synchronised = true;
-            apply(reading);
+            apply(reading, &wall_clock);
             tokio::time::sleep(POLL).await;
         } else {
             if !complained {
@@ -538,7 +546,13 @@ async fn ask(address: SocketAddr) -> Result<Reading, String> {
 }
 
 /// Step the clock, if the reading says it is worth doing.
-fn apply(reading: Reading) {
+///
+/// Two clocks move, not one. `clock_settime` moves the machine's, and
+/// `wall_clock.discipline` moves the anchor the request path projects from —
+/// without the second, `POL-011` (#99) would keep measuring client skew against
+/// the clock this host booted with, and under `strict-clock-skew` would refuse
+/// correctly-set clients for the life of the process (`POL-020`, #346).
+fn apply(reading: Reading, wall_clock: &WallClock) {
     let magnitude = reading.offset_nanos.unsigned_abs();
     let threshold = STEP_THRESHOLD.as_nanos();
     if magnitude < threshold {
@@ -553,6 +567,14 @@ fn apply(reading: Reading) {
 
     match rustix::time::clock_settime(rustix::time::ClockId::Realtime, timespec) {
         Ok(()) => {
+            // The corrected reading crosses into `kmsrs-server` as an argument.
+            // That is what keeps `OS-007` (#258) true — this file is one of the
+            // two permitted to know what `CLOCK_REALTIME` says, and nothing
+            // downstream of it has to ask.
+            if let Some(corrected_wall) = file_time(corrected) {
+                wall_clock.discipline(corrected_wall);
+            }
+
             let seconds = reading
                 .offset_nanos
                 .checked_div(NANOS)
@@ -583,6 +605,18 @@ fn apply(reading: Reading) {
     }
 }
 
+/// Nanoseconds since the epoch as the protocol's `FILETIME`, or `None` if it
+/// will not fit (`POL-020`, #346).
+///
+/// The conversion is checked rather than saturating: a clock this far out is a
+/// clock nothing should be measured against, and a saturated value would read
+/// as an enormous skew on every request rather than as the absent measurement
+/// it actually is.
+fn file_time(unix_nanos_value: i128) -> Option<FileTime> {
+    let seconds = unix_nanos_value.checked_div(NANOS)?;
+    FileTime::from_unix_seconds(i64::try_from(seconds).ok()?)
+}
+
 /// Nanoseconds since the epoch as a `timespec`, or `None` if it will not fit.
 fn timespec(unix_nanos_value: i128) -> Option<rustix::time::Timespec> {
     let seconds = unix_nanos_value.checked_div(NANOS)?;
@@ -611,8 +645,8 @@ mod tests {
     )]
 
     use super::{
-        NANOS, PACKET, Reading, Unusable, nothing_answered, ntp_timestamp, reading, request,
-        unix_nanos,
+        FileTime, NANOS, PACKET, Reading, Unusable, file_time, nothing_answered, ntp_timestamp,
+        reading, request, unix_nanos,
     };
 
     /// Build a server reply with the timestamps given, as NTP values.
@@ -826,5 +860,42 @@ mod tests {
             stratum: 3,
         };
         assert_eq!(one, one);
+    }
+    /// The conversion `apply` uses to hand the corrected reading to the server
+    /// (`POL-020`, #346). A clock the SNTP exchange agreed on must survive the
+    /// trip into the protocol's encoding.
+    #[test]
+    fn a_corrected_reading_converts_to_a_file_time() {
+        // 2022-06-18T04:26:40Z, the same instant as 133_000_000_000_000_000
+        // ticks — chosen so the expected value is one a reader can check.
+        let unix_seconds: i128 = 1_655_526_400;
+        let converted = file_time(unix_seconds.saturating_mul(NANOS)).unwrap();
+        assert_eq!(converted, FileTime::from_ticks(133_000_000_000_000_000));
+    }
+
+    /// Sub-second precision is dropped rather than rounded, and that is fine:
+    /// the value feeds a four-hour tolerance band.
+    #[test]
+    fn the_conversion_truncates_to_the_second() {
+        let unix_seconds: i128 = 1_655_526_400;
+        let with_fraction = unix_seconds
+            .saturating_mul(NANOS)
+            .saturating_add(NANOS.checked_div(2).unwrap());
+        assert_eq!(
+            file_time(with_fraction),
+            file_time(unix_seconds.saturating_mul(NANOS))
+        );
+    }
+
+    /// A clock so far out that it leaves the `FILETIME` range yields nothing
+    /// rather than a saturated value.
+    ///
+    /// Saturating would be the worse failure: the request path would read it as
+    /// an enormous skew on every request and, under `strict-clock-skew`, refuse
+    /// every client — where `None` correctly means "no measurement".
+    #[test]
+    fn a_clock_outside_the_representable_range_converts_to_nothing() {
+        assert_eq!(file_time(i128::MIN), None);
+        assert_eq!(file_time(i128::MAX), None);
     }
 }
