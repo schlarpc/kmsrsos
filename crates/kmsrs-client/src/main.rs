@@ -50,6 +50,111 @@ fn main() {
     }
 }
 
+/// The address to talk to: the one given, or the first `_vlmcs._tcp` candidate
+/// that answers (`CLI-011`, #217).
+///
+/// # Falling through
+///
+/// RFC 2782 says a client tries candidates in order until one works, and
+/// "works" here means **connect and bind**, not connect. A host that accepts a
+/// connection and then refuses the RPC bind is a host that cannot activate
+/// anything, and stopping at the first open port would report that as success
+/// — which is the failure the Organization fork's client has, taking the first
+/// answer with no priority or weight handling at all.
+fn resolve_target(arguments: &Arguments, logger: Logger) -> Result<SocketAddr, i32> {
+    if let Some(target) = arguments.target {
+        return Ok(target);
+    }
+
+    let Some(domain) = arguments.discover.as_deref() else {
+        logger.message(Severity::Error, "usage", "no target given");
+        return Err(EXIT_BAD_USAGE);
+    };
+
+    // The weighted selection needs randomness, and axiom A7 says it arrives as
+    // an argument rather than being read inside the algorithm — which is what
+    // lets `order`'s tests drive it with a sweep instead of a generator.
+    let mut entropy = OsEntropy;
+    let candidates =
+        kmsrs_client::discover::resolve(domain, |bound| draw_below(&mut entropy, bound)).map_err(
+            |error| {
+                logger.message(
+                    Severity::Error,
+                    "discover",
+                    &format!("{}: {error}", kmsrs_client::discover::query_name(domain)),
+                );
+                EXIT_UNAVAILABLE
+            },
+        )?;
+
+    logger.message(
+        Severity::Info,
+        "discover",
+        &format!(
+            "{} names {} host(s)",
+            kmsrs_client::discover::query_name(domain),
+            candidates.len()
+        ),
+    );
+
+    // The falling-through itself lives in `discover` so it can be tested
+    // without a zone or a socket; this supplies the two things only a real run
+    // has — a resolver and a connection.
+    let chosen = kmsrs_client::discover::first_reachable(
+        &candidates,
+        kmsrs_client::discover::addresses,
+        |candidate, address| {
+            logger.message(
+                Severity::Debug,
+                "discover",
+                &format!(
+                    "trying {address} (priority {}, weight {})",
+                    candidate.priority, candidate.weight
+                ),
+            );
+            // `Session::open` connects **and binds**, which is the test RFC
+            // 2782 calls for. A host that accepts a connection and then
+            // refuses the RPC bind cannot activate anything, and stopping at
+            // the first open port would report that as success.
+            kmsrs_client::Session::open(address, arguments.timeout, true, &mut |_| {}).is_ok()
+        },
+        |candidate, detail| {
+            logger.message(
+                Severity::Warn,
+                "discover",
+                &format!("{}: {detail}", candidate.target),
+            );
+        },
+    );
+
+    if let Some(address) = chosen {
+        logger.message(Severity::Info, "discover", &format!("using {address}"));
+        return Ok(address);
+    }
+
+    logger.message(
+        Severity::Error,
+        "discover",
+        "no discovered host accepted a connection",
+    );
+    Err(EXIT_UNAVAILABLE)
+}
+
+/// A value uniformly below `bound`, from the entropy source.
+///
+/// `bound` is never zero — `order` passes `total + 1` — but the fallback is the
+/// honest one rather than a panic a zone could request.
+fn draw_below(entropy: &mut OsEntropy, bound: u32) -> u32 {
+    use kmsrs_proto::entropy::Entropy as _;
+
+    let Some(bound) = core::num::NonZeroU32::new(bound) else {
+        return 0;
+    };
+    entropy
+        .next_u32()
+        .map_or(0, |value| value.checked_rem(bound.get()).unwrap_or(0))
+}
+
 /// Probe the host and report.
 fn run(arguments: &Arguments) -> i32 {
     // `CLI-015` (#221): the client and the server share one logger, so client
@@ -68,10 +173,10 @@ fn run(arguments: &Arguments) -> i32 {
         logger
     };
 
-    // `CLI-008` (#214): before the target is required, because this mode has no
-    // host to talk to. Everything it prints is a `static` in this binary, which
-    // is what makes it answer "what would this activate" rather than "what did
-    // that host do".
+    // `CLI-008` (#214): before the target is resolved, because this mode has no
+    // host to talk to at all. Everything it prints is a `static` in this
+    // binary, which is what makes it answer "what would this activate" rather
+    // than "what did that host do".
     if let Mode::List(listing) = arguments.mode {
         let rendered = if arguments.format == LogFormat::Json {
             kmsrs_client::catalog::render_json(listing)
@@ -82,9 +187,12 @@ fn run(arguments: &Arguments) -> i32 {
         return 0;
     }
 
-    let Some(target) = arguments.target else {
-        logger.message(Severity::Error, "usage", "no target given");
-        return EXIT_BAD_USAGE;
+    // `CLI-011` (#217) and `DISC-001` (#143): find the host the way a Windows
+    // client with no `/skms` does, then fall through the candidates in the
+    // order RFC 2782 says to try them.
+    let target = match resolve_target(arguments, logger) {
+        Ok(target) => target,
+        Err(code) => return code,
     };
 
     let probe = Probe {
@@ -343,6 +451,9 @@ struct Arguments {
     help: bool,
     mode: Mode,
     target: Option<SocketAddr>,
+    /// A domain to look `_vlmcs._tcp` up in, instead of a fixed address
+    /// (`CLI-011`, #217; `DISC-001`, #143).
+    discover: Option<String>,
     timeout: Duration,
     level: LogLevel,
     format: LogFormat,
@@ -367,6 +478,7 @@ impl Default for Arguments {
             help: false,
             mode: Mode::Probe,
             target: None,
+            discover: None,
             timeout: kmsrs_client::request::DEFAULT_TIMEOUT,
             level: LogLevel::Info,
             format: LogFormat::Text,
@@ -441,6 +553,10 @@ impl Arguments {
                     }
                     parsed.concurrency = workers;
                 }
+                // `CLI-011` (#217): the discovery target syntax. A domain, not
+                // a hostname — what is looked up is `_vlmcs._tcp.<domain>`,
+                // which is what a Windows client with no `/skms` does.
+                "--discover" => parsed.discover = Some(take("--discover")?),
                 "--reconnect" => parsed.reconnect = true,
                 "--same-machine" => parsed.vary.machine_id = false,
                 "--random-workstation" => {
@@ -483,13 +599,23 @@ impl Arguments {
             index = index.saturating_add(1);
         }
 
-        // `--help` and the listing modes are the two kinds of run that have no
-        // host to talk to (`CLI-008`, #214). Every other mode needs one, and
-        // saying so here rather than at the point of use is what keeps the
-        // error a usage error rather than a failed connection.
-        let needs_a_target = !parsed.help && !matches!(parsed.mode, Mode::List(_));
+        // Three kinds of run have no host to talk to: `--help`, the listing
+        // modes (`CLI-008`, #214), and `--discover`, which finds one rather
+        // than being given one (`CLI-011`, #217). Every other mode needs an
+        // address, and saying so here rather than at the point of use is what
+        // keeps the error a usage error rather than a failed connection.
+        let needs_a_target =
+            !parsed.help && !matches!(parsed.mode, Mode::List(_)) && parsed.discover.is_none();
         if parsed.target.is_none() && needs_a_target {
-            return Err(String::from("no target given"));
+            return Err(String::from(
+                "no target given: an address, or --discover <domain>",
+            ));
+        }
+        if parsed.target.is_some() && parsed.discover.is_some() {
+            return Err(String::from(
+                "--discover and an address are two answers to the same question; \
+                 give one",
+            ));
         }
         Ok(parsed)
     }
@@ -599,6 +725,11 @@ OPTIONS:
                                never travel over the wire; they are what an
                                operator types into slmgr /ipk
         --catalog              Both of the above
+        --discover <DOMAIN>    Find the host by looking up _vlmcs._tcp.<DOMAIN>,
+                               the way a client with no /skms does. Candidates
+                               are tried in RFC 2782 order until one answers.
+                               An empty domain leaves the search list to the
+                               system resolver
 
 SOAK OPTIONS:
         --concurrency <N>      Workers sending them (default 1). vlmcs has none

@@ -18,6 +18,7 @@
 #![deny(clippy::let_underscore_untyped)]
 
 pub mod catalog;
+pub mod discover;
 pub mod load;
 pub mod names;
 pub mod probe;
@@ -25,6 +26,7 @@ pub mod request;
 pub mod session;
 
 pub use catalog::Listing;
+pub use discover::{Candidate, DiscoverError};
 pub use load::{Charge, Charged, Soak, SoakReport};
 pub use probe::{Finding, Probe, Report};
 pub use request::{RequestError, RequestFields};
