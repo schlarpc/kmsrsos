@@ -106,13 +106,38 @@ pub const MAX_CONNECTIONS: usize = {
     count
 };
 
-/// The most unsent response bytes one connection may accumulate.
+/// The most one KMS response may be.
 ///
 /// A response is at most `MAX_RESPONSE_LEN` plus its RPC header, so this is
 /// several PDUs of slack for a peer that has stopped reading. Beyond it the
 /// connection is closed rather than buffered indefinitely — an unbounded write
 /// queue is how a slow reader becomes a memory leak.
 pub const MAX_OUTBOUND: usize = 8 * 1024;
+
+/// The most one web response may be (`OBS-017`, #352).
+///
+/// # Why this is not [`MAX_OUTBOUND`]
+///
+/// It used to be, and the two are not the same quantity. `MAX_OUTBOUND` is
+/// sized from a KMS PDU — 384 bytes and a header — and eight kilobytes of it is
+/// generous slack. A rendered HTML page is not a PDU, and the largest one is
+/// two orders of magnitude bigger than a KMS response.
+///
+/// Nothing had noticed, because no page had ever been large enough: `/products`
+/// was 4 KB until `DB-013` (#137) added the client setup keys and took it to
+/// 24 KB. The failure was **silent and total** — the response was not
+/// truncated, it was dropped, and the connection closed with nothing sent at
+/// all. A shared ceiling whose name and documentation are about the other
+/// protocol is exactly the kind that gets crossed without anybody deciding to.
+///
+/// # Where the number comes from
+///
+/// Every page is bounded by compile-time data, not by uptime (`OBS-012`, #188):
+/// the product and key tables are `static`, and `/events` renders a bounded ring
+/// buffer. So the largest page this build can produce is a fixed quantity, and
+/// `tests/snapshots.rs` asserts it fits here with room — which is what makes
+/// this a ceiling rather than a guess.
+pub const MAX_WEB_OUTBOUND: usize = 512 * 1024;
 
 /// How long a connection may sit without making progress.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -723,8 +748,34 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, mut session: Session, ct
             handled
         };
 
-        if handled.response.len() > MAX_OUTBOUND {
-            // A peer that has stopped reading must not become a memory leak.
+        // Two different ceilings, because a KMS PDU and an HTML page are two
+        // different quantities (`OBS-017`, #352). Sharing one is how `/products`
+        // came to be dropped in silence when `DB-013` (#137) grew it past a
+        // limit documented in terms of RPC responses.
+        let ceiling = match session {
+            Session::Kms(_) => MAX_OUTBOUND,
+            Session::Web { .. } => MAX_WEB_OUTBOUND,
+        };
+        if handled.response.len() > ceiling {
+            // For the KMS path this is a peer that has stopped reading, and
+            // dropping it is the point: an unbounded write queue is how a slow
+            // reader becomes a memory leak.
+            //
+            // For the web path it is a page this build generated and cannot
+            // send, which is a defect rather than a defence — so it is said out
+            // loud rather than swallowed (`SEC-012`, #204). An operator staring
+            // at a blank page deserves to find the reason in the log.
+            if matches!(session, Session::Web { .. }) {
+                ctx.lock().server.logger().message(
+                    crate::log::Severity::Error,
+                    "web-oversize",
+                    &format!(
+                        "a page rendered to {} bytes, over the {ceiling}-byte \
+                         ceiling, and was not sent",
+                        handled.response.len()
+                    ),
+                );
+            }
             return;
         }
 
