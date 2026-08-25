@@ -157,8 +157,14 @@ would cost something.
 ### The kernel is in the ISO twice, and stays there (`OS-023`, #339)
 
 The `bzImage` appears once in the ISO9660 filesystem for isolinux and once inside the FAT ESP for
-firmware, because the two read different filesystems and neither reads the other's. That is ~2.7 MB
-of a 13.9 MB file. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
+firmware, because the two read different filesystems and neither reads the other's.
+
+**It also appears a third time**, which was not noticed while this decision was being taken: `-e
+efi.img` boots the ESP as a file in the ISO tree, and `-append_partition` appends a *second copy* of
+that same ESP to serve as the GPT partition `OS-027` (#344) needs. Three kernels is 10.6 MB of a
+16.3 MB image. That duplicate is a separate question with a different answer — it needs no
+bootloader, only a different xorriso incantation — and is #347. What follows is about the first two
+only. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
 only a ~1 MB `grubx64.efi` would need to live in the ESP.
 
 **Keep the duplication.** Four reasons, in the order they matter:

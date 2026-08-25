@@ -113,10 +113,20 @@ let
     cp esp.img $out
   '';
 
-  # The bzImage appears twice — once in ISO9660 for isolinux, once in the FAT
-  # ESP for firmware — because the two read different filesystems and neither
-  # reads the other's. `OS-023` (#339) holds the decision about whether to spend
-  # a GRUB to recover the ~2.7 MB.
+  # The bzImage appears **three** times, and only two of them were intended:
+  #
+  #   1. `/bzImage` in ISO9660, which isolinux boots.
+  #   2. inside `/efi.img`, the FAT ESP, which El Torito boots under UEFI-from-CD.
+  #   3. inside the *appended* copy of the same `efi.img`, which is the GPT EFI
+  #      System Partition that `OS-027` (#344) needs for UEFI-from-disk.
+  #
+  # 2 and 3 are the same six megabytes twice, because `-e efi.img` reads the
+  # file in the tree while `-append_partition` appends a separate copy. Three
+  # kernels is 10.6 MB of a 16.3 MB image. Deduplicating them is #347.
+  #
+  # `OS-023` (#339) decided *not* to spend a GRUB to collapse 1 and 2: that
+  # would put a bootloader in an image whose contents are enumerable in a
+  # sentence, and today the UEFI path has none at all. See `docs/decisions.md`.
   iso = pkgs.runCommand "kmsrsos-linux.iso"
     { nativeBuildInputs = [ pkgs.xorriso pkgs.syslinux ]; } ''
     mkdir -p iso/isolinux
