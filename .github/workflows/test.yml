@@ -102,22 +102,21 @@ jobs:
       - if: runner.os == 'Windows'
         run: cargo nextest run --profile ci --locked --package kmsrs-server --package kmsrs-client
 
-  # The fourth target of the platform matrix (TEST-012, #233; PKG-013, #250).
+  # The bare-metal target, as a faster signal than `nix flake check`
+  # (`OS-017`, #333; `TEST-012`, #233).
   #
-  # Its own job rather than a matrix leg, because it is not the same command
-  # with a different runner: it is a cross-build against a Tier 3 `rust-std` and
-  # a kernel that is itself compiled from source by a second, nightly toolchain.
-  # The one thing it has in common with the matrix is what it catches, which is
-  # a platform difference that appears at compile time — `socket2` not existing
-  # on Hermit was found exactly this way.
+  # This job used to build the Hermit unikernel. `OS-018` (#334) removed that
+  # target and did not remove the job, so it went on asking the flake for
+  # `.#hermit-kernel` — an attribute that no longer exists — and failing on
+  # every commit since. Replaced rather than deleted, because the role it played
+  # is still worth having: the `linux-boot`, `linux-nics` and `linux-iso-layout`
+  # checks boot real VMs and take twenty minutes, and this says "the artifact
+  # does not even build" in two.
   #
-  # Nothing here runs anything: the application is an `ELFOSABI_STANDALONE` file
-  # for a machine with no operating system under it, and the disk image is a
-  # GPT disk. Booting them is the `hermit-boot` (`OS-001`, #252) and
-  # `hermit-image-boot` (`OS-002`, #253) checks, which `nix flake check` runs in
-  # the leg above — this job is the faster signal, and the one that would still
-  # fail if QEMU were unavailable.
-  hermit:
+  # x86_64 only. `pkgs.syslinux` is unavailable elsewhere, which is why the
+  # flake now gates these outputs by system rather than letting an aarch64
+  # `nix flake check` fail inside them.
+  bare-metal:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -127,25 +126,26 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      - name: Build the Hermit kernel
-        run: nix build .#hermit-kernel --print-build-logs --no-link
+      - name: Build the kernel
+        run: nix build .#linux-kernel --print-build-logs --no-link
 
-      - name: Build the unikernel application
-        run: nix build .#hermit --print-build-logs --out-link result-hermit
+      - name: Build the bootable ISO
+        run: nix build .#linuxIso --print-build-logs --out-link result-iso
 
-      - name: Build the bootable disk image and ISO
+      # `OS-017` (#333): one file that is both a PE/COFF executable for
+      # firmware and a Linux boot image for isolinux. A fixup phase that
+      # "helpfully" rewrote it would produce something that builds and never
+      # boots on UEFI.
+      - name: The kernel is also an EFI executable
         run: |
-          nix build .#osImage --print-build-logs --out-link result-osimage
-          nix build .#osIso   --print-build-logs --out-link result-osiso
-
-      # The loader identifies a Hermit application by its OS/ABI byte, and a
-      # fixup phase that "helpfully" rewrote the ELF would produce something
-      # that builds, installs and never boots.
-      - name: The image is a Hermit image
-        run: |
-          osabi=$(od -An -t x1 -j 7 -N 1 result-hermit/bin/kmsrsos-hermit | tr -d ' ')
-          test "$osabi" = "ff" || {
-            echo "OS/ABI is 0x$osabi, expected 0xff (ELFOSABI_STANDALONE)" >&2
+          set -euo pipefail
+          kernel=$(nix build .#linux-kernel --no-link --print-out-paths)/bzImage
+          test "$(head -c 2 "$kernel")" = "MZ" || {
+            echo "no MZ at offset 0: CONFIG_EFI_STUB is not doing its job" >&2
+            exit 1
+          }
+          test "$(dd if="$kernel" bs=1 skip=514 count=4 status=none)" = "HdrS" || {
+            echo "no HdrS at 0x202: this is not a Linux boot image" >&2
             exit 1
           }
 

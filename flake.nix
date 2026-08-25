@@ -1031,73 +1031,6 @@
 
 
 
-          # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
-          #
-          # The second bare-metal target: the same `kmsrs-server` binary as pid
-          # 1 on a `tinyconfig`-derived kernel, with no other userland. It exists
-          # because the Hermit image does not boot into service on a stock
-          # Proxmox VM — `OS-004` (#255) needs `qm set --args`, which has no GUI
-          # field — and this one does, from BIOS or UEFI, unmodified.
-          #
-          # Which of the two ships is `OS-018` (#334), and is not decided here.
-          linuxIso = (linuxFor system).iso;
-          linux-kernel = (linuxFor system).kernel;
-
-          # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
-          #
-          # An output rather than `nix build -f os/linux/config.nix`, which is
-          # what this used to be and which reads `<nixpkgs>` from the caller's
-          # channel. That silently regenerates the file against *a different
-          # kernel version* than the one the flake pins and the ISO is built
-          # from — observed on `OS-026` (#343), where it produced a 6.12.91
-          # config for a tree that ships 6.12.94, as a 54-line deletion that
-          # looked like a pare-back. The file is the statement of what is in
-          # this machine's TCB; generating it from an unpinned input is exactly
-          # the `OS-006` (#257) mistake in a new place.
-          linux-config = import ./os/linux/config.nix { inherit pkgs; };
-
-          # `nix build .#linux-deltas && cat result/report` — what each driver
-          # in the `OS-025` (#342) matrix costs, measured on the built bzImage
-          # with the initramfs held constant. That last part is the whole
-          # point: the initramfs is *inside* the bzImage, so measuring a 40 kB
-          # driver against the shipped kernel compares two numbers that differ
-          # for two reasons.
-          #
-          # Each variant is the checked-in allowlist plus the symbols named,
-          # run through the same `olddefconfig` the real build uses — so a
-          # symbol that drags a subsystem in is measured with the subsystem,
-          # which is the mistake `OS-026` (#343) found the hard way.
-          linux-deltas = import ./os/linux/delta.nix {
-            inherit pkgs;
-            variants = {
-              # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
-              # for a modern Linux guest on ESXi and Workstation.
-              vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
-              # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
-              rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
-              # VirtualBox's older adapter choices.
-              pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
-              # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
-              tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
-              # EC2 Nitro (`OS-027`, #344).
-              ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
-              # Hyper-V and Azure. The one item `OS-025` calls "genuinely
-              # large", and the reason this output exists rather than an
-              # estimate in a comment.
-              hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
-              # Xen PV networking on XCP-ng and Citrix Hypervisor.
-              xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
-              # `OS-023` (#339) asks in the other direction: what does something
-              # already in the allowlist cost to *keep*? A negative delta is the
-              # saving available if it were removed.
-              no-smp = { disable = [ "SMP" ]; };
-              no-elf-core = { disable = [ "ELF_CORE" ]; };
-              no-seccomp = { disable = [ "SECCOMP" ]; };
-              no-ipv6 = { disable = [ "IPV6" ]; };
-              no-packet = { disable = [ "PACKET" ]; };
-            };
-          };
-
           # --- OS packages (PKG-009, #246) ---
           #
           # `.deb` and `.rpm` as artifacts, not a repository. A repository is
@@ -1194,6 +1127,83 @@
               mkdir -p "$out"
               find rpms -name '*.rpm' -exec cp {} "$out/" ';'
             '';
+          };
+        }
+        # The bare-metal target is x86_64 and nothing else, and until now that
+        # was true of the artifacts without being true of the *attribute set*.
+        # `nix flake check` on aarch64 evaluates every output, reached
+        # `pkgs.syslinux` — which nixpkgs marks as unavailable off x86 — and
+        # failed there rather than anywhere informative (`OS-017`, #333).
+        #
+        # An `optionalAttrs` rather than a `meta.platforms`: the point is that
+        # the attribute should not *exist* on a system that cannot build it, so
+        # `nix flake show` on aarch64 says so instead of erroring.
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
+          #
+          # The second bare-metal target: the same `kmsrs-server` binary as pid
+          # 1 on a `tinyconfig`-derived kernel, with no other userland. It exists
+          # because the Hermit image does not boot into service on a stock
+          # Proxmox VM — `OS-004` (#255) needs `qm set --args`, which has no GUI
+          # field — and this one does, from BIOS or UEFI, unmodified.
+          #
+          # Which of the two ships is `OS-018` (#334), and is not decided here.
+          linuxIso = (linuxFor system).iso;
+          linux-kernel = (linuxFor system).kernel;
+
+          # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
+          #
+          # An output rather than `nix build -f os/linux/config.nix`, which is
+          # what this used to be and which reads `<nixpkgs>` from the caller's
+          # channel. That silently regenerates the file against *a different
+          # kernel version* than the one the flake pins and the ISO is built
+          # from — observed on `OS-026` (#343), where it produced a 6.12.91
+          # config for a tree that ships 6.12.94, as a 54-line deletion that
+          # looked like a pare-back. The file is the statement of what is in
+          # this machine's TCB; generating it from an unpinned input is exactly
+          # the `OS-006` (#257) mistake in a new place.
+          linux-config = import ./os/linux/config.nix { inherit pkgs; };
+
+          # `nix build .#linux-deltas && cat result/report` — what each driver
+          # in the `OS-025` (#342) matrix costs, measured on the built bzImage
+          # with the initramfs held constant. That last part is the whole
+          # point: the initramfs is *inside* the bzImage, so measuring a 40 kB
+          # driver against the shipped kernel compares two numbers that differ
+          # for two reasons.
+          #
+          # Each variant is the checked-in allowlist plus the symbols named,
+          # run through the same `olddefconfig` the real build uses — so a
+          # symbol that drags a subsystem in is measured with the subsystem,
+          # which is the mistake `OS-026` (#343) found the hard way.
+          linux-deltas = import ./os/linux/delta.nix {
+            inherit pkgs;
+            variants = {
+              # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
+              # for a modern Linux guest on ESXi and Workstation.
+              vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
+              # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
+              rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
+              # VirtualBox's older adapter choices.
+              pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
+              # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
+              tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
+              # EC2 Nitro (`OS-027`, #344).
+              ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
+              # Hyper-V and Azure. The one item `OS-025` calls "genuinely
+              # large", and the reason this output exists rather than an
+              # estimate in a comment.
+              hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
+              # Xen PV networking on XCP-ng and Citrix Hypervisor.
+              xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
+              # `OS-023` (#339) asks in the other direction: what does something
+              # already in the allowlist cost to *keep*? A negative delta is the
+              # saving available if it were removed.
+              no-smp = { disable = [ "SMP" ]; };
+              no-elf-core = { disable = [ "ELF_CORE" ]; };
+              no-seccomp = { disable = [ "SECCOMP" ]; };
+              no-ipv6 = { disable = [ "IPV6" ]; };
+              no-packet = { disable = [ "PACKET" ]; };
+            };
           };
         });
 
@@ -1299,18 +1309,6 @@
 
 
 
-          # `OS-017` (#333): boots and serves on the topology Hermit cannot,
-          # from BIOS and UEFI, with no `--args`.
-          linux-boot = linuxBootCheckFor system;
-
-          # `OS-025` (#342): one boot per supported NIC model, each asserting
-          # that the machine *serves* — plus the machine with no NIC at all,
-          # which must say so rather than reporting `listening` and going quiet.
-          linux-nics = nicBootCheckFor system;
-
-          # `OS-029` (#347): the kernel is in the ISO exactly twice, counted.
-          linux-iso-layout = isoLayoutCheckFor system;
-
 
 
           feature-powerset = craneLib.mkCargoDerivation (commonArgs // {
@@ -1322,6 +1320,27 @@
             nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ])
               ++ [ (pkgsFor system).cargo-hack ];
           });
+        }
+        # x86_64 only, for the same reason the packages above are: these boot a
+        # kernel built with `pkgs.syslinux`, which nixpkgs marks unavailable off
+        # x86. Before this, `nix flake check` on aarch64 failed evaluating them
+        # rather than skipping them (`OS-017`, #333).
+        #
+        # `nixpkgs.lib` rather than `pkgs.lib`: `pkgs` is bound inside this
+        # check set's `let`, and this splice is outside it.
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # `OS-017` (#333): boots and serves on the topology Hermit cannot,
+          # from BIOS and UEFI, with no `--args`.
+          linux-boot = linuxBootCheckFor system;
+
+          # `OS-025` (#342): one boot per supported NIC model, each asserting
+          # that the machine *serves* — plus the machine with no NIC at all,
+          # which must say so rather than reporting `listening` and going quiet.
+          linux-nics = nicBootCheckFor system;
+
+          # `OS-029` (#347): the kernel is in the ISO exactly twice, counted,
+          # and it boots as a raw disk on both firmwares.
+          linux-iso-layout = isoLayoutCheckFor system;
         });
 
       devShells = eachSystem (system:

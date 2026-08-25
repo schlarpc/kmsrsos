@@ -313,13 +313,18 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         ".#rpm",
         ".#container",
         ".#windows",
-        // The bootable unikernel artifacts (OS-002, #253). x86_64 only, and
-        // built on the leg that is already x86_64 rather than in a job of its
-        // own. The ISO is the one a Proxmox admin can deploy from the web UI,
-        // so a release that shipped only the disk image would be a release
-        // most people cannot use.
-        ".#osImage",
-        ".#osIso",
+        // The bootable bare-metal ISO (`OS-017`, #333). x86_64 only — the
+        // flake gates it by system, because `pkgs.syslinux` is unavailable
+        // elsewhere — and built on the leg that is already x86_64 rather than
+        // in a job of its own.
+        //
+        // This said `.#osImage` and `.#osIso` until `OS-029` (#347). Those
+        // were the Hermit artifacts, removed by `OS-018` (#334); the workflow
+        // still named them too, so this assertion passed while describing a
+        // release that could not have run. Two stale statements agreeing with
+        // each other is the failure mode a test like this is supposed to
+        // prevent, so it is worth the comment.
+        ".#linuxIso",
     ] {
         assert!(
             workflow.contains(output),

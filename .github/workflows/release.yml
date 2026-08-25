@@ -66,20 +66,22 @@ jobs:
           cp result-rpm/*.rpm out/
           cp result-container "out/kmsrsos-container-${{ matrix.name }}.tar.gz"
 
-          # The Hermit image is x86_64 wherever it is built: the unikernel
-          # targets x86_64-unknown-hermit and the aarch64 leg would produce the
-          # same bytes under a different name (OS-002, #253). Gzipped because
-          # the image is a 128 MiB disk that is mostly zeroes, and `-n` because
-          # a gzip header carries a timestamp (SEC-010, #202).
+          # The bare-metal ISO is x86_64 and nothing else: `pkgs.syslinux` is
+          # unavailable elsewhere, and the flake gates the output by system
+          # accordingly (`OS-017`, #333).
+          #
+          # This block used to build `.#osImage` and `.#osIso` and ship
+          # `kmsrsos-hermit.img`. `OS-018` (#334) removed that target and left
+          # this behind, so a release would have failed on a missing flake
+          # attribute — and `the_release_workflow_builds_what_the_gate_checks`
+          # did not catch it, because it was asserting the same stale names.
+          #
+          # Shipped uncompressed. It is 8.3 MiB since `OS-029` (#347), and a
+          # `.iso.gz` is one more step between an operator and a running host —
+          # the whole deployment procedure is "upload it, attach it, boot it".
           if [ "${{ matrix.name }}" = "x86_64-linux" ]; then
-            nix build .#osImage --print-build-logs --out-link result-osimage
-            nix build .#osIso   --print-build-logs --out-link result-osiso
-            gzip -9 -n -c result-osimage/kmsrsos-hermit.img \
-              > out/kmsrsos-hermit-x86_64.img.gz
-            # The ISO is uploaded to a hypervisor as-is, so it ships
-            # uncompressed — it is 17 MiB, and a `.iso.gz` is one more step
-            # between an operator and a running host.
-            cp result-osiso/kmsrsos-hermit.iso out/kmsrsos-hermit-x86_64.iso
+            nix build .#linuxIso --print-build-logs --out-link result-iso
+            cp result-iso out/kmsrsos-x86_64.iso
           fi
 
       # `SEC-010` (#202): the binaries are static, so "what is in this" is a
