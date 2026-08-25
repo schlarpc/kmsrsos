@@ -122,6 +122,10 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 - `nix build` — build the package
 - `nix build .#windows` — cross-compile for Windows (x86_64-pc-windows-msvc)
 - `nix build .#linuxIso` — the bare-metal ISO; `.#linux-kernel` for the bzImage alone
+- `nix build .#linux-config && cp result os/linux/kernel.config` — regenerate the kernel allowlist.
+  Through the flake, never `nix build -f os/linux/config.nix`: that reads `<nixpkgs>` from the
+  caller's channel and silently regenerates the TCB statement against a different kernel version
+  (`OS-026`, #343)
 - `nix flake check` — run all checks (build, clippy, fmt, test, coverage)
 - `nix flake update` — update flake inputs
 

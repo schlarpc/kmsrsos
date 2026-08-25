@@ -43,6 +43,7 @@
 //! if the word `unsafe` appears anywhere in this workspace.
 
 mod console;
+mod power;
 
 use rustix::fs::Mode;
 use rustix::mount::MountFlags;
@@ -162,7 +163,37 @@ fn main() -> ExitCode {
 
     reap_orphans_forever();
 
-    kmsrs_server::entry::serve()
+    // `OS-026` (#343): `qm shutdown` is an ACPI event that reaches an input
+    // device nobody was reading. Said out loud either way — a host that cannot
+    // be stopped politely still activates, but an operator pressing Shutdown
+    // and watching nothing happen deserves to find the reason in the log
+    // rather than in an issue tracker.
+    println_stderr(&match power::watch_power_button() {
+        Ok(nodes) => format!(
+            "{{\"level\":\"info\",\"event\":\"power\",\"detail\":\"watching {}\"}}",
+            nodes.join(" ")
+        ),
+        Err(reason) => format!(
+            "{{\"level\":\"warn\",\"event\":\"power\",\"detail\":\"the power \
+             button is not being watched, so a hypervisor's shutdown request \
+             will do nothing: {reason}\"}}"
+        ),
+    });
+
+    let outcome = kmsrs_server::entry::serve();
+
+    // `OS-026` (#343): the drain has finished, so stop the machine rather than
+    // returning. Pid 1 returning is `Attempted to kill init!` — the machine
+    // does stop, because the command line says `panic=-1`, but what an operator
+    // sees after pressing Shutdown is a kernel oops, which is not what a clean
+    // stop looks like.
+    if let Some(error) = power::power_off("serve returned") {
+        println_stderr(&format!(
+            "{{\"level\":\"warn\",\"event\":\"power\",\"detail\":\"reboot(2): \
+             {error}; falling back to exiting, which panics the kernel\"}}"
+        ));
+    }
+    outcome
 }
 
 /// One line to stderr, which on this target is `/dev/console`.

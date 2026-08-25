@@ -5,7 +5,13 @@
 # it is the statement of what is in this machine's TCB, and a statement nobody
 # can read in a diff is not one. Regenerate with:
 #
-#     nix build -f os/linux/config.nix && cp result os/linux/kernel.config
+#     nix build .#linux-config && cp result os/linux/kernel.config
+#
+# Through the flake, not `nix build -f os/linux/config.nix`, which is what this
+# said until `OS-026` (#343). That form reads `<nixpkgs>` from whoever runs it
+# and regenerates this file against a *different kernel version* than the flake
+# pins — observed producing a 6.12.91 config for a tree that ships 6.12.94, as a
+# 54-line deletion that looked like a legitimate pare-back.
 #
 # The base is `make tinyconfig`, which is `allnoconfig` plus a few size tweaks.
 # So the default for every subsystem is *off*, and each line below is a
@@ -80,6 +86,31 @@ let
     "PROC_FS" "PROC_SYSCTL" "SYSFS" "TMPFS" "SHMEM"
     "DEVTMPFS" "DEVTMPFS_MOUNT"
 
+    # --- the power button ---
+    # `OS-026` (#343). `qm shutdown` — and every other hypervisor's polite stop
+    # — is an ACPI power-button event, which the kernel delivers as an *input*
+    # event and nothing else. Nothing was reading it, so the press was
+    # discarded, an operator watched the web UI's Shutdown button do nothing,
+    # and the VM eventually got `qm stop`: the hypervisor pulling the power on a
+    # host with connections in flight.
+    #
+    # Two of these three were already on and neither was in this list.
+    # `olddefconfig` had answered `y` to CONFIG_INPUT and CONFIG_ACPI_BUTTON as
+    # dependencies of the console, and to CONFIG_INPUT_KEYBOARD,
+    # CONFIG_KEYBOARD_ATKBD, CONFIG_INPUT_MOUSE, the whole of CONFIG_MOUSE_PS2
+    # and CONFIG_SERIO along with them. So the machine has had an AT keyboard
+    # driver and PS/2 mouse support in its TCB since `OS-017` (#333), and the
+    # only thing missing was the userland interface that would let this program
+    # read the button.
+    #
+    # That is the `OS-006` (#257) lesson again: this list is what was *asked
+    # for*, and the built config is what was *got*. Naming all three here — and
+    # naming everything they drag in on the disable side — makes this change a
+    # net removal of about fifty lines from the built config rather than an
+    # addition. Measured on the built bzImage with the initramfs held constant:
+    # 2 405 376 -> 2 368 512 bytes, so handling the power button *saves* 36 KiB.
+    "INPUT" "INPUT_EVDEV" "ACPI_BUTTON"
+
     "RANDOM_TRUST_CPU" "RANDOM_TRUST_BOOTLOADER"
   ];
 
@@ -91,7 +122,15 @@ let
   disable = [
     "BLOCK" "MODULES" "NETFILTER" "BPF_SYSCALL" "FTRACE" "KPROBES"
     "SUSPEND" "HIBERNATION" "ACPI_AC" "ACPI_BATTERY"
-    "SOUND" "USB_SUPPORT" "WLAN" "BT" "INPUT_MOUSEDEV"
+    "SOUND" "USB_SUPPORT" "WLAN" "BT"
+    # `olddefconfig` answers `y` to most of what hangs off CONFIG_INPUT — the AT
+    # keyboard, PS/2 mice, the SERIO bus they sit on — and it had already done
+    # so, unasked, since `OS-017` (#333). The power button needs the event layer
+    # and nothing else, so every one of them is named here. Asserted rather than
+    # assumed, per the `OS-006` (#257) lesson (`OS-026`, #343).
+    "INPUT_MOUSEDEV" "INPUT_JOYDEV" "INPUT_KEYBOARD" "INPUT_MOUSE"
+    "INPUT_JOYSTICK" "INPUT_TABLET" "INPUT_TOUCHSCREEN" "INPUT_MISC"
+    "INPUT_FF_MEMLESS" "INPUT_LEDS" "SERIO"
     "NAMESPACES" "CGROUPS" "SECURITY" "KVM" "VFIO"
     "SCSI" "ATA" "NVME_CORE" "MD" "BLK_DEV"
     "EXT4_FS" "OVERLAY_FS" "FUSE_FS" "ISO9660_FS" "VFAT_FS" "NFS_FS"

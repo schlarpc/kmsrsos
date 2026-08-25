@@ -84,11 +84,18 @@ socket2 = { version = "=0.6.5" }
 # `OS-021` (#337). Safe bindings to the syscalls pid 1 needs — `mount`,
 # `waitpid`, `mkdir`. Every one of them would otherwise be an `unsafe` libc
 # call, and axiom A1 is `forbid(unsafe_code)` with no exception since #334.
-# Features are named rather than defaulted: this needs two of them.
+# Features are named rather than defaulted, and each is one pid-1 duty.
 rustix = { version = "=1.1.4", default-features = false, features = [
-  # `pipe` and `stdio` are `OS-028` (#345): pid 1 replaces its own fds 1 and 2
-  # with a pipe it pumps out to every registered console.
-  "std", "fs", "mount", "process", "pipe", "stdio",
+  # `mount` and `process`: mount(2) and waitpid(2) (`OS-021`, #337).
+  # `fs`: mkdir(2), and open(2) for the /proc and /sys reads below. The
+  #   whole-workspace ban on opening anything does not apply to this crate and
+  #   a narrower rule does — see `pid1_opens_nothing_but_pseudo_filesystems`.
+  # `pipe`, `stdio`: pid 1 replaces its own fds 1 and 2 with a pipe it pumps
+  #   out to every registered console (`OS-028`, #345).
+  # `system`: reboot(2), so a hypervisor's shutdown request ends in an ACPI
+  #   power-off rather than in pid 1 returning, which is a kernel panic
+  #   (`OS-026`, #343).
+  "std", "fs", "mount", "process", "pipe", "stdio", "system",
 ] }
 
 tokio = { version = "=1.53.1", default-features = false, features = [

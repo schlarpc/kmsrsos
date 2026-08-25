@@ -434,7 +434,10 @@
         in
         pkgs.runCommand "linux-boot"
           {
-            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            # `socat` is `OS-026` (#343): the QEMU monitor is how a
+            # `system_powerdown` — the same ACPI event `qm shutdown` sends — is
+            # delivered to the guest.
+            nativeBuildInputs = [ pkgs.qemu_kvm pkgs.socat ];
             meta.timeout = 900;
           } ''
           set -euo pipefail
@@ -447,6 +450,7 @@
           boot() {
             local firmware="$1"
             local serial="$PWD/$firmware.log"
+            local monitor="$PWD/$firmware.mon"
             local fw=""
 
             if [ "$firmware" = uefi ]; then
@@ -456,23 +460,25 @@
               fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
             fi
 
+            # `-no-shutdown` is deliberately absent: this check's whole point is
+            # that the guest powers itself off and qemu exits on its own.
             qemu-system-x86_64 \
               -machine q35 -cpu qemu64 \
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$serial" \
+              -monitor "unix:$monitor,server,nowait" \
               $fw \
               -drive file=${linux.iso},media=cdrom,readonly=on \
               ${proxmoxTopology} &
             qemu=$!
 
             local attempt
+            local serving=0
             for attempt in $(seq 1 120); do
               if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
                    127.0.0.1:1688; then
-                kill $qemu 2>/dev/null || true
-                wait $qemu 2>/dev/null || true
-                cp "$serial" $out/$firmware.log
-                return 0
+                serving=1
+                break
               fi
               if ! kill -0 $qemu 2>/dev/null; then
                 echo "qemu exited before the guest answered ($firmware)" >&2
@@ -482,10 +488,43 @@
               sleep 1
             done
 
-            echo "the guest never answered on $firmware" >&2
-            cat "$serial" >&2 || true
-            kill $qemu 2>/dev/null || true
-            return 1
+            if [ "$serving" -ne 1 ]; then
+              echo "the guest never answered on $firmware" >&2
+              cat "$serial" >&2 || true
+              kill $qemu 2>/dev/null || true
+              return 1
+            fi
+
+            # `OS-026` (#343): the shutdown half. `system_powerdown` is exactly
+            # what `qm shutdown` and the Proxmox web UI's Shutdown button send —
+            # an ACPI power-button event — and until this issue the guest
+            # discarded it, so only `qm stop` would stop the VM.
+            #
+            # Asserted by *letting qemu exit on its own*. Nothing is killed
+            # below unless the guest failed to stop, so a regression here is a
+            # timeout rather than a passing check that killed the evidence.
+            echo system_powerdown | socat - "UNIX-CONNECT:$monitor" >/dev/null
+
+            local stopped=0
+            for attempt in $(seq 1 60); do
+              if ! kill -0 $qemu 2>/dev/null; then
+                stopped=1
+                break
+              fi
+              sleep 1
+            done
+            wait $qemu 2>/dev/null || true
+            cp "$serial" $out/$firmware.log
+
+            if [ "$stopped" -ne 1 ]; then
+              echo "the guest ignored system_powerdown on $firmware, so \
+          'qm shutdown' does nothing and only 'qm stop' would stop it \
+          (OS-026, #343)" >&2
+              cat "$serial" >&2 || true
+              kill -9 $qemu 2>/dev/null || true
+              return 1
+            fi
+            return 0
           }
 
           boot bios
@@ -525,6 +564,34 @@
               echo "pid 1 found no framebuffer console on $f, so this check is \
           not exercising the two-console case OS-028 (#345) is about" >&2
               cat $out/$f.log >&2; exit 1; }
+
+            # `OS-026` (#343). The guest stopping is asserted above, by qemu
+            # having exited without being killed. These four lines are the
+            # assertion that it stopped *the right way* — a machine that
+            # panicked, or that was cut off mid-request, would also stop.
+            grep -q '"event":"power".*watching event' $out/$f.log || {
+              echo "pid 1 found no power button on $f: the ACPI event has \
+          nowhere to go and 'qm shutdown' is silently a no-op (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            grep -q '"event":"power".*acpi power button: draining' $out/$f.log || {
+              echo "the button was watched but the press did not reach the \
+          drain on $f (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # The drain is the point: `qm stop` also stops a VM, and does it by
+            # dropping every connection in flight.
+            grep -q '"event":"stopped"' $out/$f.log || {
+              echo "the host stopped without draining on $f (NET-007, #157; \
+          OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1; }
+            # An ACPI power-off, not `Attempted to kill init!`. Both stop the
+            # machine; only one of them looks like a clean stop to the operator
+            # who pressed the button.
+            if grep -qi 'Attempted to kill init' $out/$f.log; then
+              echo "pid 1 returned instead of powering the machine off on $f, \
+          so the operator sees a kernel panic after pressing Shutdown \
+          (OS-026, #343)" >&2
+              cat $out/$f.log >&2; exit 1
+            fi
 
             if grep -qi 'unable to open an initial console' $out/$f.log; then
               echo "init had no stdio on $f: the /dev/console node is missing \
@@ -635,6 +702,19 @@
           # Which of the two ships is `OS-018` (#334), and is not decided here.
           linuxIso = (linuxFor system).iso;
           linux-kernel = (linuxFor system).kernel;
+
+          # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
+          #
+          # An output rather than `nix build -f os/linux/config.nix`, which is
+          # what this used to be and which reads `<nixpkgs>` from the caller's
+          # channel. That silently regenerates the file against *a different
+          # kernel version* than the one the flake pins and the ISO is built
+          # from — observed on `OS-026` (#343), where it produced a 6.12.91
+          # config for a tree that ships 6.12.94, as a 54-line deletion that
+          # looked like a pare-back. The file is the statement of what is in
+          # this machine's TCB; generating it from an unpinned input is exactly
+          # the `OS-006` (#257) mistake in a new place.
+          linux-config = import ./os/linux/config.nix { inherit pkgs; };
 
           # --- OS packages (PKG-009, #246) ---
           #

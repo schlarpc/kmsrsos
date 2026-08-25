@@ -446,15 +446,44 @@ The userland is one program, and several things a normal userland provides are n
 | Clock discipline (NTP) | `OS-020` (#336) — kvmclock only, today |
 | Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
 
-**`qm shutdown` does nothing; use `qm stop`.** The button sends an ACPI event, which the kernel turns
-into an input event on `/dev/input/eventN` that `acpid` would normally consume. There is no userland
-here to consume it. Fixing that means adding the input subsystem to the kernel's allowlist as well as
-code, so it is `OS-026` (#343) rather than something done quietly.
-
 What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
 orphaned children. It reports what it mounted on the console at boot —
 `{"event":"pid1","detail":"mounted /dev /proc /sys"}` — which is the line to look for if a guest
 misbehaves.
+
+### Stopping it (`OS-026`, #343)
+
+**`qm shutdown` works, and drains.** So does the Shutdown button in the web UI, `virsh shutdown`, and
+anything else that sends an ACPI power-button event. What happens is:
+
+```
+{"level":"info","event":"power","detail":"acpi power button: draining"}
+{"level":"info","event":"stopped","detail":"kmsrsos"}
+{"level":"info","event":"power","detail":"serve returned: powering off"}
+```
+
+In-flight connections finish, the listeners close, and the machine powers itself off — the same drain
+`SIGTERM` gets on the Linux and Windows builds (`NET-007`, #157), reached through the same code
+rather than a parallel one.
+
+Three details worth knowing:
+
+- **The button is found by capability, not by name.** Pid 1 looks through `/sys/class/input` for a
+  device claiming `KEY_POWER` rather than assuming `event0`, because which node it lands on depends
+  on what else the hypervisor attached — Proxmox adds a USB tablet by default on some machine types.
+  The console says which node it found: `{"event":"power","detail":"watching event0"}`.
+- **A press during the first fraction of a second is ignored.** The kernel discards signals that pid 1
+  has no handler for, and the handler is installed as the host starts serving. Press again.
+- **`qm stop` is still there and still drops everything in flight.** It is the hypervisor pulling the
+  power; nothing in the guest can make that graceful.
+
+This needed the kernel's evdev interface, which was the one part of the input subsystem that was
+missing — `CONFIG_INPUT` and `CONFIG_ACPI_BUTTON` were already on, having arrived as dependencies of
+the console rather than as a decision. Naming all three in `os/linux/config.nix` and naming what they
+drag in made the change a net *removal* of about fifty lines from the built config: the AT keyboard
+driver, PS/2 mouse support and the SERIO bus had been in this machine's TCB since `OS-017` (#333)
+without anybody asking for them. Measured on the built `bzImage` with the initramfs held constant,
+**2,405,376 → 2,368,512 bytes** — handling the power button makes the kernel 36 KiB smaller.
 
 ## What is not in the artifact
 
