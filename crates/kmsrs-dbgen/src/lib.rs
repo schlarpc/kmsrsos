@@ -29,6 +29,7 @@ pub mod error;
 pub mod extract;
 pub mod fetch;
 pub mod guid;
+pub mod gvlk;
 pub mod hostbuild;
 pub mod lcid;
 pub mod model;
@@ -116,6 +117,20 @@ pub const SOURCES: &[ArtifactSource] = &[
         description: "[MS-LCID] Windows Language Code Identifier reference",
         origin: Origin::Specification {
             url: "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/a9eac961-e77d-41a6-90a5-ce1a8b0cdb9c",
+        },
+    },
+    ArtifactSource {
+        id: "ms-gvlk-windows",
+        description: "Microsoft Learn: KMS client setup keys for Windows and Windows Server",
+        origin: Origin::Specification {
+            url: "https://learn.microsoft.com/en-us/windows-server/get-started/kms-client-activation-keys",
+        },
+    },
+    ArtifactSource {
+        id: "ms-gvlk-office",
+        description: "Microsoft Learn: GVLKs for Office LTSC, Project and Visio",
+        origin: Origin::Specification {
+            url: "https://learn.microsoft.com/en-us/office/volume-license-activation/gvlks",
         },
     },
     ArtifactSource {

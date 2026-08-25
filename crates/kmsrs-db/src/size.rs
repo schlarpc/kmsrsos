@@ -25,14 +25,15 @@
 //! # No feature gate
 //!
 //! `DB-018` allows for making the GVLK and instructions payload a separately
-//! gated section if the data does not fit. It does, by two orders of magnitude,
-//! so there is nothing to gate — and a feature that shrinks the database is a
+//! gated section if the data does not fit. It does — the whole key table added
+//! by `DB-013` (#137) is a few kilobytes of strings — so there is nothing to
+//! gate — and a feature that shrinks the database is a
 //! feature that changes which products activate, which is the last thing that
 //! should be behind a build flag nobody differentially tests (declined item
 //! D37).
 
 use crate::tables::{
-    APPLICATIONS, COUNTED_IDS, CSVLKS, EPID_HOST_BUILDS, HOST_BUILDS, LCIDS, PRODUCTS,
+    APPLICATIONS, COUNTED_IDS, CSVLKS, EPID_HOST_BUILDS, GVLKS, HOST_BUILDS, LCIDS, PRODUCTS,
 };
 
 /// Bytes the application table occupies.
@@ -56,6 +57,13 @@ pub const EPID_HOST_BUILDS_BYTES: usize = core::mem::size_of_val(&EPID_HOST_BUIL
 /// Bytes the locale table occupies.
 pub const LCIDS_BYTES: usize = core::mem::size_of_val(&LCIDS);
 
+/// Bytes the client-setup-key table occupies (`DB-013`, #137).
+///
+/// Almost all of this table is string contents, which this figure does not
+/// reach — see the module documentation. The array itself is three pointers and
+/// three lengths per row.
+pub const GVLKS_BYTES: usize = core::mem::size_of_val(&GVLKS);
+
 /// Every table, added up.
 ///
 /// A floor: string *contents* are elsewhere in `.rodata` and a `const` cannot
@@ -66,7 +74,8 @@ pub const TOTAL_BYTES: usize = APPLICATIONS_BYTES
     .saturating_add(COUNTED_IDS_BYTES)
     .saturating_add(HOST_BUILDS_BYTES)
     .saturating_add(EPID_HOST_BUILDS_BYTES)
-    .saturating_add(LCIDS_BYTES);
+    .saturating_add(LCIDS_BYTES)
+    .saturating_add(GVLKS_BYTES);
 
 /// The ceiling the tables are built to fit inside (`DB-018`, #142).
 ///

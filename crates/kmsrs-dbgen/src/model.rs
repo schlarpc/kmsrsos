@@ -137,6 +137,30 @@ pub struct HostBuild {
     pub description: String,
 }
 
+/// A KMS client setup key, as Microsoft publishes it (`DB-013`, #137).
+///
+/// Deliberately **not** joined to [`Product`]. Microsoft's key tables identify
+/// an edition by a human-readable name and `pkeyconfig` identifies it by
+/// `EditionId`; there is no identifier in common, so a join would be a name
+/// mapping somebody authored — and a wrong row would pair a real edition with a
+/// real key belonging to a different one. See [`crate::gvlk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gvlk {
+    /// The release the key belongs to, from the tab or heading above the table
+    /// it was in — `Windows Server 2016`, `GVLKs for Office LTSC 2024`.
+    ///
+    /// Load-bearing, not decoration: an edition name is **not unique** on the
+    /// page. Three rows read `Windows Server Datacenter` with three different
+    /// keys, and this is the only thing that tells them apart.
+    pub release: String,
+    /// The edition, as the published table names it.
+    pub edition: String,
+    /// The 25-character key, `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`.
+    pub key: String,
+    /// Which [`Source`] this came from.
+    pub source: String,
+}
+
 /// A locale identifier a generated ePID may carry (`ID-008`, #113).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lcid {
@@ -163,6 +187,8 @@ pub struct Database {
     pub host_builds: Vec<HostBuild>,
     /// Locale identifiers an ePID may carry.
     pub lcids: Vec<Lcid>,
+    /// KMS client setup keys, for the instructions page (`DB-013`, #137).
+    pub gvlks: Vec<Gvlk>,
 }
 
 impl Database {
@@ -183,6 +209,13 @@ impl Database {
         });
         self.host_builds.sort_by_key(|entry| entry.build);
         self.lcids.sort_by_key(|entry| entry.value);
+        self.gvlks.sort_by(|a, b| {
+            a.release
+                .cmp(&b.release)
+                .then_with(|| a.edition.cmp(&b.edition))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        self.gvlks.dedup();
         for product in &mut self.products {
             // A Windows image carries the same pkeyconfig document in three
             // places — System32, SysWOW64 and a WinSxS component directory — so

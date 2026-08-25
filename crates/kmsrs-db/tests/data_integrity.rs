@@ -65,7 +65,7 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// Measured when written, from the extraction committed at the time: 273
 /// products, 14 host keys, 27 counted IDs, 2 applications, 252 locales, 23
-/// builds of which 8 are drawable.
+/// builds of which 8 are drawable, and 151 client setup keys.
 mod floors {
     pub(crate) const PRODUCTS: usize = 200;
     pub(crate) const CSVLKS: usize = 12;
@@ -76,6 +76,11 @@ mod floors {
     pub(crate) const LCIDS: usize = 200;
     /// And a build, likewise.
     pub(crate) const EPID_HOST_BUILDS: usize = 6;
+    /// Client setup keys (`DB-013`, #137). Nothing on the wire depends on
+    /// these, but a scrape that half-worked would ship an instructions page
+    /// missing most editions — and unlike a layout change that yields *no*
+    /// rows, that failure is silent at extraction time.
+    pub(crate) const GVLKS: usize = 100;
 }
 
 #[test]
@@ -104,6 +109,14 @@ fn no_table_is_a_fraction_of_itself() {
         "{} applications, below the floor of {}",
         APPLICATIONS.len(),
         floors::APPLICATIONS
+    );
+    assert!(
+        kmsrs_db::GVLKS.len() >= floors::GVLKS,
+        "{} client setup keys, below the floor of {}. A page layout change that \
+         yields no rows fails the extraction loudly; one that yields a third of \
+         them does not (`DB-013`, #137)",
+        kmsrs_db::GVLKS.len(),
+        floors::GVLKS
     );
     assert!(
         LCIDS.len() >= floors::LCIDS,
@@ -382,6 +395,9 @@ fn the_whole_shipped_payload_fits_the_image_budget() {
     for lcid in kmsrs_db::LCIDS {
         strings += lcid.language.len() + lcid.tag.len() + lcid.location.len();
     }
+    for gvlk in kmsrs_db::GVLKS {
+        strings += gvlk.release.len() + gvlk.edition.len() + gvlk.key.len();
+    }
 
     let arrays = kmsrs_db::TABLE_BYTES;
     let total = arrays + strings;
@@ -421,6 +437,180 @@ fn every_host_build_row_that_is_not_drawable_says_so() {
     );
 }
 
+/// The client setup keys (`DB-013`, #137; `DB-009`, #133; `DB-016`, #140;
+/// `DB-017`, #141).
+///
+/// None of this is on the wire — a KMS host is never sent a key — so these are
+/// assertions about what an operator is *told*, which is the one part of this
+/// program a person acts on by hand.
+mod client_keys {
+    use kmsrs_db::GVLKS;
+
+    /// Every key is well formed, and the table is sorted and unique.
+    ///
+    /// `build.rs` asserts the same things, which is deliberate rather than
+    /// redundant: that runs against `products.toml` and this runs against the
+    /// `static` that was generated from it, so a hand-edited generated file is
+    /// caught too (`DB-004`, #128).
+    #[test]
+    fn every_key_is_well_formed_and_the_table_is_ordered() {
+        assert!(!GVLKS.is_empty(), "no client setup keys shipped");
+
+        for entry in GVLKS {
+            assert!(
+                !entry.release.is_empty(),
+                "{entry:?} has no release, so two editions of the same name \
+                 cannot be told apart"
+            );
+            assert!(!entry.edition.is_empty(), "{entry:?} has no edition");
+
+            let groups: Vec<&str> = entry.key.split('-').collect();
+            assert_eq!(groups.len(), 5, "{entry:?} is not a five-group key");
+            for group in groups {
+                assert_eq!(group.len(), 5, "{entry:?} has a group that is not 5 long");
+                assert!(
+                    group
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+                    "{entry:?} has a group that is not uppercase alphanumeric"
+                );
+            }
+        }
+
+        let mut previous: Option<(&str, &str)> = None;
+        for entry in GVLKS {
+            let current = (entry.release, entry.edition);
+            if let Some(last) = previous {
+                assert!(
+                    last < current,
+                    "the table is not sorted and unique on (release, edition): \
+                     {last:?} is not before {current:?}"
+                );
+            }
+            previous = Some(current);
+        }
+    }
+
+    /// **`DB-009` (#133): the three confirmed corrections.**
+    ///
+    /// Not applied by hand — these are what Microsoft's own pages publish, and
+    /// this asserts the pipeline is still reading them. The values other
+    /// catalogues carry are checked for absence in the same breath, because
+    /// "the right key is present" and "the wrong key is gone" are different
+    /// claims and a table can satisfy the first while still shipping the
+    /// second somewhere else.
+    #[test]
+    fn the_confirmed_corrections_are_in_the_shipped_data() {
+        let present = |key: &str| GVLKS.iter().any(|entry| entry.key == key);
+
+        assert!(
+            present("XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB"),
+            "Office LTSC Professional Plus 2024's key is missing"
+        );
+        assert!(
+            present("D764K-2NDRG-47T6Q-P8T8W-YP6DF"),
+            "Windows Server 2025 Datacenter's key is missing"
+        );
+        assert!(
+            present("XGN3F-F394H-FD2MY-PP6FD-8MCRC"),
+            "Windows Server 2025 Datacenter: Azure Edition's key is missing"
+        );
+
+        // The values the audits found elsewhere. `CW94N-…` is a real key — it
+        // is PowerPoint LTSC 2024 — so it is checked against the *edition* it
+        // was wrongly attached to rather than for absence.
+        for (edition, wrong) in [
+            ("Office LTSC Professional Plus 2024", "CW94N"),
+            ("Windows Server 2025 Datacenter", "CNFDQ"),
+            ("Windows Server 2025 Datacenter: Azure Edition", "NQ8HH"),
+        ] {
+            for entry in GVLKS.iter().filter(|entry| entry.edition == edition) {
+                assert!(
+                    !entry.key.starts_with(wrong),
+                    "{edition} is back to the {wrong}-… key that `DB-009` (#133) \
+                     identified as wrong"
+                );
+            }
+        }
+    }
+
+    /// **`DB-017` (#141) and `DB-016` (#140): no placeholder rows.**
+    ///
+    /// py-kms ships 14 preview `KmsItem` records "most with placeholder GUIDs
+    /// of the form `0N000000-0000-0000-0000-000000000000`", and its
+    /// Organization fork's cleanup took the SKU count from 296 to 257 while
+    /// *raising* the number of usable keys — because most of what it removed
+    /// was entries with no key at all.
+    ///
+    /// Neither failure is representable here, and this is what says so. A row
+    /// only exists because a Microsoft page published it, so there is no way to
+    /// arrive at an edition with an empty key or a key with no edition: the
+    /// parser requires both halves before it emits anything.
+    #[test]
+    fn no_row_is_a_placeholder() {
+        for entry in GVLKS {
+            assert!(
+                !entry.key.chars().all(|c| c == '0' || c == '-'),
+                "{entry:?} is an all-zero placeholder key"
+            );
+            assert!(
+                !entry.edition.eq_ignore_ascii_case("unknown"),
+                "{entry:?} names no real edition"
+            );
+        }
+    }
+
+    /// A key is a key, not a GUID.
+    ///
+    /// The audits' recurring finding is a fabricated GUID that looks structured
+    /// enough to pass a glance. A GUID in this column would be exactly that, so
+    /// the shape check above is paired with an explicit one here.
+    #[test]
+    fn no_key_is_a_guid() {
+        for entry in GVLKS {
+            assert!(
+                !entry.key.contains("0000-0000"),
+                "{entry:?} looks like a GUID rather than a product key"
+            );
+        }
+    }
+
+    /// A key serves a handful of editions at most.
+    ///
+    /// Sharing is real and deliberate: Microsoft publishes one key for
+    /// `Windows 11 Enterprise LTSC 2024`, `Windows 10 Enterprise LTSC 2021` and
+    /// `Windows 10 Enterprise LTSC 2019` together, in one cell. So "a key
+    /// belongs to exactly one edition" is **false about the source**, and an
+    /// earlier version of this test asserted it and failed on real data.
+    ///
+    /// What is worth asserting is the bound. A parser bug that smeared one key
+    /// across a whole table — by taking the key from the wrong cell, say —
+    /// would show up here and nowhere else, because every row would still be
+    /// well formed and every `(release, edition)` pair would still be unique.
+    #[test]
+    fn no_key_serves_more_than_a_few_editions() {
+        /// The most editions Microsoft shares a single key between, plus room.
+        /// Measured: 3, on the two LTSC rows.
+        const MOST: usize = 5;
+
+        for entry in GVLKS {
+            let sharing: Vec<&str> = GVLKS
+                .iter()
+                .filter(|other| other.key == entry.key)
+                .map(|other| other.edition)
+                .collect();
+            assert!(
+                sharing.len() <= MOST,
+                "the key for {:?} is shared by {} editions ({sharing:?}), which \
+                 is more than Microsoft shares any key between — the scrape has \
+                 probably taken the key from the wrong column",
+                entry.edition,
+                sharing.len()
+            );
+        }
+    }
+}
+
 /// Provenance: every row came through the pipeline, and the file says which.
 ///
 /// Reads `products.toml` directly. That is disk I/O, which axiom A5 forbids the
@@ -436,10 +626,20 @@ mod provenance {
         toml::from_str(&text).unwrap_or_else(|error| panic!("cannot parse products.toml: {error}"))
     }
 
-    /// `ms-lcid` is a specification page rather than a downloadable artifact,
-    /// so there is no file to digest. Named here so that "no digest" is an
-    /// exemption somebody wrote down rather than a row that slipped through.
-    const WITHOUT_DIGEST: &[&str] = &["ms-lcid", "research"];
+    /// The sources that are pages rather than downloadable artifacts, so there
+    /// is no file to digest.
+    ///
+    /// Named here so that "no digest" is an exemption somebody wrote down
+    /// rather than a row that slipped through. Every one of them is a Microsoft
+    /// Learn page whose reference table is scraped: `[MS-LCID]` for the locales
+    /// (`ID-008`, #113) and the two key tables for the GVLKs (`DB-013`, #137).
+    ///
+    /// The cost of the exemption is real and worth stating: a page that changes
+    /// under us changes the data with no digest to notice. What catches that
+    /// instead is the shape checking on the way in — a layout change yields
+    /// zero rows and fails the extraction loudly — plus the fact that
+    /// `products.toml` is committed, so any change at all is a reviewable diff.
+    const WITHOUT_DIGEST: &[&str] = &["ms-lcid", "ms-gvlk-windows", "ms-gvlk-office", "research"];
 
     #[test]
     fn every_source_is_described_and_digested() {

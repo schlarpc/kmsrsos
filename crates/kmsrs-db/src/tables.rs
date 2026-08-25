@@ -267,4 +267,35 @@ pub struct Lcid {
     pub location: &'static str,
 }
 
+/// A KMS client setup key, as Microsoft publishes it (`DB-013`, #137).
+///
+/// **Never on the wire.** A KMS host is not sent a key and could not check one:
+/// the protocol carries an application ID, a KMS-counted ID and a SKU ID, and
+/// the key is consumed entirely by the client's Software Protection Platform
+/// before a packet leaves. This table exists so that `/instructions` can tell an
+/// operator what to type into `slmgr /ipk`.
+///
+/// [`Self::edition`] is Microsoft's own name for the edition, not a
+/// `pkeyconfig` `EditionId`, and there is deliberately no link between this
+/// table and [`PRODUCTS`]. The two sources identify an edition differently and
+/// nothing in either connects them, so a join would be a name mapping somebody
+/// authored — and a wrong row would pair a real edition with a real key
+/// belonging to a different one, which is the class of error `DB-009` (#133)
+/// documents in three other catalogues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gvlk {
+    /// The release this key belongs to — `Windows Server 2016`,
+    /// `GVLKs for Office LTSC 2024` — from the tab or heading above the table
+    /// it was published in.
+    ///
+    /// Load-bearing rather than decoration: [`Self::edition`] is **not unique**
+    /// on Microsoft's page. Three rows read `Windows Server Datacenter` with
+    /// three different keys, and this is the only field that tells them apart.
+    pub release: &'static str,
+    /// The edition, as Microsoft's published table names it.
+    pub edition: &'static str,
+    /// The 25-character key, `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`.
+    pub key: &'static str,
+}
+
 include!(concat!(env!("OUT_DIR"), "/tables.rs"));

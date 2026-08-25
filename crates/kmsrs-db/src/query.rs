@@ -7,8 +7,8 @@
 
 use crate::guid::Guid;
 use crate::tables::{
-    APPLICATIONS, Application, COUNTED_IDS, CSVLKS, Csvlk, EPID_HOST_BUILDS, HOST_BUILDS,
-    HostBuild, LCIDS, Lcid, PRODUCTS, Product,
+    APPLICATIONS, Application, COUNTED_IDS, CSVLKS, Csvlk, EPID_HOST_BUILDS, GVLKS, Gvlk,
+    HOST_BUILDS, HostBuild, LCIDS, Lcid, PRODUCTS, Product,
 };
 
 /// The application a GUID names, if it is one of the three.
@@ -175,6 +175,33 @@ pub fn epid_host_build_at(position: usize) -> Option<&'static HostBuild> {
 #[must_use]
 pub fn lcid_at(position: usize) -> Option<&'static Lcid> {
     LCIDS.get(position)
+}
+
+/// Every KMS client setup key, sorted by edition (`DB-013`, #137).
+///
+/// A slice rather than an iterator so that a caller can count first and render
+/// second without walking twice — `CLI-008` (#214) prints a numbered list, and
+/// `/instructions` renders a table.
+#[must_use]
+pub const fn gvlks() -> &'static [Gvlk] {
+    &GVLKS
+}
+
+/// How many KMS client setup keys are shipped. Never zero.
+///
+/// `usize`, and every caller that numbers a list must use one too. `vlmcs`
+/// counts its catalogue in a `uint8_t`, so a database above 255 entries
+/// mis-renders — a latent bug a fork hit and fixed, and one this signature
+/// makes unrepresentable (`CLI-008`, #214).
+#[must_use]
+pub const fn gvlk_count() -> usize {
+    GVLKS.len()
+}
+
+/// The key at an index in [`GVLKS`].
+#[must_use]
+pub fn gvlk_at(position: usize) -> Option<&'static Gvlk> {
+    GVLKS.get(position)
 }
 
 #[cfg(test)]
