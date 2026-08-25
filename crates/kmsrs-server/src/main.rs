@@ -12,7 +12,7 @@ use kmsrs_server::log::{Logger, Severity};
 use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS, Role, ShutdownHandle};
 use kmsrs_server::net::listener::bind_all;
 use kmsrs_server::platform::SignalHandling;
-use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server};
+use kmsrs_server::{OsEntropy, PRODUCT_NAME, Server, WallClock};
 
 /// Exit code for a configuration this binary could not understand.
 ///
@@ -106,22 +106,35 @@ fn run(operational: Operational) -> Result<(), i32> {
     // the configuration that failed to parse.
     let logger = Logger::new(&operational, &discovered);
 
-    // The wall clock is read exactly once, to bound the randomised activation
-    // date in the ePID (`ID-007`, #112). Nothing in the request path reads one
-    // again, which is why this host needs no accurate clock (`ARCH-004`, #4).
-    let today = today().ok_or_else(|| {
+    // The monotonic clock this process measures everything by. Established
+    // before the wall clock is read so the two can be paired with as little
+    // between them as possible (`POL-020`, #346).
+    let boot = std::time::Instant::now();
+    let clock = move || {
+        let elapsed = boot.elapsed();
+        Instant::from_nanos(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+    };
+
+    // The wall clock is read exactly once, and two things come out of that one
+    // reading: the bound on the randomised activation date in the ePID
+    // (`ID-007`, #112), and the anchor the per-request host time is projected
+    // from (`POL-020`, #346). Nothing in the request path reads one again,
+    // which is why this host needs no accurate clock (`ARCH-004`, #4).
+    let (today, wall) = today().ok_or_else(|| {
         logger.message(Severity::Error, "startup", "the system clock is not usable");
         EXIT_UNAVAILABLE
     })?;
+    let wall_clock = WallClock::anchored(wall, clock());
 
     let mut entropy = OsEntropy;
-    let server =
-        Server::new(compiled, operational, discovered, &mut entropy, today).map_err(|error| {
+    let server = Server::new(compiled, operational, discovered, &mut entropy, today)
+        .map_err(|error| {
             // Serving a predictable identity is worse than not serving
             // (`OS-012`, #263).
             eprintln!("{PRODUCT_NAME}: {error}");
             EXIT_UNAVAILABLE
-        })?;
+        })?
+        .with_wall_clock(wall_clock);
 
     let (bound, failures) = bind_all().map_err(|error| {
         logger.message(Severity::Error, "bind", &error.to_string());
@@ -208,12 +221,6 @@ fn run(operational: Operational) -> Result<(), i32> {
 
     arrange_to_stop_politely(logger, &shutdown);
 
-    let boot = std::time::Instant::now();
-    let clock = move || {
-        let elapsed = boot.elapsed();
-        Instant::from_nanos(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
-    };
-
     let mut entropy = OsEntropy;
     if let Err(error) = driver.run(&mut entropy, &clock) {
         logger.message(Severity::Error, "serve", &error.to_string());
@@ -280,12 +287,18 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
     }
 }
 
-/// Today's date in UTC, from the system clock.
+/// Today's date in UTC and the same instant as a `FILETIME`, from one read of
+/// the system clock (`POL-020`, #346).
 ///
 /// The only wall-clock read in the program (`OS-007`, #258). Everything else
 /// that needs time uses the injected monotonic clock, which is why this host
 /// works on a target whose `SystemTime` is a CMOS read plus local ticks.
-fn today() -> Option<kmsrs_db::Date> {
+///
+/// Both values come from the same reading rather than from two, and not only
+/// to keep the count at one: the ePID's activation date and the skew the host
+/// measures against a client would otherwise be able to disagree, which is an
+/// internal contradiction an observer could read. See [`kmsrs_server::clock`].
+fn today() -> Option<(kmsrs_db::Date, kmsrs_proto::time::FileTime)> {
     /// Seconds in a day. Leap seconds are not represented in Unix time, so
     /// this conversion is exact.
     const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -293,6 +306,8 @@ fn today() -> Option<kmsrs_db::Date> {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
-    let days = i32::try_from(since_epoch.as_secs().checked_div(SECONDS_PER_DAY)?).ok()?;
-    Some(kmsrs_db::Date::from_days_since_epoch(days))
+    let seconds = since_epoch.as_secs();
+    let days = i32::try_from(seconds.checked_div(SECONDS_PER_DAY)?).ok()?;
+    let wall = kmsrs_proto::time::FileTime::from_unix_seconds(i64::try_from(seconds).ok()?)?;
+    Some((kmsrs_db::Date::from_days_since_epoch(days), wall))
 }

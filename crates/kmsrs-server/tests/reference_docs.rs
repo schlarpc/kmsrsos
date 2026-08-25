@@ -47,6 +47,14 @@ use kmsrs_server::web::request::{Parsed, parse};
 use kmsrs_server::web::routes::{self, Snapshot};
 use std::path::{Path, PathBuf};
 
+/// Whether this is the build `docs/reference.md` describes (`PKG-010`, #247).
+///
+/// The reference is generated from the program, so a build whose policy flags
+/// differ generates a different — and equally correct — document. Only the
+/// default build's is committed.
+const IS_THE_DOCUMENTED_BUILD: bool =
+    kmsrs_policy::gate::REFUSE_NON_VOLUME && !kmsrs_policy::gate::REFUSE_CLOCK_SKEW;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -253,6 +261,26 @@ const fn yes_no(value: bool) -> &'static str {
 /// `PKG-010` (#247): the document regenerates, and drift fails.
 #[test]
 fn the_reference_matches_what_the_code_says() {
+    // The document records what *a* build decides, and the committed copy is
+    // the default build's. A build with a policy feature enabled decides
+    // genuinely differently — that is the entire point of the flags — so
+    // comparing it against the default build's document would fail on a true
+    // statement, and blessing from it would overwrite the document with one
+    // describing a build nobody ships.
+    //
+    // The check is on the constants rather than on `cfg!(feature = ...)` so it
+    // stays correct however the features are enabled: `POL-020` (#346) added
+    // `-p kmsrs-server` to the flake's `policy-features` job, which turns them
+    // on through `kmsrs-policy/...` and so leaves this crate's own `cfg`s
+    // false.
+    if !IS_THE_DOCUMENTED_BUILD {
+        eprintln!(
+            "skipped: docs/reference.md describes the default build, and this \
+             one enables a policy feature (PKG-010, #247)"
+        );
+        return;
+    }
+
     let path = workspace_root().join("docs/reference.md");
     let actual = generate();
 

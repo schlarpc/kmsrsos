@@ -13,6 +13,7 @@
 //! driving a full exchange through two servers whose [`Operational`] settings
 //! differ in every field and comparing the bytes.
 
+use crate::clock::WallClock;
 use crate::config::{Compiled, Discovered, Operational};
 use crate::host::{Host, RequestContext};
 use crate::log::Logger;
@@ -31,6 +32,13 @@ pub struct Server {
     host: Host,
     logger: Logger,
     limiter: RateLimiter,
+    /// The host's wall clock, projected from the one reading taken at start-up
+    /// (`POL-020`, #346).
+    ///
+    /// Defaults to [`WallClock::UNKNOWN`], which is the right answer for a
+    /// platform without a usable one and for a test that does not care.
+    /// `main` replaces it with a real one via [`Server::with_wall_clock`].
+    wall_clock: WallClock,
 }
 
 /// What a driver should do with the socket after a call to [`Server::handle`].
@@ -66,7 +74,33 @@ impl Server {
             host,
             logger,
             limiter: RateLimiter::new(),
+            wall_clock: WallClock::UNKNOWN,
         })
+    }
+
+    /// Give this server the host's wall clock (`POL-020`, #346).
+    ///
+    /// A builder rather than a parameter of [`Server::new`] because the two
+    /// readings it pairs are a property of the *process* — one wall-clock read
+    /// and the monotonic origin the driver measures everything else against —
+    /// and only `main` is in a position to take them together. Everywhere else,
+    /// including every test that does not care what time it is, gets
+    /// [`WallClock::UNKNOWN`] and the `host_time: None` behaviour that has
+    /// always been correct for a host without a clock.
+    #[must_use]
+    pub const fn with_wall_clock(mut self, wall_clock: WallClock) -> Self {
+        self.wall_clock = wall_clock;
+        self
+    }
+
+    /// The host's wall clock at monotonic reading `now` (`POL-020`, #346).
+    ///
+    /// This is arithmetic, not a syscall: `OS-007` (#258) permits exactly one
+    /// wall-clock read in the program and it has already happened. See
+    /// [`crate::clock`].
+    #[must_use]
+    pub fn host_time(&self, now: Instant) -> Option<kmsrs_proto::time::FileTime> {
+        self.wall_clock.at(now)
     }
 
     /// Feed a connection some bytes and collect whatever it wants to send.

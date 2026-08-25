@@ -69,6 +69,41 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
+| 37 | Host clock in the request path | One start-up reading, projected forward by the monotonic clock — not tracked, [see below](#the-hosts-clock-is-taken-once-pol-020-346) (#346) |
+
+### The host's clock is taken once (`POL-020`, #346)
+
+The host's wall clock is protocol-visible: a genuine KMS host checks the client's `FILETIME` against
+a ±4 hour band, so a host that never looks is distinguishable from one that does (`POL-011`, #99).
+But `OS-007` (#258) forbids reading a wall clock in the request path, because Hermit's `SystemTime`
+is one CMOS read at boot plus local ticks and a design that leaned on it would fail there and
+nowhere else. `platform_invariants.rs` enforces that as a property of the tree: exactly one
+`SystemTime::now()` may exist in a shipped crate.
+
+Before this, the conflict was settled by not settling it. `driver.rs` passed `host_time: None`, so
+`clock_skew` was always absent from the event log and `REFUSE_CLOCK_SKEW` was unreachable — a build
+with `strict-clock-skew` behaved identically to one without, and the powerset job was proving only
+that the flag compiled. The policy crate's own tests passed throughout, because they hand `evaluate`
+a clock directly and the layer that was broken is below them.
+
+**The decision: one reading, paired with the monotonic origin, projected forward.** `main` takes the
+monotonic origin, then reads the wall clock once; the pair becomes a `WallClock`, and the host time
+for a request is that pair plus the monotonic distance since. Both rules hold at once, on every
+target, and the request path gains no syscall.
+
+**The consequence, stated rather than discovered later: a clock that steps after start-up is not
+tracked.** NTP landing, an operator fixing a CMOS error, a live migration — the host keeps serving
+the old reading plus elapsed monotonic time. That is the right trade rather than a limitation:
+
+- The ePID's randomised activation date (`ID-007`, #112) is drawn from *the same* reading, and
+  `ID-001` (#106) requires the ePID to be stable for the process lifetime. So the ePID must keep the
+  old reading whatever the skew measurement does.
+- Consistency between the two is worth more than accuracy in one. A host whose ePID implies one date
+  while its skew measurement implies another has an internal contradiction an observer can read; a
+  host uniformly a few hours out has a bad clock, which is ordinary.
+
+So `OS-020` (#336)'s clock discipline is about the clock being right *at start-up*, and restarting is
+the supported way to pick up a corrected one.
 
 ### Notes on the three decisions that took the most argument
 

@@ -20,6 +20,7 @@
 #![deny(clippy::let_underscore_untyped)]
 
 pub mod budget;
+pub mod clock;
 pub mod config;
 pub mod entropy;
 pub mod host;
@@ -29,6 +30,7 @@ pub mod platform;
 pub mod server;
 pub mod web;
 
+pub use clock::WallClock;
 pub use config::{BuildStamp, Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
 pub use host::{Host, RequestContext};

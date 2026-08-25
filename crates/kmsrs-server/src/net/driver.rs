@@ -771,13 +771,18 @@ impl Driver {
                 return Ok(());
             }
 
+            // `POL-020` (#346): the host's wall clock, so the skew against the
+            // client's timestamp is actually measured. Projected from the one
+            // reading taken at start-up rather than read here — `OS-007` (#258)
+            // allows no second read, and this path deliberately has no syscall
+            // in it that the request did not require.
             let context = RequestContext {
                 peer: Some(Peer {
                     address: peer.ip(),
                     port: peer.port(),
                 }),
                 now,
-                host_time: None,
+                host_time: self.server.host_time(now),
             };
 
             let input = buffer.get(..read).unwrap_or(&[]);
