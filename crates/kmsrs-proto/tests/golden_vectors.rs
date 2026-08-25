@@ -142,6 +142,36 @@ fn build_all() -> Vec<(&'static str, Vec<u8>)> {
         server_reply(&mut server64, &alter, 0x0A13),
     ));
 
+    // --- multiplexing, which a real client asks for --------------------------
+    //
+    // `WIRE-031` (#358): every vector above has `PacketFlags` `0x03`, because
+    // `ClientAssociation::bind` does not set `PFC_CONC_MPX`. **A real client
+    // does** — vlmcs and Windows both send `0x13` — so nothing here exercised
+    // the one flag the host echoes, and a bug that echoed it onto the
+    // `alter_context_response` as well shipped and passed the whole suite.
+    //
+    // These four cover both halves of the rule: the flag comes back on a
+    // `bind_ack` and does **not** come back on an `alter_context_response`.
+    // Byte-exact, so a change to either fails here rather than waiting for
+    // somebody to point vlmcsd's client at the host again.
+    let mut bind_mpx = bind_ndr64.clone();
+    bind_mpx[3] = PacketFlags::COMPLETE.union(PacketFlags::CONC_MPX).bits();
+    built.push(("bind-ndr64-multiplex", bind_mpx.clone()));
+
+    let mut server_mpx = Connection::new(ASSOC_GROUP, true);
+    built.push((
+        "bind-ack-ndr64-multiplex",
+        server_reply(&mut server_mpx, &bind_mpx, 0x0A14),
+    ));
+
+    let mut alter_mpx = bind_mpx.clone();
+    alter_mpx[2] = PacketType::AlterContext.to_wire();
+    built.push(("alter-context-multiplex", alter_mpx.clone()));
+    built.push((
+        "alter-context-response-multiplex",
+        server_reply(&mut server_mpx, &alter_mpx, 0x0A15),
+    ));
+
     // --- request and response, per version -----------------------------------
     for (version, name_request, name_response, seed) in [
         (Version::V4, "request-v4", "response-v4", 0x0B04_u64),
