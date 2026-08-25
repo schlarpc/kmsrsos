@@ -71,6 +71,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
 | 37 | ~~Hermit build~~ | Removed with the target (#334). Kept in history because `PKG-013`/`PKG-014` (#250, #251) are cited in commits |
 | 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
+| 39 | Host clock in the request path | One start-up reading, projected by the monotonic clock and re-anchored when SNTP corrects it, [see below](#the-host-clock-is-projected-and-re-anchored-pol-020-346) (#346) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -254,6 +255,47 @@ privilege separation at all — the application runs in ring 0 with the kernel �
 "smaller attack surface" were never the same claim, and the network-reachable surface was smoltcp
 against the most heavily fuzzed TCP stack in existence. This decision went the way it did on
 deployability, and it should not be re-litigated on TCB grounds.
+
+### The host clock is projected, and re-anchored (`POL-020`, #346)
+
+Two rules pulled in opposite directions and the conflict had been settled by not settling it.
+
+`POL-011` (#99) wants the host's wall clock on every request: a genuine KMS host checks the client's
+`FILETIME` against a ±4 hour band, so a host that never looks is distinguishable from one that does.
+`OS-007` (#258) permits the wall clock to be read in exactly two files — `entry.rs` once at start-up
+and `net/sntp.rs`, whose job it is — because every deadline in this program is monotonic, and that is
+what lets `OS-020` (#336) *step* `CLOCK_REALTIME` without `kmsrs-policy` ever seeing time run
+backwards.
+
+What was actually shipping: `driver.rs` passed `host_time: None`. So `clock_skew` never appeared in
+the event log, `POL-011`'s "logged either way" was false, and `REFUSE_CLOCK_SKEW` was unreachable — a
+build with `strict-clock-skew` behaved identically to one without it, and the feature-powerset job
+was proving only that the flag compiled. `kmsrs-policy`'s own tests passed throughout, because they
+hand `evaluate` a clock directly and the broken layer is below them.
+
+**The decision: a `WallClock` holding a wall reading paired with the monotonic reading from the same
+moment, projected forward, and re-anchored when the clock is corrected.**
+
+The request path reads `CLOCK_MONOTONIC` — which the driver already does once per request to produce
+the reading every deadline is measured against — and never `CLOCK_REALTIME`. Both rules hold, on
+every target.
+
+**Why it is re-anchored rather than projected forever from one reading.** On the bare-metal target
+the clock is disciplined: `OS-020` polls SNTP and steps `CLOCK_REALTIME` when the offset is worth
+stepping. A host that booted six hours out and projected forever from that would report six hours of
+skew against every correctly-set client for the life of the process — and under `strict-clock-skew`
+refuse them all, which is precisely the failure `OS-020` exists to prevent. So `sntp::apply` hands
+the corrected reading across as an argument. Nothing new reads a wall clock; the one file already
+permitted to know it passes it on.
+
+**What deliberately does not move with it: the ePID's randomised activation date** (`ID-007`, #112).
+It is drawn once at start-up and stays there, because `ID-001` (#106) requires the ePID to be stable
+for the process lifetime — a host whose ePID changed mid-flight would fail the canonical detection
+test. So after a large correction the two are drawn from different clocks, and that is the right way
+round: the activation date is a year and a day-of-year buried in an ePID, and a correction big enough
+to move it is one this host would have to restart to reflect anyway, while the skew measurement is
+compared against a four-hour band on every request. Make the accurate thing accurate and leave the
+stable thing stable, rather than keeping two values consistent and both wrong.
 
 ### Notes on the three decisions that took the most argument
 

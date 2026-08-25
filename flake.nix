@@ -1271,8 +1271,16 @@
             pname = "kmsrs-policy-features";
             partitions = 1;
             partitionType = "count";
+            # `kmsrs-server` as well as `kmsrs-policy` (`POL-020`, #346). The
+            # difference `strict-clock-skew` makes is only observable
+            # end-to-end: the policy crate's tests hand `evaluate` a host clock
+            # directly and passed for the whole time `driver.rs` supplied
+            # `None` and the refusal was unreachable. `tests/clock_skew.rs`
+            # drives a real socket, so it is the test that can tell the two
+            # builds apart — and it only runs if this job selects the crate.
             cargoNextestExtraArgs =
-              "-p kmsrs-policy --features permissive-retail,strict-clock-skew";
+              "-p kmsrs-policy -p kmsrs-server "
+              + "--features kmsrs-policy/permissive-retail,kmsrs-policy/strict-clock-skew";
           });
 
           # Every feature combination compiles (CFG-010, #175). vlmcsd has at

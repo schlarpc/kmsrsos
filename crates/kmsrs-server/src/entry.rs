@@ -12,6 +12,7 @@
 //! is the `KMSRSOS_CONFIG` environment variable, which may only touch settings
 //! that cannot change a byte on the wire (`CFG-002`, #167).
 
+use crate::clock::WallClock;
 use crate::config::{Compiled, Discovered, Operational};
 use crate::facts::Facts;
 use crate::log::{Logger, Severity};
@@ -38,6 +39,33 @@ pub const EXIT_UNAVAILABLE: u8 = 69;
 /// 128 + SIGINT, the shell convention for "died of a signal".
 pub const EXIT_INTERRUPTED: i32 = 130;
 
+/// What process 1 is handed, and what it may do with it (`OS-019`, #335;
+/// `OS-020`, #336; `POL-020`, #346).
+///
+/// A struct rather than two arguments because it will grow: the bare-metal
+/// target is the only caller and every new duty pid 1 takes on needs a handle
+/// from here. A named field is also self-documenting at the call site in a way
+/// that a second positional `Facts`-shaped parameter would not be.
+///
+/// Note what is *not* here: anything that could change a byte on the KMS wire.
+/// These are observations and corrections about the machine, in the same
+/// category as [`crate::config::Discovered`], which is what keeps them clear of
+/// `CFG-001` (#166).
+#[derive(Debug, Clone)]
+pub struct Housekeeping {
+    /// Where pid 1 publishes what the DHCP lease told it (`OS-019`, #335).
+    pub facts: Facts,
+    /// The clock the request path measures client skew against
+    /// (`POL-020`, #346).
+    ///
+    /// Handed over so that `OS-020` (#336)'s SNTP client can re-anchor it after
+    /// stepping `CLOCK_REALTIME`. Without this the correction would move the
+    /// system clock and nothing else: the host would keep reporting skew
+    /// against the hypervisor clock it booted with, for the life of the
+    /// process. See [`crate::clock`].
+    pub wall_clock: WallClock,
+}
+
 /// Run the emulator until it is asked to stop, and report how that went.
 ///
 /// Every binary in this workspace that serves KMS calls exactly this, so
@@ -60,9 +88,11 @@ pub fn serve() -> ExitCode {
 ///
 /// `housekeeping` is called **inside** `block_on`, after the listeners are bound
 /// and before the driver accepts, so it may [`tokio::spawn`] freely. It is
-/// handed a [`Facts`] slot to publish what it learns into; the web UI reads the
-/// same slot. On Linux and Windows nothing calls this and the slot stays empty,
-/// which is what every page already renders.
+/// handed a [`Housekeeping`] — a [`Facts`] slot to publish what it learns into,
+/// which the web UI reads, and the [`WallClock`] the request path measures skew
+/// against, which its SNTP client corrects (`POL-020`, #346). On Linux and
+/// Windows nothing calls this: the slot stays empty and the clock keeps its
+/// start-up anchor, which is what every page already renders.
 ///
 /// Binding does not wait for it. This host binds `0.0.0.0` and reads its own
 /// address for nothing (`NET-001`, #150), so there is no ordering requirement
@@ -71,7 +101,7 @@ pub fn serve() -> ExitCode {
 #[must_use]
 pub fn serve_with<F>(housekeeping: F) -> ExitCode
 where
-    F: FnOnce(Facts) + Send + 'static,
+    F: FnOnce(Housekeeping) + Send + 'static,
 {
     // `CFG-007` (#172): this binary takes no arguments. Silently ignoring them
     // is worse than refusing — an operator who typed something expects it to
@@ -112,7 +142,7 @@ where
 /// Start up and serve until asked to stop.
 fn run<F>(operational: Operational, housekeeping: F) -> Result<(), u8>
 where
-    F: FnOnce(Facts) + Send + 'static,
+    F: FnOnce(Housekeeping) + Send + 'static,
 {
     let discovered = Discovered::observe();
     let compiled = Compiled::BUILD;
@@ -151,22 +181,7 @@ where
     // the configuration that failed to parse.
     let logger = Logger::new(&operational, &discovered);
 
-    // The wall clock is read exactly once, to bound the randomised activation
-    // date in the ePID (`ID-007`, #112). Nothing in the request path reads one
-    // again, which is why this host needs no accurate clock (`ARCH-004`, #4).
-    let today = today().ok_or_else(|| {
-        logger.message(Severity::Error, "startup", "the system clock is not usable");
-        EXIT_UNAVAILABLE
-    })?;
-
-    let mut entropy = OsEntropy;
-    let server =
-        Server::new(compiled, operational, discovered, &mut entropy, today).map_err(|error| {
-            // Serving a predictable identity is worse than not serving
-            // (`OS-012`, #263).
-            eprintln!("{PRODUCT_NAME}: {error}");
-            EXIT_UNAVAILABLE
-        })?;
+    let server = build_server(compiled, operational, discovered, logger)?;
 
     let (bound, failures) = bind_all().map_err(|error| {
         logger.message(Severity::Error, "bind", &error.to_string());
@@ -267,7 +282,10 @@ where
 
         // Inside `block_on` and before `run`, so anything it spawns is on this
         // runtime and starts before the first connection (`OS-019`, #335).
-        housekeeping(driver.facts());
+        housekeeping(Housekeeping {
+            facts: driver.facts(),
+            wall_clock: driver.server().wall_clock(),
+        });
 
         driver.run().await.map_err(|error| {
             logger.message(Severity::Error, "serve", &error.to_string());
@@ -348,12 +366,54 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
     }
 }
 
-/// Today's date in UTC, from the system clock.
+/// Read the clock once, draw the identity, and assemble the server.
 ///
-/// The only wall-clock read in the program (`OS-007`, #258). Everything else
-/// that needs time uses the injected monotonic clock, which is why this host
-/// works on a target whose `SystemTime` is a CMOS read plus local ticks.
-fn today() -> Option<kmsrs_db::Date> {
+/// Split out of [`run`] because the two steps are one decision: the ePID's
+/// randomised activation date (`ID-007`, #112) and the anchor the per-request
+/// host time is projected from (`POL-020`, #346) both come from *the same*
+/// wall-clock reading, and a caller that could take them separately could take
+/// them from clocks that disagree.
+fn build_server(
+    compiled: Compiled,
+    operational: Operational,
+    discovered: Discovered,
+    logger: Logger,
+) -> Result<Server, u8> {
+    // One of the two permitted wall-clock reads in the program (`OS-007`,
+    // #258). Nothing in the request path reads one again, which is why this
+    // host needs no accurate clock (`ARCH-004`, #4).
+    let (today, wall) = today().ok_or_else(|| {
+        logger.message(Severity::Error, "startup", "the system clock is not usable");
+        EXIT_UNAVAILABLE
+    })?;
+
+    let mut entropy = OsEntropy;
+    Ok(
+        Server::new(compiled, operational, discovered, &mut entropy, today)
+            .map_err(|error| {
+                // Serving a predictable identity is worse than not serving
+                // (`OS-012`, #263).
+                eprintln!("{PRODUCT_NAME}: {error}");
+                EXIT_UNAVAILABLE
+            })?
+            .with_wall_clock(WallClock::anchored(wall)),
+    )
+}
+
+/// Today's date in UTC and the same instant as a `FILETIME`, from one read of
+/// the system clock (`POL-020`, #346).
+///
+/// One of the two permitted wall-clock reads in the program (`OS-007`, #258);
+/// the other is `kmsrs-os`'s SNTP client, whose job is this clock. Everything
+/// else uses the injected monotonic clock, which is why this host still
+/// activates every client that reaches it when its own clock is a year out.
+///
+/// Both values come from the same reading rather than from two, so that the
+/// ePID's activation date and the host time the skew check starts from cannot
+/// disagree at start-up. They are allowed to diverge *later*, when `OS-020`
+/// (#336) corrects the clock — see [`crate::clock`] for why that is the right
+/// way round.
+fn today() -> Option<(kmsrs_db::Date, kmsrs_proto::time::FileTime)> {
     /// Seconds in a day. Leap seconds are not represented in Unix time, so
     /// this conversion is exact.
     const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
@@ -361,6 +421,8 @@ fn today() -> Option<kmsrs_db::Date> {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
-    let days = i32::try_from(since_epoch.as_secs().checked_div(SECONDS_PER_DAY)?).ok()?;
-    Some(kmsrs_db::Date::from_days_since_epoch(days))
+    let seconds = since_epoch.as_secs();
+    let days = i32::try_from(seconds.checked_div(SECONDS_PER_DAY)?).ok()?;
+    let wall = kmsrs_proto::time::FileTime::from_unix_seconds(i64::try_from(seconds).ok()?)?;
+    Some((kmsrs_db::Date::from_days_since_epoch(days), wall))
 }

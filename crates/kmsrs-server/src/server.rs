@@ -13,6 +13,7 @@
 //! driving a full exchange through two servers whose [`Operational`] settings
 //! differ in every field and comparing the bytes.
 
+use crate::clock::WallClock;
 use crate::config::{Compiled, Discovered, Operational};
 use crate::host::{Host, RequestContext};
 use crate::log::Logger;
@@ -31,6 +32,12 @@ pub struct Server {
     host: Host,
     logger: Logger,
     limiter: RateLimiter,
+    /// The host's wall clock (`POL-020`, #346).
+    ///
+    /// Defaults to [`WallClock::unknown`], which is right for a platform
+    /// without a usable one and for every test that does not care what time it
+    /// is. `entry.rs` replaces it via [`Server::with_wall_clock`].
+    wall_clock: WallClock,
 }
 
 /// What a driver should do with the socket after a call to [`Server::handle`].
@@ -66,7 +73,38 @@ impl Server {
             host,
             logger,
             limiter: RateLimiter::new(),
+            wall_clock: WallClock::unknown(),
         })
+    }
+
+    /// Give this server the host's wall clock (`POL-020`, #346).
+    ///
+    /// A builder rather than a parameter of [`Server::new`], because the clock
+    /// is a property of the *process* — one reading, shared with whatever is
+    /// disciplining it — while `Server::new` is called by a dozen tests that
+    /// have no opinion about the time. Those get [`WallClock::unknown`] and the
+    /// `host_time: None` behaviour that has always been correct for a host
+    /// without a clock.
+    #[must_use]
+    pub fn with_wall_clock(mut self, wall_clock: WallClock) -> Self {
+        self.wall_clock = wall_clock;
+        self
+    }
+
+    /// The host's wall clock now (`POL-020`, #346).
+    ///
+    /// Reads `CLOCK_MONOTONIC` and projects from the anchor; it does **not**
+    /// read `CLOCK_REALTIME`, which `OS-007` (#258) permits in only two files.
+    /// See [`crate::clock`].
+    #[must_use]
+    pub fn host_time(&self) -> Option<kmsrs_proto::time::FileTime> {
+        self.wall_clock.now()
+    }
+
+    /// The clock handle, for whatever is disciplining it (`OS-020`, #336).
+    #[must_use]
+    pub fn wall_clock(&self) -> WallClock {
+        self.wall_clock.clone()
     }
 
     /// Feed a connection some bytes and collect whatever it wants to send.

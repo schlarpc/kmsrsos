@@ -201,8 +201,8 @@ fn main() -> ExitCode {
     // and they start after the listeners are bound — this host binds 0.0.0.0 and
     // reads its own address for nothing, so waiting for a lease before serving
     // would turn a DHCP outage into a KMS outage.
-    let outcome = kmsrs_server::entry::serve_with(|facts| {
-        net::spawn(facts, dhcp_seed());
+    let outcome = kmsrs_server::entry::serve_with(|housekeeping| {
+        net::spawn(housekeeping, dhcp_seed());
     });
 
     // `OS-026` (#343): the drain has finished, so stop the machine rather than
