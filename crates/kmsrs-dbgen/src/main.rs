@@ -46,16 +46,16 @@ fn run() -> Result<()> {
     let from = option(&arguments, "--from").map(PathBuf::from);
 
     match command {
-        "fetch" => fetch_all(&artifact_dir),
+        "fetch" => fetch_all(&artifact_dir, option(&arguments, "--only")),
         "extract" => extract_all(from.as_deref().unwrap_or(&artifact_dir), &output),
         "regenerate" => {
-            fetch_all(&artifact_dir)?;
+            fetch_all(&artifact_dir, option(&arguments, "--only"))?;
             extract_all(&artifact_dir, &output)
         }
         "help" | "--help" | "-h" => {
             println!(
                 "kmsrs-dbgen {GENERATOR_VERSION}\n\n\
-                   fetch      [--into <dir>]                 download the artifacts\n\
+                   fetch      [--into <dir>] [--only <id>]    download the artifacts\n\
                    extract    [--from <dir>] [--out <file>]  parse them into products.toml\n\
                    regenerate [--into <dir>] [--out <file>]  both\n"
             );
@@ -74,8 +74,28 @@ fn option<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 /// Download every source into its own directory and stamp its provenance.
-fn fetch_all(into: &Path) -> Result<()> {
+///
+/// `only` narrows it to one source id. Adding an image to [`SOURCES`] otherwise
+/// means re-downloading every other one — about 1.5 GB each — to get the one
+/// that changed, which is enough friction to discourage adding any
+/// (`DB-018`, #286).
+fn fetch_all(into: &Path, only: Option<&str>) -> Result<()> {
+    if let Some(id) = only
+        && !SOURCES.iter().any(|source| source.id == id)
+    {
+        return Err(Error::new(format!(
+            "no source called {id:?}; SOURCES has {}",
+            SOURCES
+                .iter()
+                .map(|source| source.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
     for source in SOURCES {
+        if only.is_some_and(|id| id != source.id) {
+            continue;
+        }
         let directory = into.join(source.id);
         eprintln!("fetching {} into {}", source.id, directory.display());
         std::fs::create_dir_all(&directory).context(format!("creating {}", directory.display()))?;
@@ -115,12 +135,40 @@ fn fetch_all(into: &Path) -> Result<()> {
 
 /// Parse every artifact directory and write the data file.
 fn extract_all(from: &Path, output: &Path) -> Result<()> {
+    // Ordered by [`SOURCES`], oldest image first, **not** by directory name.
+    //
+    // The order decides which artifact wins when two describe the same product,
+    // because `absorb_pkeyconfig` keeps the first and errors on a disagreement
+    // it cannot reconcile (`DB-006`, #130). Sorting by name made that
+    // `windows-server-2019` before `windows-server-2025` — the right answer, by
+    // accident of the digits. Naming the next image `win2012` would silently
+    // reverse it.
+    //
+    // Oldest-first is the rule because it makes a product's `source` mean *the
+    // earliest image that contained it*, which is exactly the bound `DB-018`
+    // (#286) needs: a key that first appears in the 2019 image cannot have been
+    // installed on a host older than that build.
     let mut directories: Vec<PathBuf> = std::fs::read_dir(from)
         .context(format!("reading {}", from.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.is_dir())
         .collect();
-    directories.sort();
+    directories.sort_by_key(|path| {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Position in `SOURCES`, then the name, so a directory the list does
+        // not know about is still ordered deterministically rather than
+        // wherever the filesystem put it.
+        (
+            SOURCES
+                .iter()
+                .position(|source| source.id == name)
+                .unwrap_or(usize::MAX),
+            name,
+        )
+    });
     if directories.is_empty() {
         return Err(Error::new(format!(
             "{} has no artifact directories; run `kmsrs-dbgen fetch` first",
