@@ -270,7 +270,7 @@ fn every_observable_value_is_drawn_from_an_entropy_source() {
     let producers = [
         (
             "crates/kmsrs-server/src/net/driver.rs",
-            "fn register",
+            "fn association_group",
             "the per-connection association group (FP-007, #68)",
         ),
         (

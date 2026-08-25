@@ -36,7 +36,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 1 | Crate split | 7 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary. Was 8 until `kmsrs-os` went with Hermit (#1, #334) |
 | 2 | Framing | `zerocopy` end to end, including checked prefix-splitting for variable DCE/RPC sections (#11) |
 | 3 | Panic-freedom | Lints everywhere + a symbol-level CI gate on `proto`/`crypto` + `panic = "abort"`; [what the gate found](#what-the-panic-freedom-gate-actually-found-arch-009-9) (#9) |
-| 4 | Concurrency | One `mio` event loop on both targets — superseded the original two-driver plan, [see below](#superseding-decision--one-mio-event-loop-not-two-drivers-arch-005-5). Under review in #340 now that its only justification is gone (#5) |
+| 4 | Concurrency | One `tokio` runtime, one task per connection. Superseded mio, which had superseded a two-driver plan, [see below](#superseding-decision--one-tokio-runtime-arch-005-5-os-024-340) (#5, #340) |
 | 5 | Crypto | One minimal Rijndael in `kmsrs-crypto` with exhaustive KATs, quarantined as the A8 exception (#41) |
 | 6 | Product-data source | Microsoft `pkeyconfig` artifacts, extracted by `kmsrs-dbgen` (#125, #126) |
 | 7 | Product gate | **Split**: permissive on unknown KMS IDs; strict on retail/preview and AppID mismatch (#98) |
@@ -344,158 +344,49 @@ express a KMS host. Ruled out on paper, not by experiment.
 **D33 — Reimplementing DNS, standard AES, SHA-256, HMAC, HTTP, TLS or binary framing by hand.**
 Two exceptions, both in #41.
 
-### Superseding decision — one mio event loop, not two drivers (`ARCH-005`, #5)
+### Superseding decision — one `tokio` runtime (`ARCH-005`, #5; `OS-024`, #340)
 
-`ARCH-005` originally specified **tokio on Linux and Windows, blocking `std::net` + `std::thread` on
-Hermit** — two drivers, on the reasoning that tokio has no usable Hermit support. The first half of
-that reasoning is right and the conclusion was wrong: the alternative to tokio is not threads, it is
-**mio**, which is the layer tokio itself uses.
+This has been settled twice, and the second time reversed the first.
 
-Per `docs/research-findings.md` §R2, mio has first-class Hermit support in the stock crates.io
-release and hermit's own CI exercises it on every pull request; its backends are epoll on Linux, IOCP
-on Windows and `poll(2)` on Hermit. tokio, by contrast, works there only through a four-commit fork
-of 1.45.0 whose substantive patch is a level-triggered selector workaround — and tokio's readiness
-caching assumes edge-triggered semantics, so getting it wrong produces *hangs, not errors*. Adopting
-that fork would need a workspace-global `[patch.crates-io]`, pinning Linux and Windows to it too.
+`ARCH-005` originally specified **tokio on Linux and Windows, blocking `std::net` +
+`std::thread` on Hermit** — two drivers, on the reasoning that tokio has no usable Hermit support.
+The first half of that was right and the conclusion was wrong: the alternative to tokio is not
+threads, it is **mio**, which is the layer tokio itself uses. So it became one mio loop on all three
+targets, and the argument was portability.
 
-One loop removed three hand-built mechanisms, two of which were untestable:
+`OS-018` (#334) removed Hermit, which removed the only reason mio was chosen. That alone would have
+justified rewriting the paragraph rather than the code — mio is a perfectly good event loop for a
+server that is only a server. What changed the answer is that `kmsrs-server` stopped being only a
+server.
 
-- **Timeouts.** There is no `SO_RCVTIMEO` anywhere. A deadline is the poll timeout, computed from the
-  injected clock, so it behaves identically on every target — including Hermit, whose `setsockopt` is
-  a stub returning `EINVAL` for exactly that option. The previous design chose between a socket
-  timeout and a hand-written polling fallback *at runtime*, and no test ever executed the fallback
-  branch despite it existing solely for Hermit (`OS-014`, #297).
-- **The shutdown wakeup.** `mio::Waker` is an eventfd on Linux and Hermit and a posted IOCP
-  completion on Windows. The previous design woke a blocked `accept()` by connecting to its own
-  listener, which assumed a loopback route Hermit may not have (`OS-015`, #298).
-- **Thread-per-connection.** A connection is a few kilobytes in a map rather than an OS thread, which
-  is what makes the connection ceiling derivable rather than picked (`NET-014`, #296).
+It is **pid 1** on the bare-metal target (`OS-017`, #333): the entire userland. What a userland does
+is run several things on timers at once — DHCP renewal at T1 and T2 (#335), SNTP polling (#336),
+`SIGCHLD` reaping and an ACPI power-button watch (#337), a virtio-serial guest-agent channel (#338),
+and the entropy re-test that was already there. **mio has no timers.** Every one of those deadlines
+would have been hand-rolled bookkeeping against a `poll()` timeout, which is the code that is tedious
+to write, easy to get subtly wrong, and unpleasant to test.
 
-What one loop does *not* solve is the reason the platform split existed at all: Hermit's socket
-**semantics**. No readiness abstraction models "this platform's `setsockopt` is a stub", that `bind()`
-ignores the address, that there is never an IPv6 address, or that `cfg(unix)` is false. Those remain
-per-target facts, and the pattern for them is `SINGLE_SOCKET_ONLY` — a named capability whose *both*
-branches compile and are tested on every host, rather than a `cfg` on an item, which only ever
-compiles on the platform that cannot be tested.
+What the migration actually cost, and what it did not:
 
+- **The sans-io core did not change at all.** `kmsrs-proto` and `kmsrs-policy` still take `&[u8]` and
+  a clock reading (axiom A7). This is the second time that split has paid for itself in one week —
+  the bare-metal target changed operating system and then changed I/O driver, and neither crate
+  noticed.
+- **Connection deadlines moved to tokio's clock.** They were computed against an injected closure
+  (`ARCH-004`, #4), which made timeout tests deterministic; they now use `tokio::time`, and the tests
+  use `#[tokio::test(start_paused = true)]`. That is strictly better than it sounds: the two deadline
+  tests went from 62 seconds of real waiting to 0.05 seconds, because a paused clock jumps to the
+  next timer instead of sleeping. The injected clock survives where it was always load-bearing — a
+  request is still *handed* the instant it happened.
+- **`Server::handle` takes `&mut self`**, so the server and the entropy source sit behind one mutex,
+  taken per request and never held across an `await`. That is what the single-threaded mio loop did
+  anyway; the difference is that reading, writing and waiting now overlap.
+- **A current-thread runtime, not a worker pool.** This host answers one 384-byte request per client
+  per few hours, and the shared state is serialised regardless, so threads would contend and gain
+  nothing — and on a one-vCPU guest a thread-per-core scheduler is a scheduler arguing with itself.
 
-**D34 — A `MinActiveClients` field per host key (`POL-009`, #97).** The field is inert in both
-existing implementations, for opposite reasons. vlmcsd declares it in `KmsData->CsvlkData` and reads
-it in `kms.c` to floor the reported count, but nothing ever writes it and it is 0 for every CSVLK in
-the shipped blob, so the floor does nothing. py-kms carries it in `KmsDataBase.xml` with real-looking
-values — 50 for Windows, 10 for each Office application — and no code path anywhere reads it. Those
-two numbers are exactly the saturation values the client-count model computes from `2N`, so the
-concept is subsumed rather than dropped: `POL-001` (#89) produces them from observed clients instead
-of from a constant nobody populated. Carrying a dead column would invite someone to populate it later
-with a value that fights the model.
-
-<a id="d35"></a>**D35 — A build-time flag reproducing a genuine host's `0xC004D104` client-table refusal
-(`POL-007`, #95).** The issue proposed keeping the refuse path behind a strict flag. Its own reasoning
-rules it out: with per-client views (`POL-001`, #89) the 671-entry cap is never reached in a way that
-matters, and evicting the oldest entry is strictly more compatible than refusing. A flag whose only
-effect is to make the server refuse a request it could have answered is a fingerprint, not a
-hardening measure — the same shape of mistake as `POL-011`'s clock-skew tolerance, which is itself a
-detection oracle. `HResult::InvalidActivationData` remains in the vocabulary so `kmsrs-client` can
-name the code when a *real* host sends one. The neighbouring question for `N_Policy` is
-[D38](#d38).
-
-**D36 — Honouring py-kms's `InvalidWinBuild` per CSVLK (`ID-017`, #122).** The *intent* is sound — a
-host key should not be paired with a host build that could not have had it installed — but the field
-itself cannot be adopted. It exists only in py-kms's `KmsDataBase.xml`, it is hand-entered, and its
-values are **indices into py-kms's own `WinBuild` table** (`[0,1,2]`, `[0]`, `[]`), so they carry no
-meaning outside that file's row order. No Microsoft artifact contains it, or anything equivalent:
-`pkeyconfig` gives `ActConfigId`, `RefGroupId`, `EditionId`, `ProductDescription`, `ProductKeyType`
-and `IsRandomized`, and nothing about host builds. Copying the values would be exactly the practice
-that produced every fabricated GUID the audits found. The constraint is worth enforcing, so it is
-reopened as #286 in the form that has a real data source — deriving each host key's earliest build
-from the images its `pkeyconfig` appears in — rather than closed outright.
-
-**D37 — vlmcsd-scale feature stripping (`CFG-011`, #176).** vlmcsd carries roughly 30 preprocessor
-macros and 7 build presets whose purpose is to shrink the binary for OpenWrt-class embedded targets —
-`NO_LOG`, `NO_CLIENT_LIST`, `NO_STRICT_MODES`, `NO_HELP`, `NO_TIMEOUT`, `ONE_FILE` and the rest. They
-are why 21 of the 119 rows in its feature matrix are build-gated rather than simply present, so a
-statement about "what vlmcsd does" is really a statement about one of 2^n vlmcsd builds.
-
-The targets that motivated them are not targets here (axiom A4: Linux, Windows, and Hermit on
-x86-64). Buying a smaller binary with a combinatorial explosion of behaviours is a bad trade when
-every build has to be differentially tested against a reference — the number of artifacts to test
-would grow faster than confidence in any of them. The two build-time flags that do exist
-(`permissive-retail`, `strict-clock-skew`) each change behaviour a deployment might genuinely need
-changed, and CI builds the **whole powerset** rather than a sampled subset (`CFG-010`, #175).
-
-
-<a id="d38"></a>**D38 — A build-time strict mode refusing an anomalous `N_Policy` with `0x8007000D`
-(`POL-018`, #283).** `POL-006` (#94) specified it and it was never implemented; this records why it
-will not be.
-
-The argument that kept it open was byte-for-byte parity: a differential test against a genuine host
-with a deliberately absurd `N_Policy` might show a divergence, and this is where the fix would go.
-`POL-019` (#313) has since answered that test, and the answer is not a refusal. **A genuine host
-answers the request** — it reports how many machine IDs it is holding, the client compares that
-against its own `N_Policy`, and the client decides it has not been activated. The refusal is vlmcsd's
-invention, faithful to nothing, and reproducing it would replace one divergence with another.
-
-Under the per-client view model (`POL-001`, #89) there is also nothing for a refusal to protect: an
-anomalous demand cannot reach shared state, so there is no table to poison. A flag whose only effect
-is to refuse a request a genuine host would have answered is a *fingerprint*, not a hardening
-measure — the same shape of mistake as [D35](#d35) and as `POL-011`'s clock-skew tolerance, which is
-itself a detection oracle.
-
-`HResult::InvalidData` (`0x8007000D`) stays in the vocabulary regardless — it is what an unsupported
-protocol version returns (`KMS-014`, #30) — so `kmsrs-client` can still name the code when a vlmcsd
-instance sends one for this reason instead.
-
-<a id="d39"></a>**D39 — A copy-to-clipboard button on the instructions page (`DISC-006`, #148).** The
-issue asks for one and it is the only part of #148 not built. `navigator.clipboard` needs script, and
-the web UI's Content-Security-Policy is `default-src 'none'; style-src 'unsafe-inline'` — no
-`script-src` at all, in any form. Adding the button means adding `script-src 'unsafe-inline'`, which
-is the single header change that converts every escaping bug on those pages from a rendering defect
-into script execution. One of those pages renders a client-supplied `Host` header and another renders
-client-supplied workstation names.
-
-That is a bad trade for a convenience the browser already provides: the snippets are in `<pre>`
-blocks, which double-click and triple-click select whole. Revisit only if the UI acquires script for
-some other reason, at which point the marginal cost is zero rather than the entire policy.
-
-<a id="d40"></a>**D40 — systemd socket activation (`NET-016`, #165).** The issue is right about the
-trap: `Accept=yes` is the inetd convention, one process per connection, which silently destroys both
-the stable ePID and the CMID table — and that is exactly how vlmcsd-under-systemd degrades without
-telling anyone. What it is wrong about is the payoff.
-
-> *"systemd binds 1688 so we never need `CAP_NET_BIND_SERVICE` — a process that never had privileges
-> beats one that dropped them."*
-
-**1688 is unprivileged.** There is no capability to avoid, so the entire benefit is a restatement of
-something already true. What remains is zero-downtime restarts, which for a service whose clients
-retry and whose activations last 180 days is worth nothing.
-
-Against that: adopting an inherited file descriptor means `FromRawFd`, which is `unsafe` in every
-spelling — `std`, `socket2` and `rustix` alike — and axiom A1 is pure safe Rust with exactly one
-permitted boundary, in `kmsrs-os`, for a different target and a different reason ([D13](#d13),
-`OS-013` #264). A dependency that performs the `unsafe` on our behalf moves the code without moving
-the risk, and adds a dependency to a project whose whole dependency posture is the point of
-`SEC-009` (#201).
-
-So the answer is to refuse rather than to support. `LISTEN_FDS` set to anything non-zero exits 64 and
-says to remove the `.socket` unit. That is the same detection the issue asked for, applied to the
-whole feature rather than to one mode of it, and it forecloses the silent degradation completely
-rather than for one configuration.
-
-<a id="d41"></a>**D41 — Privilege drop on Linux (`SEC-007`, #199).** The issue names the preferred
-path itself — *"socket activation plus DynamicUser, where privileges never exist to drop"* — and half
-of that is now [D40](#d40). The other half is enough on its own: `DynamicUser=yes` with
-`CapabilityBoundingSet=` and `AmbientCapabilities=` starts the service with **no capabilities at
-all**, and 1688 is unprivileged, so there is nothing to bind that would have needed one.
-
-`setgid`/`setgroups`/`setuid` therefore exist to drop a privilege this process never has. They are
-also three `unsafe` libc calls in a specific order whose failure modes are famous — `setgroups`
-before `setuid`, checking every return value, and the whole sequence being untestable without running
-as root — added to remove a privilege that `deploy/systemd/kmsrsos.service` never grants. A container
-runs as `65534:65534` for the same reason ([`PKG-004`](#d17), #241).
-
-If someone runs the binary as root outside those two paths, it stays root. That is a true statement
-about a deployment nobody has to make, and it is a better one than a partial implementation that
-looks like it solved the problem.
+`deny.toml` still bans `async-std` and `smol`. The reason was never "async is bad", it is that a
+second runtime is a second scheduler with its own idea of when work runs.
 
 ### What the panic-freedom gate actually found (`ARCH-009`, #9)
 

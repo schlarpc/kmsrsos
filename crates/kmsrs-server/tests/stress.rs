@@ -41,7 +41,6 @@ use kmsrs_proto::entropy::testing::DeterministicEntropy;
 use kmsrs_proto::kms::framing::{self, Ciphers};
 use kmsrs_proto::kms::layout::{REQUEST_BODY_LEN, RequestBody, WireGuid};
 use kmsrs_proto::kms::version::Version;
-use kmsrs_proto::time::Instant;
 use kmsrs_proto::wire::client::{ClientAssociation, Reply};
 use kmsrs_proto::wire::header::HEADER_LEN;
 use kmsrs_proto::wire::syntax::TransferSyntax;
@@ -52,41 +51,7 @@ use kmsrs_server::{Compiled, Discovered, Operational, Server};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicU64, Ordering};
 use zerocopy::{FromBytes, IntoBytes};
-
-/// A clock the test drives, whose rate can be changed mid-test.
-///
-/// The rate has to be adjustable because a fast clock is not a neutral
-/// accelerant: it advances on *every* reading the loop takes, including the
-/// ones between a client's bind and its request. A step large enough to expire
-/// an idle connection in a couple of poll wakeups is also large enough to kill
-/// an active conversation between two of its own PDUs — which is correct
-/// behaviour, and not what a test about idle connections is asking.
-struct TestClock {
-    nanos: AtomicU64,
-    step: AtomicU64,
-}
-
-impl TestClock {
-    fn new(step_seconds: u64) -> Self {
-        Self {
-            nanos: AtomicU64::new(1_000_000),
-            step: AtomicU64::new(step_seconds.saturating_mul(1_000_000_000)),
-        }
-    }
-
-    /// Change how fast time passes from here on.
-    fn set_step_seconds(&self, seconds: u64) {
-        self.step
-            .store(seconds.saturating_mul(1_000_000_000), Ordering::Release);
-    }
-
-    fn now(&self) -> Instant {
-        let step = self.step.load(Ordering::Acquire);
-        Instant::from_nanos(self.nanos.fetch_add(step, Ordering::AcqRel))
-    }
-}
 
 fn test_server() -> Server {
     let mut entropy = DeterministicEntropy::from_seed(0x5735_5555);
@@ -104,28 +69,35 @@ fn test_server() -> Server {
 }
 
 /// Run the driver for the duration of `body`, panic-safely.
-fn with_driver<T>(
-    limit: usize,
-    clock: TestClock,
-    body: impl FnOnce(SocketAddr, &TestClock) -> T,
-) -> (T, Driver) {
+fn with_driver<T>(limit: usize, body: impl FnOnce(SocketAddr) -> T) -> (T, Driver) {
     let (bound, _) = bind_each(&[SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)]).unwrap();
     let address = bound[0].address;
-    let mut driver = Driver::new(test_server(), bound, limit).unwrap();
+    let mut driver = Driver::new(
+        test_server(),
+        bound,
+        limit,
+        Box::new(DeterministicEntropy::from_seed(0x5A17)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
 
     std::thread::scope(|scope| {
-        let clock_ref = &clock;
         let handle = scope.spawn(move || {
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17);
-            driver.run(&mut entropy, &|| clock_ref.now()).unwrap();
+            // The driver is async now (`OS-024`, #340), but everything a test
+            // body does is blocking loopback I/O. So the driver gets a
+            // current-thread runtime of its own on this thread and the bodies
+            // below are unchanged.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
             driver
         });
 
         // A panic in the body must not leave the loop running, or the scope
         // deadlocks on join and a failed assertion becomes a silent hang.
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(address, clock_ref)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(address)));
         shutdown.request();
         let driver = handle.join().expect("the loop stopped cleanly");
 
@@ -235,7 +207,7 @@ fn read_pdu(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 fn many_interleaved_clients_do_not_leak_into_each_other() {
     const CLIENTS: u32 = 120;
 
-    let ((), driver) = with_driver(MAX_CONNECTIONS, TestClock::new(0), |address, _clock| {
+    let ((), driver) = with_driver(MAX_CONNECTIONS, |address| {
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for client in 1..=CLIENTS {
@@ -250,7 +222,11 @@ fn many_interleaved_clients_do_not_leak_into_each_other() {
         });
     });
 
-    let events: Vec<_> = driver.server().host().events().iter().collect();
+    // `server()` hands back a guard now (`OS-024`, #340): the server lives
+    // behind the mutex the driver's tasks share, so the borrow has to be named
+    // rather than left as a temporary in the same expression.
+    let server = driver.server();
+    let events: Vec<_> = server.host().events().iter().collect();
     assert_eq!(
         events.len(),
         usize::try_from(CLIENTS).unwrap(),
@@ -332,9 +308,13 @@ fn the_cipher_state_is_immutable_and_shared_safely() {
 fn idle_connections_do_not_exhaust_capacity_permanently() {
     const LIMIT: usize = 8;
 
-    // 20 seconds per clock reading, so the 30 s read deadline is crossed within
-    // a couple of poll wakeups.
-    let (served, driver) = with_driver(LIMIT, TestClock::new(20), |address, clock| {
+    // This one waits out a real `READ_TIMEOUT` (`OS-024`, #340). It used to
+    // drive a fake clock, but deadlines are tokio's now, and the paused clock
+    // the other deadline tests use cannot help here: auto-advance fires
+    // whenever the runtime is idle, and this test's client is blocking socket
+    // I/O on another thread — so the jump that expires the idle connections
+    // would expire the legitimate one too. Thirty seconds, honestly spent.
+    let (served, driver) = with_driver(LIMIT, |address| {
         // Fill every slot with a connection that never sends anything.
         let mut idle = Vec::new();
         for _ in 0..LIMIT {
@@ -347,17 +327,11 @@ fn idle_connections_do_not_exhaust_capacity_permanently() {
         // Wait for the server to hang up on them, which is what proves the
         // capacity was reclaimed rather than merely never taken.
         for stream in &mut idle {
-            stream.set_read_timeout(Some(Duration::from_secs(20))).ok();
+            stream.set_read_timeout(Some(Duration::from_secs(45))).ok();
             let mut buffer = [0_u8; 8];
             let _ = stream.read(&mut buffer);
         }
         drop(idle);
-
-        // Slow time back down before the real client: at 20 seconds per clock
-        // reading its own conversation would outlive the read deadline between
-        // its bind and its request, which is a fact about the fake clock rather
-        // than about capacity.
-        clock.set_step_seconds(0);
 
         activate_once(address, 1)
     });
@@ -377,7 +351,7 @@ fn idle_connections_do_not_exhaust_capacity_permanently() {
 fn a_full_pool_refuses_promptly_rather_than_queueing() {
     const LIMIT: usize = 4;
 
-    let ((), _driver) = with_driver(LIMIT, TestClock::new(0), |address, _clock| {
+    let ((), _driver) = with_driver(LIMIT, |address| {
         let mut held = Vec::new();
         for _ in 0..LIMIT {
             held.push(TcpStream::connect(address).unwrap());

@@ -20,7 +20,7 @@ kmsrs-crypto.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 serde.workspace = true
 toml.workspace = true
-mio.workspace = true
+tokio.workspace = true
 
 # `ctrlc` and `socket2` both select their implementation with `#[cfg(unix)]`
 # and `#[cfg(windows)]`. They used to be target-gated here, because Hermit was
@@ -32,6 +32,12 @@ ctrlc.workspace = true
 socket2.workspace = true
 
 [dev-dependencies]
+# `test-util` is what provides `#[tokio::test(start_paused = true)]` and
+# `time::advance`, which is how a deadline test drives a deadline now that
+# deadlines are tokio's (`OS-024`, #340). Dev-only on purpose: under resolver 3
+# a dev-dependency's features do not reach the binary, so the shipped server
+# cannot have its clock paused by anything.
+tokio = { workspace = true, features = ["test-util"] }
 # Deterministic entropy for the host-state tests. Enabling `testing` here does
 # not enable it for the binary: under resolver 3 a dev-dependency's features do
 # not propagate to the normal dependency graph (ARCH-003, #3).

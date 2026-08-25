@@ -18,7 +18,6 @@ use crate::net::driver::{Driver, MAX_CONNECTIONS, Role, ShutdownHandle};
 use crate::net::listener::bind_all;
 use crate::{OsEntropy, PRODUCT_NAME, Server};
 use core::sync::atomic::{AtomicBool, Ordering};
-use kmsrs_proto::time::Instant;
 use std::process::ExitCode;
 
 /// Exit code for a configuration this binary could not understand.
@@ -212,29 +211,56 @@ fn run(operational: Operational) -> Result<(), u8> {
         return Err(EXIT_UNAVAILABLE);
     }
 
-    let mut driver =
-        Driver::with_roles(server, listeners, MAX_CONNECTIONS, true).map_err(|error| {
+    let runtime = build_runtime().map_err(|error| {
+        logger.message(Severity::Error, "startup", &error.to_string());
+        EXIT_UNAVAILABLE
+    })?;
+
+    let outcome = runtime.block_on(async {
+        let mut driver = Driver::with_roles(
+            server,
+            listeners,
+            MAX_CONNECTIONS,
+            true,
+            Box::new(OsEntropy),
+        )
+        .map_err(|error| {
             logger.message(Severity::Error, "startup", &error.to_string());
             EXIT_UNAVAILABLE
         })?;
-    let shutdown = driver.shutdown_handle();
+        let shutdown = driver.shutdown_handle();
 
-    arrange_to_stop_politely(logger, &shutdown);
+        arrange_to_stop_politely(logger, &shutdown);
 
-    let boot = std::time::Instant::now();
-    let clock = move || {
-        let elapsed = boot.elapsed();
-        Instant::from_nanos(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
-    };
-
-    let mut entropy = OsEntropy;
-    if let Err(error) = driver.run(&mut entropy, &clock) {
-        logger.message(Severity::Error, "serve", &error.to_string());
-        return Err(EXIT_UNAVAILABLE);
-    }
+        driver.run().await.map_err(|error| {
+            logger.message(Severity::Error, "serve", &error.to_string());
+            EXIT_UNAVAILABLE
+        })
+    });
+    outcome?;
 
     logger.message(Severity::Info, "stopped", PRODUCT_NAME);
     Ok(())
+}
+
+/// The runtime the driver runs on (`OS-024`, #340).
+///
+/// Current-thread, not multi-threaded. This host answers one 384-byte request
+/// per client per few hours; the work is a Rijndael CBC-MAC over a few hundred
+/// bytes, and the shared server state is serialised behind one mutex anyway, so
+/// a worker pool would add threads that contend for it and nothing else. It
+/// also keeps the bare-metal target honest: `kmsrs-server` is pid 1 there, and
+/// a thread-per-core scheduler on a one-vCPU guest is a scheduler arguing with
+/// itself.
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the runtime could not be created.
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
 }
 
 /// Ask the operating system to drain us when it wants us gone

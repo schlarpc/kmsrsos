@@ -35,7 +35,6 @@
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::time::Duration;
 use kmsrs_proto::entropy::testing::DeterministicEntropy;
-use kmsrs_proto::time::Instant;
 use kmsrs_server::config::operational::{LogFormat, LogLevel};
 use kmsrs_server::net::driver::{Driver, MAX_CONNECTIONS, Role};
 use kmsrs_server::net::listener::bind_each;
@@ -79,15 +78,26 @@ fn with_web<T>(limit: usize, body: impl FnOnce(SocketAddr, SocketAddr) -> T) -> 
         .chain(web_bound.into_iter().map(|entry| (entry, Role::Web)))
         .collect();
 
-    let mut driver = Driver::with_roles(test_server(), listeners, limit, true).unwrap();
+    let mut driver = Driver::with_roles(
+        test_server(),
+        listeners,
+        limit,
+        true,
+        Box::new(DeterministicEntropy::from_seed(0x5A17_0190)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(move || {
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17_0190);
-            driver
-                .run(&mut entropy, &|| Instant::from_nanos(0))
-                .unwrap();
+            // The driver is async now (`OS-024`, #340); the body below is
+            // blocking loopback I/O, so the driver gets a current-thread
+            // runtime of its own on this thread.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
         });
 
         // A panic inside a scope deadlocks the join, turning a failed
@@ -356,15 +366,23 @@ fn the_access_list_is_checked_before_the_role_is_consulted() {
     .unwrap();
 
     let listeners: Vec<_> = web_bound.into_iter().map(|e| (e, Role::Web)).collect();
-    let mut driver = Driver::with_roles(server, listeners, 8, true).unwrap();
+    let mut driver = Driver::with_roles(
+        server,
+        listeners,
+        8,
+        true,
+        Box::new(DeterministicEntropy::from_seed(0x5A17_0190)),
+    )
+    .unwrap();
     let shutdown = driver.shutdown_handle();
 
     std::thread::scope(|scope| {
         let handle = scope.spawn(move || {
-            let mut entropy = DeterministicEntropy::from_seed(0x5A17_0191);
-            driver
-                .run(&mut entropy, &|| Instant::from_nanos(0))
-                .unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the driver thread");
+            runtime.block_on(driver.run()).unwrap();
         });
 
         let result = std::panic::catch_unwind(|| {

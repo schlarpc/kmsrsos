@@ -476,19 +476,28 @@ fn there_is_one_driver_and_no_patched_dependencies() {
         "there should be exactly one driver, and there are {drivers:?}"
     );
 
-    // And no async runtime reached the tree. `deny.toml` bans them by name
-    // (SEC-009, #201); this catches the case where somebody adds one and
-    // updates the ban list in the same breath.
+    // Exactly one async runtime, and it is tokio (`OS-024`, #340). The ban on
+    // tokio was for Hermit, which needed a four-commit fork; that target is
+    // gone (`OS-018`, #334) and `kmsrs-server` is pid 1 on its replacement,
+    // which means DHCP renewal, SNTP polling and a reaper all want timers that
+    // mio does not have.
+    //
+    // The other two stay out. The reason was never "async is bad", it is that a
+    // second runtime is a second scheduler with its own idea of when work runs.
+    // `deny.toml` bans them by name (`SEC-009`, #201); this catches the case
+    // where somebody adds one and updates the ban list in the same breath.
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("the lockfile");
-    for runtime in [
-        "name = \"tokio\"",
-        "name = \"async-std\"",
-        "name = \"smol\"",
-    ] {
+    assert!(
+        lock.contains("name = \"tokio\""),
+        "tokio is not in the lockfile, so this test would pass vacuously"
+    );
+    // `mio` is not in this list: it is tokio's own reactor and arrives as a
+    // transitive dependency. Banning it would be banning tokio's insides.
+    for runtime in ["name = \"async-std\"", "name = \"smol\""] {
         assert!(
             !lock.contains(runtime),
-            "{runtime} is in the lockfile; there is one mio loop on all three \
-             targets (ARCH-005, #5)"
+            "{runtime} is in the lockfile; there is one runtime and it is tokio \
+             (ARCH-005, #5; OS-024, #340)"
         );
     }
 }

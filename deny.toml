@@ -68,10 +68,15 @@ allow-wildcard-paths = true
 # reaches for the convenient thing, which is exactly how py-kms ended up with a
 # web framework inside an activation server.
 deny = [
-  # No async runtime. There is one mio event loop on all three targets, and
-  # tokio has zero upstream Hermit support (see the ARCH-005 superseding
-  # decision).
-  { name = "tokio" },
+  # One async runtime, and it is tokio (`OS-024`, #340). The ban on it was for
+  # Hermit, which had no upstream support and needed a four-commit fork; that
+  # target is gone (`OS-018`, #334), and `kmsrs-os` being pid 1 means the
+  # userland now owns DHCP renewal, NTP polling, a reaper and a guest-agent
+  # channel — several concurrent activities with timers, which is precisely
+  # what mio does not provide.
+  #
+  # The other two stay banned. The reason was never "async is bad", it was that
+  # a second runtime is a second scheduler with its own idea of when work runs.
   { name = "async-std" },
   { name = "smol" },
 
@@ -132,7 +137,7 @@ deny = [
   # crates' log calls go nowhere; what the ban is really for is stopping a
   # `log::info!` appearing in *our* code, at which point somebody installs a
   # sink and the discipline is gone.
-  { name = "log", wrappers = ["mio", "rustls", "ureq", "ureq-proto"] },
+  { name = "log", wrappers = ["tokio", "mio", "rustls", "ureq", "ureq-proto"] },
   { name = "tracing" },
   { name = "env_logger" },
 
