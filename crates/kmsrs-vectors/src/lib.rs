@@ -89,6 +89,33 @@ pub const VECTORS: &[Vector] = &[
         description: "the host's alter_context_response, which advertises no endpoint",
         bytes: include_bytes!("../vectors/alter-context-response.bin"),
     },
+    // `WIRE-031` (#358): the same two exchanges with `PFC_CONC_MPX` set, which
+    // is what a real client sends and what none of the vectors above did.
+    //
+    // The flag is the one thing a host echoes from the client's header, and it
+    // is echoed on a `bind_ack` and **not** on an `alter_context_response`.
+    // Until these existed nothing exercised either half, and a bug that echoed
+    // it onto both shipped and passed the whole suite.
+    Vector {
+        name: "bind-ndr64-multiplex",
+        description: "a client bind asking for multiplexing, as a real client does",
+        bytes: include_bytes!("../vectors/bind-ndr64-multiplex.bin"),
+    },
+    Vector {
+        name: "bind-ack-ndr64-multiplex",
+        description: "the host's bind_ack, which echoes PFC_CONC_MPX",
+        bytes: include_bytes!("../vectors/bind-ack-ndr64-multiplex.bin"),
+    },
+    Vector {
+        name: "alter-context-multiplex",
+        description: "a client alter_context still asking for multiplexing",
+        bytes: include_bytes!("../vectors/alter-context-multiplex.bin"),
+    },
+    Vector {
+        name: "alter-context-response-multiplex",
+        description: "the host's alter_context_response, which does NOT echo PFC_CONC_MPX",
+        bytes: include_bytes!("../vectors/alter-context-response-multiplex.bin"),
+    },
     Vector {
         name: "request-v4",
         description: "a v4 activation request",
