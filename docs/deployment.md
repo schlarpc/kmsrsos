@@ -321,7 +321,7 @@ $ nix build .#linux-kernel    # the bzImage on its own
 ```
 
 **One ISO, both firmwares.** `CONFIG_EFI_STUB` makes a `bzImage` simultaneously a PE/COFF executable
-and a Linux boot image — `MZ` at offset 0 and `HdrS` at 0x202 — so the same 2.7 MiB file is both
+and a Linux boot image — `MZ` at offset 0 and `HdrS` at 0x202 — so the same 3.4 MiB file is both
 `\EFI\BOOT\BOOTX64.EFI` for UEFI and an isolinux `KERNEL` line for BIOS. There is no bootloader on
 the UEFI path and nothing to register in NVRAM, so a fresh VM boots on its first try.
 
@@ -329,6 +329,98 @@ The initramfs and the kernel command line are *inside* that file
 (`CONFIG_INITRAMFS_SOURCE`, `CONFIG_CMDLINE_OVERRIDE`). The second is not a convenience: it means a
 bootloader passing a different command line is **ignored**, so the kernel command line is a
 build-time decision like every other setting here (axiom A3, `CFG-001` #166).
+
+### Which hypervisors this runs on (`OS-025`, #342)
+
+**The column that matters is the last one.** A driver list is never complete, and the failure this
+matrix exists to prevent is not "it did not boot" — it is a machine that boots to completion, prints
+`listening`, and then answers nobody forever because no driver claimed its NIC. So every row says
+how it was checked, and "reasoned" means exactly that: read from documentation, never observed.
+
+| Platform | Firmware | Default NIC | Driver | Checked how |
+|---|---|---|---|---|
+| **Proxmox VE / QEMU-KVM** | SeaBIOS or OVMF | virtio-net | `virtio_net` | **Observed**: boots and serves on both firmwares, on the exact PCI topology `qemu-server` emits |
+| Proxmox — *Intel E1000* | either | e1000 | `e1000` | **Observed** |
+| Proxmox — *Intel E1000E* | either | e1000e | `e1000e` | **Observed** |
+| Proxmox — *Realtek RTL8139* | either | rtl8139 | `8139cp` | **Observed** |
+| Proxmox — *VMware vmxnet3* | either | vmxnet3 | `vmxnet3` | **Observed** |
+| **Nutanix AHV** | UEFI or legacy | virtio-net | `virtio_net` | Reasoned — it is KVM, and the device model is the one above |
+| **VMware ESXi / vSphere** | EFI on 7.x+ | vmxnet3 | `vmxnet3` | Device model observed in QEMU; **ESXi itself not booted** |
+| **VMware Workstation / Fusion** | BIOS or EFI | e1000e | `e1000e` | Device model observed; the product not booted |
+| **VirtualBox** | BIOS or EFI | Intel 82540EM | `e1000` | Device model observed; the product not booted. `pcnet32` is in for the older adapter choices |
+| **Hyper-V Gen 1** | BIOS | synthetic (VMBus) | `hv_netvsc` | **Not observed.** VMBus cannot be exercised in QEMU at all |
+| Hyper-V Gen 1 — *Legacy Network Adapter* | BIOS | DEC 21140 | `tulip` | Device model observed in QEMU |
+| **Hyper-V Gen 2 / Azure** | UEFI | synthetic only — no emulated NIC exists | `hv_netvsc` | **Not observed.** Secure Boot must be turned off: the EFI stub is unsigned |
+| **Xen — XCP-ng / Citrix** | HVM | rtl8139 | `8139cp` | Device model observed |
+| Xen — PV path | HVM | xen-netfront | `xen_netfront` | **Not observed** |
+| **bhyve** | UEFI only | virtio-net | `virtio_net` | Reasoned. The console path is unverified — there is no VGA unless `fbuf` is configured |
+| **Cloud Hypervisor** | direct kernel boot | virtio-**pci** | `virtio_net` | Reasoned |
+| **Parallels Desktop** | EFI | e1000 or virtio | both | Reasoned |
+| **EC2** | UEFI | ENA | `ena` | **Not observed** — `OS-027` (#344) |
+
+`nix flake check` runs `linux-nics`, which boots the shipped ISO once per QEMU device model in that
+table and asserts the machine **serves an activation**, not that it booted. Everything marked
+"observed" is that check; everything else is a claim.
+
+#### What each row costs
+
+Measured on the built `bzImage` with the initramfs held constant, which is the only way the number
+means anything — the initramfs is *inside* the image, so a change to the program moves the total by
+more than a driver does. Reproduce with `nix build .#linux-deltas && cat result/report`.
+
+| Driver | Cost | For |
+|---|---|---|
+| `8139cp` + `8139too` | +12 KiB | Proxmox's RTL8139 entry; Xen HVM's default |
+| `pcnet32` | +12 KiB | VirtualBox's older adapters |
+| `tulip` | +16 KiB | Hyper-V Gen 1's Legacy Network Adapter |
+| `vmxnet3` | +24 KiB | VMware, and Proxmox's vmxnet3 entry |
+| `ena` | +24 KiB | EC2 Nitro |
+| **VMBus** (`hv_netvsc` + timer) | **+40 KiB** | Hyper-V Gen 1 and 2, Azure |
+| ~~Xen PV~~ (`xen-netfront`) | ~~+148 KiB~~ | **declined** — see below |
+| **all of the above, as shipped** | **+120 KiB** | 2,364,416 → 2,487,296 bytes |
+
+The total is less than the sum, because drivers sharing a vendor gate pay for it once. Taking Xen on
+top of this would add a further **140 KiB**.
+
+**For scale, the drivers are the small part.** The whole `bzImage` went from 2,814,976 to 3,539,968
+bytes across this round of work, and the kernel configuration is a rounding error in that:
+
+| | |
+|---|---|
+| `OS-026` (#343) — the power button, net of what it let go | −36 KiB |
+| `OS-025` (#342) — the platform matrix | +120 KiB |
+| `OS-023` (#339) — the pare-back | −36 KiB |
+| **the initramfs** | **≈ +660 KiB** |
+| | **+708 KiB** |
+
+The initramfs is inside the `bzImage`, and it grew because the DHCP and SNTP clients of `OS-019`
+(#335) and `OS-020` (#336) brought a DNS library with them. That was a deliberate trade — the
+reasoning is in [`decisions.md`](decisions.md) — and this is what it weighs. Anyone wanting a
+smaller image should start there and not with the drivers.
+
+**VMBus was expected to be the expensive one and is not.** The kernel config used to say `hv_netvsc`
+"drags in the whole VMBus stack, which is not a driver-sized cost". Measured, it is 40 KiB — less
+than twice a plain PCI driver. The estimate had never been taken on a built image.
+
+**The Xen paravirtual path is the expensive one, and is declined.** 148 KiB is 6 % of the whole
+kernel, because it is xenbus, grant tables and event channels rather than a driver. What it buys is
+throughput on XCP-ng and Citrix Hypervisor — whose *default* emulated NIC is RTL8139 and therefore
+already works for 12 KiB. A host that answers one 384-byte request per client per few hours does not
+need the faster path.
+
+**A machine with no usable interface says so.** That is the other half of this, and the half no
+driver list can cover:
+
+```
+{"level":"error","event":"dhcp","detail":"this machine has no Ethernet interface, so it
+ will never have an address and no client will ever reach it. The usual cause is a NIC
+ model with no driver in this kernel — see the supported list in docs/deployment.md"}
+```
+
+It keeps retrying rather than giving up, because a hypervisor that attaches the NIC a moment late
+looks identical at boot. The `linux-nics` check boots a machine with `-nic none` and asserts that
+sentence appears — and that the host still binds its port, because a host that cannot find a NIC is
+not a host that should refuse to start.
 
 #### On Proxmox
 
@@ -340,8 +432,24 @@ Two things are worth adding, neither of which is required for it to serve:
 
 | | Why |
 |---|---|
-| **Hardware → Add → virtio-rng** | Cuts time-to-serving from ~4.7 s to ~2.4 s. The program blocks in `getrandom(2)` until the kernel's CRNG is seeded, and on a CPU model without RDRAND that takes seconds of jitter entropy |
+| **Hardware → Add → virtio-rng** | Cuts time-to-serving by **more than half** — see the numbers below. The program blocks in `getrandom(2)` until the kernel's CRNG is seeded, and on a CPU model without RDRAND that takes seconds of jitter entropy |
 | **Hardware → Add → Serial Port** `0`, then **Options → Display → Serial terminal 0** | Convenience, not necessity — the framebuffer console already shows the boot in the noVNC window |
+
+#### How long it takes to start
+
+Measured on the shipped ISO, `-machine q35 -cpu qemu64 -enable-kvm -smp 1 -m 512M`, best of three,
+from the QEMU process starting to the guest printing `listening`:
+
+| Firmware | virtio-rng | Seconds |
+|---|---|---|
+| SeaBIOS | no | 1.70 |
+| SeaBIOS | **yes** | **0.71** |
+| OVMF | no | 3.33 |
+| OVMF | **yes** | 1.86 |
+
+So **attach virtio-rng**: it is worth a second on BIOS and a second and a half on UEFI, and it is one
+checkbox. Firmware is what is left — OVMF costs about 1.1 s more than SeaBIOS before Linux starts,
+and that is PE loading and relocation rather than I/O (CD-ROM and SATA measure identically).
 
 **`cpu: host` is not needed.** It was mandatory on Hermit, whose only seed source was RDSEED. Linux
 seeds its CRNG on any CPU model; with virtio-rng attached, `host` and the default `kvm64` differ by
@@ -507,6 +615,59 @@ taken from the first server that gives a usable one, so a lying time server is b
 acceptable only because the DHCP server that named it already controls this host's address and
 routing and can do considerably worse — it is a property, not an oversight.
 
+### On EC2 (`OS-027`, #344)
+
+**This target is for an operator who already has a VPN or a site-to-site link into the VPC.** The
+loopback constraint at the top of this document applies here with more force, not less: an EC2
+instance is the easiest possible place to give clients an address they cannot route to, and exposing
+1688 to the internet is not the intended deployment — see the source-IP ACL decision
+([12](decisions.md)) for why there is no ACL to lean on either.
+
+Nothing here needs a different artifact. The same ISO is already a GPT disk with a typed EFI System
+Partition (`OS-027`, #344 changed one xorriso flag to make that true), and `aws ec2 import-image` —
+which would refuse it, since a kernel with no distribution underneath is not a guest OS it
+recognises — is not on the path. `coldsnap` writes raw bytes to an EBS snapshot through the EBS
+direct APIs with no inspection at all.
+
+```shell
+# 1. A snapshot of the ISO, byte for byte. Nothing inspects it.
+$ nix build .#linuxIso
+$ coldsnap upload --region eu-west-1 result > snapshot-id
+
+# 2. An AMI over that snapshot.
+$ aws ec2 register-image --region eu-west-1 \
+    --name kmsrsos \
+    --description "kmsrsos KMS host" \
+    --architecture x86_64 \
+    --root-device-name /dev/xvda \
+    --boot-mode uefi \
+    --ena-support \
+    --virtualization-type hvm \
+    --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=$(cat snapshot-id),VolumeSize=1,DeleteOnTermination=true}"
+```
+
+`--boot-mode uefi` is the load-bearing one: firmware reads the ESP off the volume and Linux never
+touches a block layer, exactly as it does from a CD-ROM, so axiom A5 is untroubled.
+`--ena-support` matches `CONFIG_ENA_ETHERNET` in the kernel — without it a Nitro instance lands in
+precisely the silent no-address failure the [matrix](#which-hypervisors-this-runs-on-os-025-342)
+exists to eliminate. Secure Boot is off on EC2 unless keys are enrolled, so the unsigned EFI stub is
+fine.
+
+Read the log with `aws ec2 get-console-output`, which reads `ttyS0` and nothing else. That works
+because pid 1 writes to every registered console (`OS-028`, #345) rather than to whichever one the
+command line ended with.
+
+**Not verified on a real instance.** Everything above is derived from observation of the artifact —
+the GPT layout, the ESP type GUID, and booting the same bytes as a raw disk under OVMF — and from
+AWS documentation for the two API calls. Nobody has launched it. Two claims in particular are
+untested and would show up immediately if wrong:
+
+- **The backup GPT header is not at the volume's last LBA.** The upload is ~14 MB and the volume
+  rounds up to 1 GiB, so the backup header sits ~14 MB in rather than at the end of the disk.
+  Firmware generally boots from the primary header alone. *Generally* is not a test.
+- **`ena` binding on a real Nitro instance.** The driver is compiled in and has never seen the
+  hardware.
+
 ### Telling the hypervisor about itself (`OS-022`, #338)
 
 **Memory** needs nothing: `virtio-balloon` reports statistics with no guest userland at all, and
@@ -548,11 +709,9 @@ that as a hung guest, so "not supported" is said rather than implied.
 
 ### What still needs doing
 
-The userland is one program, and one thing a normal userland provides is not there yet:
-
-| | |
-|---|---|
-| Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
+Everything a normal userland provides that this host needs, it now has. What is left is
+platform reach rather than function — see [the hypervisor matrix](#which-hypervisors-this-runs-on-os-025-342)
+for what has been observed and what has only been reasoned about, and `OS-027` (#344) for EC2.
 
 What *is* done (`OS-021`, #337): pid 1 mounts devtmpfs, `/proc` and `/sys`, and runs a reaper for
 orphaned children. It reports what it mounted on the console at boot —

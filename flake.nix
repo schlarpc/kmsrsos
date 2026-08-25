@@ -95,6 +95,10 @@
             || (builtins.match ".*/deploy(/.*)?" path != null)
             || (builtins.match ".*/docs(/.*)?" path != null)
             || (builtins.match ".*/ci(/.*)?" path != null)
+            # The kernel allowlist and what it generated, which `kernel_tcb.rs`
+            # reads to assert what is in the bare-metal machine's TCB
+            # (`OS-023`, #339; `OS-025`, #342).
+            || (builtins.match ".*/os(/.*)?" path != null)
             # nextest's profile, which decides the timeouts a test run uses.
             || (builtins.match ".*/\\.config(/.*)?" path != null)
             # The workflows, because `packaging_invariants.rs` asserts that a
@@ -498,16 +502,6 @@
               return 1
             fi
 
-            # `OS-020` (#336): wait for the clock task to have tried and
-            # reported, which it does within a few seconds of the lease. Waited
-            # for rather than assumed, because the healthcheck above can succeed
-            # before the DNS lookup for the pool has timed out — and then the
-            # assertion below would be racing rather than checking.
-            for attempt in $(seq 1 30); do
-              grep -q '"event":"clock"' "$serial" && break
-              sleep 1
-            done
-
             # `OS-022` (#338): the guest agent, spoken to over the channel a
             # hypervisor would use. Not a unit test of the JSON — that is in
             # `agent.rs` — but the whole path: virtio-serial attached, the port
@@ -522,7 +516,6 @@
               grep -q '"event":"agent"' "$serial" && break
               sleep 1
             done
-
             # The `sleep` keeps stdin open, and that is not padding. With an
             # immediate EOF socat shuts the socket down as soon as it has
             # written, qemu reports the client gone, and the guest's reply is
@@ -537,6 +530,16 @@
             ask '{"execute":"guest-exec","arguments":{"path":"/bin/sh"}}' > "$PWD/$firmware.exec"
             cp "$PWD/$firmware.ifaces" $out/$firmware.ifaces 2>/dev/null || true
             cp "$PWD/$firmware.exec" $out/$firmware.exec 2>/dev/null || true
+
+            # `OS-020` (#336): wait for the clock task to have tried and
+            # reported, which it does within a few seconds of the lease. Waited
+            # for rather than assumed, because the healthcheck above can succeed
+            # before the DNS lookup for the pool has timed out — and then the
+            # assertion below would be racing rather than checking.
+            for attempt in $(seq 1 30); do
+              grep -q '"event":"clock"' "$serial" && break
+              sleep 1
+            done
 
             # `OS-026` (#343): the shutdown half. `system_powerdown` is exactly
             # what `qm shutdown` and the Proxmox web UI's Shutdown button send —
@@ -694,6 +697,130 @@
           done
         '';
 
+      # `OS-025` (#342): one boot per NIC model this project claims to support,
+      # asserting that the machine **serves** rather than that it boots.
+      #
+      # That distinction is the whole issue. Two of the four models the Proxmox
+      # web UI offers used to produce a machine that booted to completion,
+      # printed `listening`, and then answered nobody forever — no driver, so
+      # no interface, so no address, and nothing said so. A check that asserted
+      # "the guest booted" would have passed on every one of them.
+      #
+      # BIOS only, and one model at a time. Both firmwares are already covered
+      # by `linux-boot` on the supported topology; what varies here is the
+      # driver, and doubling the matrix to prove that a NIC driver does not
+      # depend on the firmware would be buying nothing.
+      nicBootCheckFor = system:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor system;
+
+          # Each is `qemu-device-name:kernel-driver`, so a failure names the
+          # driver an operator would have to look for.
+          models = [
+            "virtio-net-pci:virtio_net"
+            "e1000:e1000"
+            "e1000e:e1000e"
+            "rtl8139:8139cp"
+            "vmxnet3:vmxnet3"
+            "pcnet:pcnet32"
+            "tulip:tulip"
+          ];
+        in
+        pkgs.runCommand "linux-nics"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 1800;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          serves() {
+            local model="''${1%%:*}"
+            local driver="''${1##*:}"
+            local serial="$PWD/$driver.log"
+
+            qemu-system-x86_64 \
+              -machine q35 -cpu qemu64 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              -drive file=${linux.iso},media=cdrom,readonly=on \
+              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+              -device "$model,netdev=u1,id=net0" &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 120); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:1688; then
+                kill $qemu 2>/dev/null || true
+                wait $qemu 2>/dev/null || true
+                cp "$serial" $out/$driver.log
+                echo "$model serves, via $driver"
+                return 0
+              fi
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$serial" $out/$driver.log 2>/dev/null || true
+            echo "$model never served. The kernel needs $driver, and \
+          os/linux/kernel.config is where it is missing from (OS-025, #342)" >&2
+            cat "$serial" >&2 || true
+            return 1
+          }
+
+          ${builtins.concatStringsSep "\n          "
+            (map (model: "serves ${model}") models)}
+
+          # The other half of `OS-025` (#342), and the one a driver list can
+          # never cover: a machine whose NIC has no driver at all. It must say
+          # so on the console rather than reporting `listening` and going quiet.
+          #
+          # `-nic none` is the strongest form of that — no NIC at all — and it
+          # exercises the same path as an unrecognised one, since both end with
+          # the kernel having created no interface.
+          echo "checking that a machine with no interface says so"
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 \
+            -smp 1 -m 512M -display none -no-reboot \
+            -serial "file:$PWD/no-nic.log" \
+            -drive file=${linux.iso},media=cdrom,readonly=on \
+            -nic none &
+          nonic=$!
+
+          found=0
+          for attempt in $(seq 1 60); do
+            if grep -q 'no Ethernet interface' "$PWD/no-nic.log" 2>/dev/null; then
+              found=1
+              break
+            fi
+            kill -0 $nonic 2>/dev/null || break
+            sleep 1
+          done
+          kill $nonic 2>/dev/null || true
+          wait $nonic 2>/dev/null || true
+          cp "$PWD/no-nic.log" $out/no-nic.log 2>/dev/null || true
+
+          if [ "$found" -ne 1 ]; then
+            echo "a machine with no network interface did not say so. That is \
+          the silent failure OS-025 (#342) was filed about: it boots, it reports \
+          listening, and it serves nobody forever" >&2
+            cat $out/no-nic.log >&2 || true
+            exit 1
+          fi
+          # And it must still have got as far as listening, because a host that
+          # cannot find a NIC is not a host that should refuse to start.
+          grep -q '"event":"listening"' $out/no-nic.log || {
+            echo "a machine with no interface should still bind and serve \
+          whatever route it does have — refusing to start is not the behaviour \
+          OS-025 (#342) asked for" >&2
+            cat $out/no-nic.log >&2; exit 1; }
+        '';
+
       containerFor = { pkgs, system, server, client }:
         pkgs.dockerTools.buildLayeredImage {
           name = "kmsrsos";
@@ -840,18 +967,14 @@
               hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
               # Xen PV networking on XCP-ng and Citrix Hypervisor.
               xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
-              # Everything at once, which is what the shipped kernel becomes if
-              # the whole matrix is taken. Not the sum of the rows: enabling two
-              # drivers that share a vendor gate pays for it once.
-              everything = [
-                "NET_VENDOR_VMWARE" "VMXNET3"
-                "NET_VENDOR_REALTEK" "8139CP" "8139TOO"
-                "NET_VENDOR_AMD" "PCNET32"
-                "NET_VENDOR_DEC" "NET_TULIP" "TULIP"
-                "NET_VENDOR_AMAZON" "ENA_ETHERNET"
-                "HYPERV" "HYPERV_NET" "HYPERV_TIMER"
-                "XEN" "XEN_NETDEV_FRONTEND"
-              ];
+              # `OS-023` (#339) asks in the other direction: what does something
+              # already in the allowlist cost to *keep*? A negative delta is the
+              # saving available if it were removed.
+              no-smp = { disable = [ "SMP" ]; };
+              no-elf-core = { disable = [ "ELF_CORE" ]; };
+              no-seccomp = { disable = [ "SECCOMP" ]; };
+              no-ipv6 = { disable = [ "IPV6" ]; };
+              no-packet = { disable = [ "PACKET" ]; };
             };
           };
 
@@ -1059,6 +1182,11 @@
           # `OS-017` (#333): boots and serves on the topology Hermit cannot,
           # from BIOS and UEFI, with no `--args`.
           linux-boot = linuxBootCheckFor system;
+
+          # `OS-025` (#342): one boot per supported NIC model, each asserting
+          # that the machine *serves* — plus the machine with no NIC at all,
+          # which must say so rather than reporting `listening` and going quiet.
+          linux-nics = nicBootCheckFor system;
 
 
 

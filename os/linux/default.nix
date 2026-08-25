@@ -23,9 +23,15 @@
   # `/proc` and `/sys` and installs a reaper before handing over to the same
   # `serve` the Linux and Windows builds run.
 , init
-  # `ip=dhcp` is the kernel's built-in client and is a stopgap: it takes a lease
-  # and never renews it. `OS-019` (#335) replaces it with a real client in
-  # `kmsrs-os` and drops `CONFIG_IP_PNP_DHCP`.
+  # `ip=dhcp` is gone with `CONFIG_IP_PNP_DHCP` (`OS-019`, #335): `kmsrs-os`
+  # speaks DHCP itself now. It was left here after that change and the kernel
+  # said so on every boot —
+  #
+  #     Unknown kernel command line parameters "ip=dhcp", will be passed to
+  #     user space.
+  #
+  # — which is harmless and is exactly the kind of line that teaches an operator
+  # to stop reading the console.
   #
   # `console=` order no longer decides anything (`OS-028`, #345).
   #
@@ -44,7 +50,7 @@
   # its operator has; and it is the ordering that would silence the serial log
   # without the tee, which is what makes the boot check in `nix flake check` a
   # real regression test rather than a formality.
-, cmdline ? "console=ttyS0,115200 console=tty0 ip=dhcp panic=-1 loglevel=6"
+, cmdline ? "console=ttyS0,115200 console=tty0 panic=-1 loglevel=6"
 , base ? pkgs.linux_6_12
 }:
 
@@ -132,11 +138,43 @@ let
 
     cp ${esp} iso/efi.img
 
+    # `-isohybrid-mbr` and `-appended_part_as_gpt` are `OS-027` (#344), and
+    # they fix something that was silently doing nothing.
+    #
+    # `-isohybrid-gpt-basdat` on its own is **inert**: it is a modifier to the
+    # isohybrid MBR, and without `-isohybrid-mbr` there is no isohybrid MBR to
+    # modify. Measured on the shipped file before this change — no `EFI PART`
+    # anywhere in it, and offsets 0..445 all zero, so no GPT and no boot code
+    # either. What it produced was a plain MBR label with a type-0x83 entry over
+    # the ISO9660 area.
+    #
+    # With all three, the same file is additionally a real GPT disk with a
+    # protective MBR and a properly typed EFI System Partition
+    # (`C12A7328-F81F-11D2-BA4B-00A0C93EC93B`) — which is what UEFI firmware
+    # looks for when the file is presented as a *disk* rather than a CD, and
+    # therefore what makes the EC2 pipeline possible.
+    #
+    # Observed, on all four combinations that matter:
+    #
+    #              | disk/BIOS | disk/UEFI | cdrom/BIOS | cdrom/UEFI
+    #     before   |     no    |    yes    |    yes     |    yes
+    #     after    |    yes    |    yes    |    yes     |    yes
+    #
+    # So it strictly adds BIOS-from-a-disk and loses nothing — which also
+    # settles the open question on #344: **syslinux's MBR code does still
+    # chainload under a protective MBR**, so the conformant layout is available
+    # rather than the hybrid one being forced.
+    #
+    # Cost: 145 408 bytes, from 13 826 048 to 13 971 456. Almost none of that is
+    # the 446-byte bootstrap — it is the two GPT tables plus the ESP moving to a
+    # 2048-sector boundary.
     xorriso -as mkisofs -V KMSRSOS \
       -b isolinux/isolinux.bin -c isolinux/boot.cat \
       -no-emul-boot -boot-load-size 4 -boot-info-table \
       -eltorito-alt-boot -e efi.img -no-emul-boot \
+      -isohybrid-mbr ${pkgs.syslinux}/share/syslinux/isohdpfx.bin \
       -isohybrid-gpt-basdat \
+      -appended_part_as_gpt \
       -append_partition 2 0xef iso/efi.img \
       -o $out iso/
   '';

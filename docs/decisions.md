@@ -57,7 +57,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 22 | SRV publishing | RFC 2136 dropped → [D15](#d15). Instructions page emits zone snippet, `nsupdate` **and** `dnscmd`/PowerShell (#148) |
 | 23 | mDNS | Measurement harness first, as a standalone deliverable (#146) |
 | 24 | `TCP_NODELAY` | OS default; measured in the harness (#164) |
-| 25 | Proxmox | **Supported, and the reason the bare-metal target changed.** Superseded the nice-to-have framing (#255, #333, #334) |
+| 25 | Supported hypervisors | Proxmox is the reason the bare-metal target changed, and is no longer the whole answer: a stated matrix, one boot check per NIC model, [see below](#vmbus-is-in-and-firecracker-is-out-os-025-342) (#255, #333, #334, #342) |
 | 26 | OS packages | `.deb`/`.rpm` as CI artifacts; no repo, no Homebrew (#246) |
 | 27 | Kubernetes | Plain manifests, `replicas: 1` hardcoded. No Helm → [D17](#d17) |
 | 28 | Linux appliance image | **Built** — reverses [D16](#d16); it is now the bare-metal target (#333) |
@@ -117,6 +117,67 @@ Consequences worth stating:
 every existing Rust client welds INIT/SELECTING/REQUESTING/BOUND/RENEWING/REBINDING to sockets or to
 netlink. That is the part axiom A7 wants sans-io anyway, so it takes a `Duration` and a message and
 returns actions, and the whole of it is exercised against captured exchanges with no network.
+
+### VMBus is in, and Firecracker is out (`OS-025`, #342)
+
+Decision 25 said "Proxmox is supported". What the rest of the world got was "whatever happens to
+work", and measuring it turned out worse than "untested": of the four NIC models the Proxmox web UI
+itself offers, two produced a machine that booted to completion, printed `listening`, and then served
+nobody forever. No driver, so no interface, so no address, and nothing said so. That is the failure
+class Hermit was removed for (`OS-018`, #334), reachable from a dropdown on the supported path.
+
+**VMBus is accepted.** Hyper-V Generation 2 has *no emulated NIC at all* — there is no PCI device to
+fall back to — so `CONFIG_HYPERV` and `CONFIG_HYPERV_NET` are not a nice-to-have on that platform,
+they are the difference between supported and unsupported. Hyper-V and Azure are targets, so the bus
+is in, and the comment in `os/linux/config.nix` that called it "not a driver-sized cost" is replaced
+rather than left to contradict this. The cost is measured rather than argued: see the table in that
+file, produced by `nix build .#linux-deltas`.
+
+**Firecracker is declined**, and as [D42](#d42) rather than left unscoped, because the reason is
+structural rather than a matter of effort.
+
+**Two things this changed about how the file is maintained.** Both came out of the work rather than
+going into it:
+
+- **`nix build .#linux-deltas`** measures a config change on the built `bzImage` with the initramfs
+  held constant. The initramfs is *inside* the image, so measuring a 40 kB driver against the shipped
+  kernel compares two numbers that differ for two reasons — which is how a driver's cost gets
+  estimated instead of measured.
+- **`kernel_tcb.rs`** asserts what is in the machine's TCB against the **generated** config rather
+  than the allowlist, in both directions: the subsystems that must stay out, and the drivers this
+  matrix promises. The second half exists because `OS-023` (#339) is a pare-back and this is a
+  matrix, and they pull on the same file in opposite directions.
+
+That test found the `OS-006` (#257) lesson recurring a third time. `CONFIG_DEBUG_KERNEL` had been on
+the *disable* list for two issues and was on in every build, because `tinyconfig` requires
+`CONFIG_EXPERT` and `EXPERT` selects it. It is a menu gate rather than code and costs nothing, so the
+entry was a statement the build could not make; it is replaced by the ten options underneath it that
+would cost something.
+
+### The kernel is in the ISO twice, and stays there (`OS-023`, #339)
+
+The `bzImage` appears once in the ISO9660 filesystem for isolinux and once inside the FAT ESP for
+firmware, because the two read different filesystems and neither reads the other's. That is ~2.7 MB
+of a 13.9 MB file. `OS-023` asks whether to spend a GRUB to recover it — grub-efi reads ISO9660, so
+only a ~1 MB `grubx64.efi` would need to live in the ESP.
+
+**Keep the duplication.** Four reasons, in the order they matter:
+
+1. **It would put a bootloader in an image whose contents are enumerable in a sentence.** GRUB is a
+   program with a configuration language, a module loader and a filesystem stack. Today the UEFI
+   path has *no bootloader at all* — `CONFIG_EFI_STUB` makes the kernel the EFI executable — and
+   that is a TCB statement, not a size one.
+2. **It would give the UEFI path something to go wrong.** Nothing is registered in NVRAM and nothing
+   is chainloaded, which is why a fresh Proxmox VM boots on its first try and `OS-004` (#255) is not
+   a problem here. Adding a stage between firmware and kernel adds a stage that can fail.
+3. **The ESP is load-bearing now.** `OS-027` (#344) makes the same file a GPT disk with a typed EFI
+   System Partition, which is what the EC2 pipeline imports. Replacing the kernel in the ESP with a
+   bootloader that reads ISO9660 works for a CD and not for a raw disk import.
+4. **Nothing is paying for it at runtime.** The machine runs from RAM; the ISO is downloaded once and
+   attached. 2.7 MB is a transfer cost, not a memory or a boot cost.
+
+The related proposal on the same issue — dropping `-append_partition` to recover ~5 MB — is declined
+for reason 3 alone: that partition *is* the EFI System Partition, and `OS-027` (#344) needs it.
 
 ### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
 
@@ -421,6 +482,25 @@ express a KMS host. Ruled out on paper, not by experiment.
 
 **D33 — Reimplementing DNS, standard AES, SHA-256, HMAC, HTTP, TLS or binary framing by hand.**
 Two exceptions, both in #41.
+
+<a id="d42"></a>**D42 — Firecracker.** Declined for reasons that are properties of the formats and
+the product rather than of effort available (`OS-025`, #342):
+
+- On x86_64 Firecracker boots an uncompressed **ELF `vmlinux`**. `\x7fELF` at offset 0 and the `MZ`
+  of a PE/COFF EFI stub at offset 0 are mutually exclusive, so **no single artifact can serve both
+  Firecracker and UEFI**. That is arithmetic, not a build problem.
+- Device discovery is virtio-**mmio**. Before Firecracker gained ACPI support the
+  `virtio_mmio.device=` command-line parameters were mandatory — and `CONFIG_CMDLINE_OVERRIDE`
+  (axiom A3, `CFG-001` #166) makes them unreachable by construction. Supporting older Firecracker
+  means giving up A3, which is a worse trade than not supporting Firecracker.
+- Product fit. Firecracker exists to run short-lived multi-tenant sandboxes; a KMS host is a
+  long-lived LAN service with a stable address and an SRV record pointing at it.
+
+If it is ever wanted anyway the answer is a *second output* — the kernel build already produces
+`vmlinux` — and not a cleverer ISO.
+
+**Numbering note.** The decisions table links `D34`–`D41`, and no such entries were ever written; the
+list runs D1–D33. This one is D42 to avoid colliding with whatever those were meant to be.
 
 ### Superseding decision — one `tokio` runtime (`ARCH-005`, #5; `OS-024`, #340)
 

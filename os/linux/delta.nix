@@ -32,8 +32,10 @@
 { pkgs
   # The checked-in allowlist, as the thing every variant is measured against.
 , base ? ./kernel.config
-  # `{ name = [ "SYMBOL" … ]; }` — each becomes a kernel with those symbols
-  # enabled on top of `base`, and a line in the report.
+  # `{ name = [ "SYMBOL" … ]; }` to enable symbols on top of `base`, or
+  # `{ name = { enable = [ … ]; disable = [ … ]; }; }` when the question is what
+  # something *costs to keep* rather than what it costs to add — which is the
+  # direction `OS-023` (#339) asks in.
 , variants ? { }
 , kernel ? pkgs.linux_6_12
 }:
@@ -51,7 +53,13 @@ let
   # longer one is a bigger image.
   cmdline = "console=ttyS0,115200 panic=-1";
 
-  configFor = name: symbols: pkgs.runCommand "kmsrsos-delta-${name}-config"
+  # Both spellings, so a list stays the common case.
+  normalise = spec:
+    if builtins.isList spec
+    then { enable = spec; disable = [ ]; }
+    else { enable = spec.enable or [ ]; disable = spec.disable or [ ]; };
+
+  configFor = name: spec: pkgs.runCommand "kmsrsos-delta-${name}-config"
     {
       nativeBuildInputs = with pkgs; [
         bison flex bc perl gnumake gcc pkg-config ncurses openssl elfutils
@@ -62,9 +70,14 @@ let
     cd linux-*
     patchShebangs scripts/
     cp ${base} .config
+    # The store copy is read-only, and `scripts/config` edits in place.
+    chmod +w .config
 
-    for opt in ${builtins.concatStringsSep " " symbols}; do
+    for opt in ${builtins.concatStringsSep " " (normalise spec).enable}; do
       ./scripts/config --enable "$opt"
+    done
+    for opt in ${builtins.concatStringsSep " " (normalise spec).disable}; do
+      ./scripts/config --disable "$opt"
     done
 
     # The same `olddefconfig` the real build runs, so a symbol that drags a
@@ -86,10 +99,10 @@ let
     sed -i 's/^ *//' $out
   '';
 
-  buildFor = name: symbols: pkgs.linuxKernel.manualConfig {
+  buildFor = name: spec: pkgs.linuxKernel.manualConfig {
     inherit (kernel) version src;
     pname = "kmsrsos-delta-${name}";
-    configfile = configFor name symbols;
+    configfile = configFor name spec;
     allowImportFromDerivation = true;
   };
 

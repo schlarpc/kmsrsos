@@ -24,14 +24,39 @@
 let
   enable = [
     # --- core ---
-    # EPOLL and EVENTFD are not optional: mio is the one event loop on every
-    # target (`ARCH-005`), and its Waker is an eventfd.
+    # `OS-023` (#339) says every entry here is justified or removed. One line
+    # per group, and where a group has an entry that is not obvious it is named.
+    #
+    #   EPOLL, EVENTFD  tokio's reactor and its Waker (`OS-024`, #340). This
+    #                   comment used to say "mio is the one event loop", which
+    #                   was true until that issue replaced it — mio is still
+    #                   here, as tokio's insides, and is no longer the thing to
+    #                   name.
+    #   TIMERFD         tokio's timers, which is what `OS-024` was about: DHCP
+    #                   at T1 and T2 (#335), SNTP polling (#336) and connection
+    #                   deadlines all want one.
+    #   SIGNALFD        `ctrlc`'s handler, and therefore the drain that
+    #                   `OS-026` (#343)'s power button reaches.
+    #   FUTEX           any `std::sync` primitive, of which the console pump and
+    #                   the reaper both use several.
+    #   MULTIUSER       `std` will not build without the uid/gid syscalls.
+    #   BINFMT_ELF      how the kernel executes `/init`. Nothing else runs, and
+    #                   nothing else needs a loader.
+    #   PRINTK_TIME     the timestamps every diagnosis on this target has used.
+    #
+    # `ELF_CORE` was in this group and is gone. It is gated by `CONFIG_COREDUMP`,
+    # which `tinyconfig` turns off, so enabling it changed nothing — removing it
+    # produced a byte-identical `kernel.config`. There is nowhere to write a core
+    # dump to anyway (axiom A5), and pid 1 dying is a kernel panic rather than a
+    # dump. Third inert entry found by `OS-023` (#339), after `DEBUG_KERNEL` and
+    # the `IP_PNP` group.
     "64BIT" "SMP" "MULTIUSER" "POSIX_TIMERS" "FUTEX" "EPOLL" "EVENTFD"
-    "SIGNALFD" "TIMERFD" "BINFMT_ELF" "PRINTK" "PRINTK_TIME" "BUG" "ELF_CORE"
+    "SIGNALFD" "TIMERFD" "BINFMT_ELF" "PRINTK" "PRINTK_TIME" "BUG"
 
-    # Retained deliberately. A unikernel has no privilege separation at all;
-    # this is the one mitigation that lets a network-facing pid 1 running as
-    # root give up everything but its event loop once it has bound.
+    # Kept for `SEC-005` (#197), which is not written yet — so this is a
+    # *reservation*, and saying so is the point. The comment here used to read
+    # as though the mitigation were already applied; nothing in this tree calls
+    # `seccomp(2)` today. Measured cost of keeping it: see `.#linux-deltas`.
     "SECCOMP" "SECCOMP_FILTER"
 
     # --- no block layer at all ---
@@ -78,11 +103,56 @@ let
     #
     # E1000 is one driver for very broad reach: every hypervisor can emulate an
     # Intel NIC, so it is the difference between "boots on Proxmox" and "boots
-    # wherever someone tries it". hv_netvsc is deliberately absent — it drags in
-    # the whole VMBus stack, which is not a driver-sized cost.
+    # wherever someone tries it".
     "NET" "INET" "IPV6" "PACKET" "UNIX" "SYSVIPC"
     "NETDEVICES" "ETHERNET" "NET_CORE"
     "VIRTIO_NET" "NET_VENDOR_INTEL" "E1000" "E1000E"
+
+    # --- the rest of the platform matrix (`OS-025`, #342) ---
+    #
+    # Two of the four NIC models the Proxmox web UI offers used to produce a
+    # machine that booted to completion, printed `listening`, and served nobody
+    # forever. No driver, so no interface, so no address, and nothing said so.
+    # Every driver below is a row in the matrix in `docs/deployment.md`, and
+    # every one has a measured cost rather than an estimated one — run
+    # `nix build .#linux-deltas` to reproduce the numbers, which are taken on
+    # the built bzImage with the initramfs held constant.
+    #
+    #   vmxnet3   +24 KiB   VMware ESXi and Workstation's default for a modern
+    #                       Linux guest; Proxmox's "VMware vmxnet3" entry
+    #   8139cp    +12 KiB   Proxmox's "Realtek RTL8139" entry, and the default
+    #   8139too             emulated NIC on Xen HVM (XCP-ng, Citrix)
+    #   pcnet32   +12 KiB   VirtualBox's older adapter choices
+    #   tulip     +16 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
+    #                       which is a DEC 21140
+    #   ena       +24 KiB   EC2 Nitro (`OS-027`, #344)
+    #
+    # All of them together: **+120 KiB**, 2 364 416 -> 2 487 296. Less than the
+    # sum, because two drivers sharing a vendor gate pay for it once.
+    "NET_VENDOR_VMWARE" "VMXNET3"
+    "NET_VENDOR_REALTEK" "8139CP" "8139TOO"
+    "NET_VENDOR_AMD" "PCNET32"
+    "NET_VENDOR_DEC" "NET_TULIP" "TULIP"
+    "NET_VENDOR_AMAZON" "ENA_ETHERNET"
+
+    # --- VMBus (`OS-025`, #342) ---
+    #
+    # This list used to say hv_netvsc "drags in the whole VMBus stack, which is
+    # not a driver-sized cost". That comment is superseded twice over.
+    #
+    # It is wrong on the facts. Measured: **+40 KiB**, less than twice a plain
+    # PCI driver and a sixth of what the Xen paravirt stack costs. The estimate
+    # was never taken on a built image, which is what `.#linux-deltas` now
+    # exists to prevent.
+    #
+    # And it was answering the wrong question. Hyper-V Generation 2 has **no
+    # emulated NIC at all** — there is no PCI device to fall back to — so on
+    # that platform this is not a driver, it is the difference between supported
+    # and unsupported. Azure is Generation 2, and arrives with it.
+    #
+    # HYPERV_TIMER is here for the same reason `KVM_GUEST` is: the reference
+    # TSC keeps the clock close between the SNTP polls of `OS-020` (#336).
+    "HYPERV" "HYPERV_NET" "HYPERV_TIMER"
 
     # --- virtio ---
     # VIRTIO_CONSOLE and VIRTIO_BALLOON are for `OS-022` (#338). The balloon is
@@ -145,12 +215,64 @@ let
     "NAMESPACES" "CGROUPS" "SECURITY" "KVM" "VFIO"
     "SCSI" "ATA" "NVME_CORE" "MD" "BLK_DEV"
     "EXT4_FS" "OVERLAY_FS" "FUSE_FS" "ISO9660_FS" "VFAT_FS" "NFS_FS"
-    "9P_FS" "VIRTIO_FS" "VIRTIO_BLK" "DEBUG_KERNEL"
+    "9P_FS" "VIRTIO_FS" "VIRTIO_BLK"
+
+    # `OS-023` (#339): four drivers nobody asked for, on since `OS-017` (#333).
+    # Found by reading the *built* config rather than this list, which is the
+    # whole lesson of `OS-006` (#257) and is now `kernel_tcb.rs`'s job.
+    #
+    #   INTEL_MEI      the Intel Management Engine interface. A guest has no ME,
+    #   INTEL_MEI_ME   and nothing here would talk to one if it did.
+    #   I2C_HID        HID over I2C — a laptop touchpad transport. Arrived with
+    #                  the input subsystem; a hypervisor emulates no such bus.
+    #   THERMAL        thermal zones and governors. A VM has no temperature to
+    #                  govern, and could do nothing about it if it had.
+    #   HID            the human-interface-device stack, and HID_GENERIC with
+    #                  it. The power button is an ACPI device read through
+    #                  evdev; nothing here is a HID.
+    #
+    # ACPI_THERMAL goes with them: it is the ACPI thermal-zone driver, and a
+    # guest has no zones. `CONFIG_THERMAL` itself stays and is deliberately
+    # *not* on this list — `CONFIG_ACPI_PROCESSOR` selects it, and that one
+    # earns its place, since ACPI idle states are what let a host that is idle
+    # 99.99 % of the time stop burning a core on the hypervisor. Chasing
+    # THERMAL out would mean giving that up for a few kilobytes.
+    #
+    # Same shape as the `DEBUG_KERNEL` finding above: an entry that cannot be
+    # honoured is worse than no entry, so the reason is written down instead.
+    "INTEL_MEI" "INTEL_MEI_ME" "I2C_HID" "ACPI_THERMAL"
+    "HID" "HID_GENERIC"
+
+    # `DEBUG_KERNEL` was here and has been removed, because it is a statement
+    # this build cannot make. `tinyconfig` requires `CONFIG_EXPERT`, and EXPERT
+    # *selects* DEBUG_KERNEL — init/Kconfig says so, with the comment "Unhide
+    # debug options, to make the on-by-default options visible". So it is a menu
+    # gate rather than code, `olddefconfig` turns it back on every time, and it
+    # sat on this list for two issues doing nothing.
+    #
+    # What it unhides is what actually costs something, so that is what is named
+    # instead. `kernel_tcb.rs` asserts all of it against the *built* config.
+    "DEBUG_MISC" "DYNAMIC_DEBUG" "DEBUG_FS" "KGDB" "MAGIC_SYSRQ"
+    "KASAN" "KCSAN" "UBSAN" "DEBUG_KMEMLEAK" "GDB_SCRIPTS"
     # `OS-019` (#335). Asserted rather than merely omitted: `olddefconfig`
     # answers `y` to IP_PNP as a dependency of things that have nothing to do
     # with it, and two DHCP clients in one machine is exactly the disagreement
     # this issue removed.
     "IP_PNP" "IP_PNP_DHCP" "IP_PNP_BOOTP" "IP_PNP_RARP"
+
+    # `OS-025` (#342): the Xen *paravirt* path, declined on the measurement.
+    #
+    # `XEN` + `XEN_NETDEV_FRONTEND` costs **+148 KiB** — 6 % of the whole
+    # kernel, and 3.7 times what VMBus costs — because it is xenbus, grant
+    # tables and event channels rather than a driver. What it buys is better
+    # throughput on XCP-ng and Citrix Hypervisor, whose *default* emulated NIC
+    # is RTL8139 and therefore already works for +12 KiB.
+    #
+    # A host that answers one 384-byte request per client per few hours does not
+    # need the faster path, so this is the one row of the matrix taken by the
+    # emulated device rather than the paravirtual one. Named here rather than
+    # merely omitted, so the trade is visible when somebody proposes it again.
+    "XEN" "XEN_NETDEV_FRONTEND"
   ];
 in
 pkgs.runCommand "kmsrsos-kernel-config"
