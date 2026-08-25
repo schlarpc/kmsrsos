@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this project is
 
 A KMS (Key Management Service) host emulator in pure safe Rust, targeting Linux, Windows and bare
-metal (Hermit unikernel with virtio-net). Design goals: correct by construction, zero runtime
+metal (a Linux kernel with this program as PID 1). Design goals: correct by construction, zero runtime
 configuration, no disk I/O, maximal client compatibility, and anti-fingerprinting parity with a
 genuine Microsoft KMS host.
 
@@ -17,13 +17,13 @@ comments**, because it survives even if an issue is closed and superseded.
 
 Two documents hold what a tracker holds badly:
 
-- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 35
+- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 38
   decisions taken and why, and 41 things deliberately *not* built. Declined items have no issue by
   definition, so this is the only record that they were considered. **Read this before proposing
   anything that looks obviously missing.**
 - **[`docs/deployment.md`](docs/deployment.md)** — the operator-facing half: the loopback constraint,
-  the `_vlmcs._tcp` SRV record shape, the Hermit/Proxmox requirements (serial console, `host` CPU
-  type, the boot-args configuration channel) and the argument that nothing secret ships.
+  the `_vlmcs._tcp` SRV record shape, what a Proxmox VM actually needs (which since #334 is nothing
+  beyond attaching the ISO) and the argument that nothing secret ships.
 - **[`docs/reference.md`](docs/reference.md)** — **generated**; do not edit by hand. Routes, metrics,
   exit codes, what a build decides and what is in the shipped database, read off the program. Drift
   fails CI (`PKG-010`, #247); regenerate with
@@ -31,7 +31,7 @@ Two documents hold what a tracker holds badly:
 - **[`docs/releasing.md`](docs/releasing.md)** — what a tag produces, how to verify a signature, and
   the release-notes template whose first section is always *protocol-visible changes*.
 - **[`docs/research-findings.md`](docs/research-findings.md)** — Microsoft-sourced CSVLK, counted-ID,
-  GVLK and host-build tables; the Hermit/Proxmox platform constraints; and a coverage map from the
+  GVLK and host-build tables; the hypervisor platform constraints; and a coverage map from the
   audits' findings onto issue numbers.
 
 Supporting audits, all in `docs/`: `kms-emulator-feature-matrix.md` (cross-implementation synthesis,
@@ -121,8 +121,7 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 
 - `nix build` — build the package
 - `nix build .#windows` — cross-compile for Windows (x86_64-pc-windows-msvc)
-- `nix build .#hermit` — the Hermit unikernel application; `.#hermit-kernel` for `libhermit.a` alone
-- `nix build .#osIso` — a bootable UEFI ISO of that unikernel; `.#osImage` for a GPT disk image
+- `nix build .#linuxIso` — the bare-metal ISO; `.#linux-kernel` for the bzImage alone
 - `nix flake check` — run all checks (build, clippy, fmt, test, coverage)
 - `nix flake update` — update flake inputs
 
@@ -137,7 +136,7 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 
 ## Architecture
 
-Eight crates in one workspace. The split is load-bearing, not cosmetic — see `ARCH-001` (#1).
+Seven crates in one workspace. The split is load-bearing, not cosmetic — see `ARCH-001` (#1).
 
 | Crate | `no_std`? | Contents |
 |---|---|---|
@@ -148,16 +147,16 @@ Eight crates in one workspace. The split is load-bearing, not cosmetic — see `
 | `kmsrs-policy` | `no_std + alloc` | Activation policy, host-state model, identity, event log. Sans-io. |
 | `kmsrs-server` | std | Platform layer, listeners, concurrency, HTTP responder, wiring |
 | `kmsrs-client` | std | Diagnostic / validation / soak client |
-| `kmsrs-os` | std (hermit) | Hermit unikernel binary |
 
 Plus `kmsrs-fuzz` and `kmsrs-vectors` for test infrastructure.
 
 ### Invariants that must not be violated
 
-- **`#![forbid(unsafe_code)]` everywhere** except a single documented boundary in `kmsrs-os`.
+- **`#![forbid(unsafe_code)]` everywhere**, with no exception. The one documented boundary lived in
+  `kmsrs-os` and went with Hermit (#334); `workspace_invariants.rs` fails if the word reappears.
 - **The core is sans-io.** `kmsrs-proto` and `kmsrs-policy` take bytes and a clock reading and return
   events. No sockets, no clock reads, no RNG inside them — time and entropy are *inputs*. This is what
-  makes fuzzing, differential testing and the Hermit platform split possible.
+  makes fuzzing, differential testing and swapping the I/O driver possible.
 - **No runtime configuration** beyond the single `KMSRSOS_CONFIG` env var, which may only touch
   settings that cannot change a byte on the wire. See `CFG-001` (#166).
 - **No disk I/O.** No files, no temp files, no databases, no log files. Logs go to stderr; state
@@ -170,7 +169,7 @@ Plus `kmsrs-fuzz` and `kmsrs-vectors` for test infrastructure.
 - **No `as` casts in wire handling**; `TryFrom` and `checked_*` only.
 - **Per-request state is owned by the request**, never a shared mutable map.
 - **One driver, not one per platform.** `kmsrs-server` runs a single mio event loop on Linux, Windows
-  and Hermit. Platform differences that remain are socket *semantics*, and each is a named capability
+  and bare metal. Platform differences that remain are socket *semantics*, and each is a named capability
   whose branches are all compiled and tested everywhere — never a `cfg` on an item, which only ever
   compiles on the platform you cannot test. See the superseding decision on `ARCH-005` in
   [`docs/decisions.md`](docs/decisions.md).

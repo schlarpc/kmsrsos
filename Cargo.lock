@@ -395,13 +395,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kmsrs-os"
-version = "0.1.0"
-dependencies = [
- "kmsrs-server",
-]
-
-[[package]]
 name = "kmsrs-policy"
 version = "0.1.0"
 dependencies = [

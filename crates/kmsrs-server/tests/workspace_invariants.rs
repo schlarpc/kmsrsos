@@ -31,12 +31,15 @@ const QUARANTINED_CRATE: &str = "kmsrs-dbgen";
 /// The binaries whose dependency closure is audited. `kmsrs-vectors` is test
 /// infrastructure and `kmsrs-dbgen` is the quarantine subject, so neither is a
 /// shipped artifact.
-const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client", "kmsrs-os"];
+const SHIPPED_BINARIES: &[&str] = &["kmsrs-server", "kmsrs-client"];
 
-/// The one crate permitted to define its own lint table instead of inheriting
-/// the workspace's, because it holds the single documented unsafe boundary
-/// (`SEC-001`, #193; `OS-013`, #264).
-const UNSAFE_BOUNDARY_CRATE: &str = "kmsrs-os";
+// No crate is permitted to define its own lint table any more. `kmsrs-os` held
+// the single documented unsafe boundary (`SEC-001`, #193; `OS-013`, #264) and
+// set `deny` where the workspace sets `forbid`, so a boundary would have had to
+// name itself. `OS-018` (#334) removed that crate with Hermit, and the boundary
+// went with it — never having contained any `unsafe` at all. The workspace
+// `forbid` is now absolute, which is a stronger statement than this test was
+// originally written to make.
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -172,44 +175,12 @@ fn every_crate_inherits_the_workspace_lint_table() {
             .get("lints")
             .unwrap_or_else(|| panic!("{name} has no [lints] table (ARCH-008, #8)"));
 
-        if name == UNSAFE_BOUNDARY_CRATE {
-            assert_eq!(
-                lints["rust"]["unsafe_code"].as_str(),
-                Some("deny"),
-                "{name} holds the single documented unsafe boundary (OS-013, #264), so it \
-                 defines its own lint table — but unsafe_code must still be denied, so that \
-                 the boundary has to name itself with an explicit expect and a safety comment."
-            );
-
-            // Its table is a copy, so it can drift. Every lint the workspace
-            // sets must be set here to at least the same severity; otherwise
-            // adding a deny to the workspace would silently exempt this crate,
-            // which is the one crate where that matters most.
-            for table in ["rust", "clippy"] {
-                let workspace_lints = workspace["workspace"]["lints"][table]
-                    .as_table()
-                    .expect("the workspace lint table has rust and clippy sections");
-                for (lint, level) in workspace_lints {
-                    // The one deliberate difference, asserted separately above.
-                    if lint == "unsafe_code" {
-                        continue;
-                    }
-                    assert_eq!(
-                        lints[table].get(lint.as_str()),
-                        Some(level),
-                        "{name}'s copied lint table has drifted: {table}::{lint} is set to \
-                         {level:?} at the workspace level but not here (ARCH-008, #8)"
-                    );
-                }
-            }
-        } else {
-            assert_eq!(
-                lints.get("workspace").and_then(toml::Value::as_bool),
-                Some(true),
-                "{name} must say `[lints] workspace = true`. Only {UNSAFE_BOUNDARY_CRATE} may \
-                 define its own table (SEC-001, #193)."
-            );
-        }
+        assert_eq!(
+            lints.get("workspace").and_then(toml::Value::as_bool),
+            Some(true),
+            "{name} must say `[lints] workspace = true`. No crate defines its own \
+             table any more (SEC-001, #193; OS-018, #334)."
+        );
     }
 }
 
@@ -397,27 +368,28 @@ fn only_the_operational_config_can_be_deserialised() {
 /// `OS-013` (#264): the unsafe boundary is empty, and there is exactly one
 /// place it could ever be.
 ///
+/// `SEC-001` (#193), `OS-013` (#264): no `unsafe` anywhere, at all.
+///
 /// The workspace lint table sets `unsafe_code = "forbid"`, and `forbid` cannot
 /// be lifted by an inner `allow` — which is the property that makes it worth
-/// setting there. `kmsrs-os` is the single crate permitted to override it, and
-/// it sets `deny` instead: a boundary would have to name itself with an
-/// explicit `#[expect(unsafe_code)]` carrying a safety comment, and every other
-/// line in the crate is still rejected.
+/// setting there. `kmsrs-os` used to be the single crate permitted to override
+/// it with the weaker `deny`, so that the documented boundary would have to
+/// name itself with an explicit `#[expect(unsafe_code)]` and a safety comment.
 ///
-/// Today it contains **none**, which is the answer this issue was open to
-/// establish rather than to arrange. The Hermit platform layer is still
-/// `OS-001` (#252), so the honest statement is "no unsafe yet, and one place it
-/// may appear" rather than "no unsafe ever" — and this test is what turns the
-/// second half into something that has to be argued for at a review rather than
-/// spread quietly.
+/// It never contained any. `OS-018` (#334) removed that crate along with
+/// Hermit, so the exception is gone and the statement is now the simple one:
+/// no shipped crate contains the word, not even in a comment. The over-reach is
+/// deliberate — a reader grepping this tree for `unsafe` should find nothing
+/// and never have to decide which hits are real.
+///
+/// The `OS-021` (#337) pid-1 work is where this would come under pressure,
+/// since `mount(2)` and `waitpid(2)` are syscalls. `rustix` is the answer and
+/// the reason it was chosen: safe bindings mean the boundary stays empty rather
+/// than reopening.
 #[test]
-fn the_unsafe_boundary_is_empty_and_singular() {
+fn no_shipped_crate_contains_unsafe() {
     let root = workspace_root();
 
-    // Nothing that ships contains the word at all — not even in a comment,
-    // which is a deliberate over-reach: the point is that a reader grepping for
-    // `unsafe` in this tree finds either nothing or the one boundary, and never
-    // has to decide which hits are real.
     let mut found = Vec::new();
     for (name, manifest_path) in crate_manifests(&root) {
         let Some(source_dir) = manifest_path.parent().map(|dir| dir.join("src")) else {
@@ -447,21 +419,10 @@ fn the_unsafe_boundary_is_empty_and_singular() {
 
     assert!(
         found.is_empty(),
-        "the unsafe boundary is supposed to be empty (OS-013, #264). If one of          these is the documented boundary in {UNSAFE_BOUNDARY_CRATE}, this test          is what should be updated — deliberately, in the same commit:          {found:#?}"
-    );
-
-    // And the one crate that *could* hold one still declares the weaker lint,
-    // so a boundary would have to name itself rather than appearing.
-    let manifest = std::fs::read_to_string(
-        root.join("crates")
-            .join(UNSAFE_BOUNDARY_CRATE)
-            .join("Cargo.toml"),
-    )
-    .expect("the boundary crate's manifest");
-    assert!(
-        manifest.contains("unsafe_code = \"deny\""),
-        "{UNSAFE_BOUNDARY_CRATE} no longer denies unsafe, so a boundary could \
-         appear without saying so"
+        "no crate in this workspace may contain `unsafe` (SEC-001, #193; \
+         OS-013, #264). If a boundary is genuinely needed, reopening it is a \
+         decision for a review and this test is what should be updated in the \
+         same commit: {found:#?}"
     );
 }
 

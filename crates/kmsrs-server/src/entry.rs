@@ -16,7 +16,6 @@ use crate::config::{Compiled, Discovered, Operational};
 use crate::log::{Logger, Severity};
 use crate::net::driver::{Driver, MAX_CONNECTIONS, Role, ShutdownHandle};
 use crate::net::listener::bind_all;
-use crate::platform::SignalHandling;
 use crate::{OsEntropy, PRODUCT_NAME, Server};
 use core::sync::atomic::{AtomicBool, Ordering};
 use kmsrs_proto::time::Instant;
@@ -277,15 +276,7 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
         logger.message(Severity::Info, "shutdown", "draining");
         shutdown.request();
     }) {
-        Ok(SignalHandling::Installed) => {}
-        // Not a warning. A target with no signals has not failed to deliver
-        // one, and logging it as a problem would train an operator to ignore
-        // the line that does mean something.
-        Ok(SignalHandling::Unsupported) => logger.message(
-            Severity::Info,
-            "shutdown",
-            "this target has no signals; stopping is the hypervisor's job",
-        ),
+        Ok(()) => {}
         Err(error) => logger.message(
             Severity::Warn,
             "shutdown",

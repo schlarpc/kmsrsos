@@ -22,26 +22,12 @@ serde.workspace = true
 toml.workspace = true
 mio.workspace = true
 
-# OS-015 (#298), PKG-013 (#250): the two dependencies that are target-gated, and
-# in both cases the reason is that they do not exist on the third target rather
-# than that we do not want them.
-#
-# `ctrlc` picks its implementation with `#[cfg(unix)]` and `#[cfg(windows)]`;
-# Hermit is neither, so the module is simply absent and the crate does not
-# compile there. Hermit has no signals to handle in the first place
-# (docs/research-findings.md §R2), so nothing is lost.
-#
-# `socket2` is the same shape: its `sys` module is `#[cfg(unix)]`/`#[cfg(windows)]`
-# and nothing else, so on Hermit the build fails with `E0583` before any of our
-# code is reached. Both options it is used for are already known to be
-# unreachable or a no-op there (`OS-010`, #261), so the Hermit branch of
-# `net::listener` binds with `std::net::TcpListener` instead — see
-# `platform::BACKLOG_IS_EXPLICIT` for the one property that is thereby lost.
-#
-# This is the exception to "never a cfg on an item": every other platform
-# difference is a `const bool` in src/platform.rs whose branches all compile
-# everywhere. No runtime bool can select around a crate that will not build.
-[target.'cfg(not(target_os = "hermit"))'.dependencies]
+# `ctrlc` and `socket2` both select their implementation with `#[cfg(unix)]`
+# and `#[cfg(windows)]`. They used to be target-gated here, because Hermit was
+# neither and the modules were simply absent — the one documented exception to
+# "never a cfg on an item" (`OS-015`, #298; `PKG-013`, #250), since no runtime
+# bool can select around a crate that will not build. `OS-018` (#334) removed
+# that target, so they are ordinary dependencies and the exception is gone.
 ctrlc.workspace = true
 socket2.workspace = true
 

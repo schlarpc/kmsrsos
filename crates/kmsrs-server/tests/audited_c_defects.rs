@@ -429,25 +429,18 @@ mod uninitialised_listener_slot {
         }
     }
 
-    /// The Hermit case is the one that matters: its `bind()` records the
-    /// address and ignores it, passing only the port to smoltcp, so two sockets
-    /// on one port race with no defined dispatch (`OS-009`, research §R2).
-    /// Both branches compile on every host precisely so this can be checked
-    /// here rather than only on the target.
+    /// Two sockets on one port race with no defined dispatch, whatever the
+    /// platform. That was `OS-009` (#260) on Hermit, whose `bind()` recorded
+    /// the address and then ignored it; the target is gone (`OS-018`, #334)
+    /// but the property is still worth pinning, because it is the same shape
+    /// that overwrote a listener slot in vlmcsd.
     #[test]
-    fn a_single_socket_platform_asks_for_exactly_one() {
-        assert_eq!(
-            addr::SINGLE_SOCKET_ADDRESSES.len(),
-            1,
-            "a platform whose bind() ignores the address was given more than \
-             one socket on the same port"
-        );
+    fn no_two_listeners_share_an_address_family() {
+        let bound = addr::bind_addresses();
         assert_eq!(addr::DUAL_STACK_ADDRESSES.len(), 2);
-        if addr::SINGLE_SOCKET_ONLY {
-            assert_eq!(addr::bind_addresses().len(), 1);
-        } else {
-            assert_eq!(addr::bind_addresses().len(), 2);
-        }
+        assert_eq!(bound.len(), 2);
+        assert_eq!(bound.iter().filter(|a| a.is_ipv4()).count(), 1);
+        assert_eq!(bound.iter().filter(|a| a.is_ipv6()).count(), 1);
     }
 }
 

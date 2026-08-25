@@ -36,47 +36,6 @@
         "type": "github"
       }
     },
-    "hermit-kernel": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1787156144,
-        "narHash": "sha256-o63MofS8Rfh0kvhb0hOhuYGUpkDIc1wZyocCn2COZXY=",
-        "owner": "hermit-os",
-        "repo": "kernel",
-        "rev": "906ea2aae194d52af338e0be22812f90f791f927",
-        "type": "github"
-      },
-      "original": {
-        "owner": "hermit-os",
-        "repo": "kernel",
-        "rev": "906ea2aae194d52af338e0be22812f90f791f927",
-        "type": "github"
-      }
-    },
-    "hermit-loader-efi": {
-      "flake": false,
-      "locked": {
-        "narHash": "sha256-4+hd56ATSsLMSGkMVBqdBhgNkZwpUu102dune/m8NE4=",
-        "type": "file",
-        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64.efi"
-      },
-      "original": {
-        "type": "file",
-        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64.efi"
-      }
-    },
-    "hermit-loader-multiboot": {
-      "flake": false,
-      "locked": {
-        "narHash": "sha256-ZTuzYvuOtjMYpoiHsi0skoiiHiBuWDWPminoTObb+ag=",
-        "type": "file",
-        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64-multiboot"
-      },
-      "original": {
-        "type": "file",
-        "url": "https://github.com/hermit-os/loader/releases/download/v0.5.7/hermit-loader-x86_64-multiboot"
-      }
-    },
     "nix-direnv": {
       "inputs": {
         "flake-parts": "flake-parts",
@@ -118,13 +77,9 @@
     "root": {
       "inputs": {
         "crane": "crane",
-        "hermit-kernel": "hermit-kernel",
-        "hermit-loader-efi": "hermit-loader-efi",
-        "hermit-loader-multiboot": "hermit-loader-multiboot",
         "nix-direnv": "nix-direnv",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay",
-        "rust-std-hermit": "rust-std-hermit",
         "systems": "systems"
       }
     },
@@ -146,19 +101,6 @@
         "owner": "oxalica",
         "repo": "rust-overlay",
         "type": "github"
-      }
-    },
-    "rust-std-hermit": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1783076279,
-        "narHash": "sha256-W0KHT89+IFFFpm9cv5EgSUf/yjio38hkqD/ASzZZ/3c=",
-        "type": "tarball",
-        "url": "https://github.com/hermit-os/rust-std-hermit/releases/download/1.96.1/rust-std-1.96.1-x86_64-unknown-hermit.tar.gz"
-      },
-      "original": {
-        "type": "tarball",
-        "url": "https://github.com/hermit-os/rust-std-hermit/releases/download/1.96.1/rust-std-1.96.1-x86_64-unknown-hermit.tar.gz"
       }
     },
     "systems": {

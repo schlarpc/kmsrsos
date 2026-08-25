@@ -20,7 +20,6 @@ members = [
     "crates/kmsrs-policy",
     "crates/kmsrs-server",
     "crates/kmsrs-client",
-    "crates/kmsrs-os",
     "crates/kmsrs-vectors",
 ]
 # Both need a nightly toolchain the workspace is deliberately not pinned to, so
@@ -94,9 +93,9 @@ serde_json = { version = "=1.0.151" }
 # Workspace lint policy (ARCH-008, #8; SEC-001, #193).
 #
 # `unsafe_code = "forbid"` is set here rather than per-crate so that a new crate
-# cannot silently opt out by forgetting the inner attribute. `kmsrs-os` is the
-# single documented exception (OS-013, #264) and overrides this table with its
-# own; it is the only manifest in the tree permitted to do so.
+# cannot silently opt out by forgetting the inner attribute. There is no
+# exception any more: `kmsrs-os` held the only one (`OS-013`, #264) and went
+# with Hermit in `OS-018` (#334), so the forbid is now genuinely workspace-wide.
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

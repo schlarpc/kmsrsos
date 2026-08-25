@@ -12,7 +12,7 @@ any of this are in [`decisions.md`](decisions.md).
 - [Building it, and configuring it](#building-it-and-configuring-it)
 - [systemd](#systemd)
 - [Containers and Kubernetes](#containers-and-kubernetes)
-- [Hermit on QEMU and Proxmox](#hermit-on-qemu-and-proxmox)
+- [Bare metal: Linux, on QEMU or Proxmox](#bare-metal-linux-on-qemu-or-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
 
 ---
@@ -153,8 +153,7 @@ That doctrine is only usable if the rebuild is two lines, so it is a function (`
 }
 ```
 
-It returns `{ server, client, container }`. `osImage` joins that set once #250 has a hermetic Hermit
-build.
+It returns `{ server, client, container }`.
 
 Those four settings are the entire build-time surface — see [D37](decisions.md#d37) for why it is not
 thirty preprocessor macros and seven presets. A bad value is a **compile error** rather than a
@@ -303,336 +302,125 @@ route to.
 
 ---
 
-## Hermit on QEMU and Proxmox
+## Bare metal: Linux, on QEMU or Proxmox
 
-The bare-metal target is a [Hermit](https://github.com/hermit-os) unikernel: one binary that is the
-whole operating system, booted by a UEFI loader, talking to virtio-net. QEMU/libvirt is the supported
-configuration, because that is what hermit's own CI exercises on every pull request. Proxmox is a
-nice-to-have (decision 25), and the constraints below are why.
+The bare-metal target is one binary that is the whole userland: a Linux kernel built from an
+explicit allowlist, with `kmsrs-server` as **PID 1** and nothing else in the image. No init system,
+no shell, no libc on disk.
 
-The findings this section rests on are in
-[`research-findings.md` §R2](research-findings.md#r2--hermit-and-proxmox-feasibility), taken from the
-kernel and `qemu-server` sources rather than from documentation.
+This used to be a [Hermit](https://github.com/hermit-os) unikernel. `OS-018` (#334) replaced it, and
+[`decisions.md`](decisions.md#hermit-was-removed-rather-than-kept-os-018-334) is why: the unikernel
+needed three non-default VM settings, only one of which the Proxmox web UI can express, and failed
+quietly when they were missing.
 
-### The bootable artifacts (`OS-002`, #253)
+### The artifact (`OS-017`, #333)
 
-There are two, and they contain the same three files:
+```shell
+$ nix build .#linuxIso        # kmsrsos-linux.iso, 14 MiB
+$ nix build .#linux-kernel    # the bzImage on its own
+```
 
-| Path on the ESP | What it is |
-|---|---|
-| `\EFI\BOOT\BOOTX64.EFI` | the hermit loader — the path firmware starts by default |
-| `\EFI\hermit\hermit-app` | this program |
-| `\EFI\hermit\hermit-bootargs` | optional; the only runtime channel, see below |
+**One ISO, both firmwares.** `CONFIG_EFI_STUB` makes a `bzImage` simultaneously a PE/COFF executable
+and a Linux boot image — `MZ` at offset 0 and `HdrS` at 0x202 — so the same 2.7 MiB file is both
+`\EFI\BOOT\BOOTX64.EFI` for UEFI and an isolinux `KERNEL` line for BIOS. There is no bootloader on
+the UEFI path and nothing to register in NVRAM, so a fresh VM boots on its first try.
 
-That is the whole deployment. The loader reads all three itself, so there is no `-kernel`, no
-`-initrd` and nothing on the command line — which is what makes this deployable on Proxmox at all,
-since the web UI exposes no `args` field (`OS-008`, #259). Because the loader lives at the default
-boot path, nothing has to be registered in UEFI NVRAM and a fresh VM works on its first boot.
-
-| | `nix build .#osIso` | `nix build .#osImage` |
-|---|---|---|
-| Artifact | `kmsrsos-hermit.iso`, 17 MiB | `kmsrsos-hermit.img`, 128 MiB GPT disk |
-| Attach as | CD-ROM | disk |
-| Proxmox | **upload in the web UI**, attach, boot | `qm importdisk`, CLI only |
-| Boot args | rebuild the ISO | edit the file on the ESP, reboot |
-
-**Use the ISO unless you want to change boot args in place.** It is the only one deployable without
-touching a Proxmox shell, and a read-only boot medium is the right default for a host with no disk
-I/O anyway. Both are checked by `hermit-image-boot` on every change.
+The initramfs and the kernel command line are *inside* that file
+(`CONFIG_INITRAMFS_SOURCE`, `CONFIG_CMDLINE_OVERRIDE`). The second is not a convenience: it means a
+bootloader passing a different command line is **ignored**, so the kernel command line is a
+build-time decision like every other setting here (axiom A3, `CFG-001` #166).
 
 #### On Proxmox
 
-Create a VM with **no disk**, machine type `q35`, and BIOS **OVMF (UEFI)**. Upload
-`kmsrsos-hermit.iso` to your ISO storage, attach it to the CD-ROM drive, and put the CD-ROM first in
-the boot order.
+Create a VM with **no disk**, upload `kmsrsos-linux.iso` to your ISO storage, attach it to the
+CD-ROM drive, and boot it. That is the whole procedure. SeaBIOS or OVMF both work, so the default
+BIOS setting is fine and an EFI disk is only needed if you choose OVMF.
 
-An EFI disk for the variable store is worth adding to silence the `no efidisk configured! Using
-temporary efivars disk.` warning, but this image does not need one: the loader sits at the default
-boot path, so nothing is ever written to NVRAM that the next boot has to find, and a VM without one
-boots identically every time.
-
-Then, before starting it — none of these three is optional, and the first boot is the one whose
-output matters:
+Two things are worth adding, neither of which is required for it to serve:
 
 | | Why |
 |---|---|
-| **Hardware → Add → Serial Port**, port `0`, and **Options → Display → Serial terminal 0** | the guest's only console ([`OS-005`](#a-serial-port-is-mandatory-os-005-256)) |
-| **Options → Processors → Type: `host`** | RDSEED, or the CSPRNG silently falls back to an LCG ([below](#set-the-cpu-type-to-host)) |
-| `qm set <vmid> --args '-set device.net0.disable-legacy=on'` | otherwise virtio-net does not attach at all ([`OS-004`](#virtio-net-may-not-attach-at-all-os-004-255)) |
+| **Hardware → Add → virtio-rng** | Cuts time-to-serving from ~4.7 s to ~2.4 s. The program blocks in `getrandom(2)` until the kernel's CRNG is seeded, and on a CPU model without RDRAND that takes seconds of jitter entropy |
+| **Hardware → Add → Serial Port** `0`, then **Options → Display → Serial terminal 0** | Convenience, not necessity — the framebuffer console already shows the boot in the noVNC window |
 
-The third has no GUI field and is the one that decides whether the VM has a network. A VM built from
-the web UI defaults alone boots, appears to run, and answers nothing.
+**`cpu: host` is not needed.** It was mandatory on Hermit, whose only seed source was RDSEED. Linux
+seeds its CRNG on any CPU model; with virtio-rng attached, `host` and the default `kvm64` differ by
+noise.
 
-The disk-image route is `qm importdisk <vmid> kmsrsos-hermit.img <storage>`, then attach the
-resulting unused disk and set the boot order to it.
+**`qm set --args` is not needed.** Proxmox puts NICs on a conventional PCI bus and never emits
+`disable-legacy=on`, so the virtio-net device is *transitional* — PCI ID `0x1000` rather than
+`0x1041`. Hermit refused anything below `0x1040`, which is `OS-004` (#255) and is why that target
+needed a CLI-only workaround. Linux has driven transitional virtio devices for fifteen years.
 
 #### Locally
 
 ```shell
-$ cp /path/to/OVMF_VARS.fd vars.fd && chmod +w vars.fd
-$ qemu-system-x86_64 -machine q35 \
-    -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
+$ qemu-system-x86_64 -machine q35 -cpu qemu64 -enable-kvm \
     -smp 1 -m 512M -display none -serial stdio -no-reboot \
-    -drive if=pflash,format=raw,unit=0,readonly=on,file=/path/to/OVMF_CODE.fd \
-    -drive if=pflash,format=raw,unit=1,file=vars.fd \
-    -cdrom result-osiso/kmsrsos-hermit.iso \
+    -drive file=result/kmsrsos-linux.iso,media=cdrom,readonly=on \
     -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
-    -device virtio-net-pci,netdev=u1,disable-legacy=on
+    -device virtio-net-pci,netdev=u1 \
+    -device virtio-rng-pci
 ```
 
-The UEFI variable store is written to, so it cannot be the read-only store path. For the disk image,
-swap `-cdrom …` for `-drive format=raw,file=disk.img` and make a writable copy of that too.
+`kmsrs-client 127.0.0.1:1688` is the check that it answers *correctly*. The `linux-boot` check in
+`nix flake check` runs exactly this on both firmwares, on the PCI topology `qemu-server` emits, with
+no `--args` — so the two conditions that defeated the unikernel are exercised on every change.
 
-### Running it under plain QEMU (`OS-001`, #252)
+### What is in the kernel, and what is not
 
-`nix build .#hermit` produces `bin/kmsrsos-hermit`. That file is an application, not a bootable
-image: it has `ELFOSABI_STANDALONE` set and QEMU cannot start it directly. The
-[hermit-loader](https://github.com/hermit-os/loader) is what boots it, and its multiboot build is
-what `-kernel` takes:
+`os/linux/kernel.config` is checked in and is meant to be read. The base is `make tinyconfig`, so
+every subsystem defaults to **off** and each of the ~90 enabled entries is a deliberate line — the
+file is the statement of what is in this machine's TCB. `os/linux/config.nix` regenerates it and
+carries the reasoning per group.
 
-```shell
-$ qemu-system-x86_64 \
-    -cpu qemu64,apic,fsgsbase,fxsr,rdrand,rdseed,rdtscp,xsave,xsaveopt \
-    -smp 1 -m 512M -display none -serial stdio -no-reboot \
-    -kernel hermit-loader-x86_64-multiboot \
-    -initrd result/bin/kmsrsos-hermit \
-    -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
-    -device virtio-net-pci,netdev=u1,disable-legacy=on
-```
+**Axiom A5 is structural here.** `CONFIG_BLOCK` is unset: there is no block *layer*, not merely no
+block drivers, so disk I/O is a syscall with nothing behind it. The boot medium is invisible to the
+kernel — firmware reads the ESP and the image runs from RAM thereafter — so no ATAPI, no SCSI and no
+ISO9660 are compiled in either. After boot the CD-ROM could be ejected.
 
-The guest acquires a DHCPv4 lease, logs `listening 0.0.0.0:1688`, and answers. `kmsrs-client
-127.0.0.1:1688` is the check that it answers *correctly*; that exact sequence is the `hermit-boot`
-check in `nix flake check`, so it is exercised on every change rather than only when someone
-remembers.
+Also absent, deliberately: modules, netfilter, BPF, tracing, cgroups, namespaces, USB, sound, and
+every filesystem but ramfs, tmpfs, proc and sysfs.
 
-Three flags in that command line are not decoration. `rdseed` is what stops the guest refusing to
-serve — see [Set the CPU type to `host`](#set-the-cpu-type-to-host) for why. `disable-legacy=on` is
-what makes the virtio-net device non-transitional, which is the whole of
-[`OS-004`](#virtio-net-may-not-attach-at-all-os-004-255). And `-serial` is mandatory for the reason
-below.
+Present because something needs them: PCI and ACPI (the NIC is on a PCI bus), the 8250 UART **and** a
+framebuffer console, virtio-net plus `e1000`/`e1000e` for hypervisors that do not offer virtio,
+`seccomp`, and `kvmclock` — which is doing NTP's job until `OS-020` (#336) lands, and matters because
+this host validates client timestamps against a band.
 
-For a machine that boots from a disk rather than from `-kernel`, see `OS-002` (#253).
+### Addressing (`OS-003`, #254)
 
-### A serial port is mandatory (`OS-005`, #256)
+The guest takes its address from DHCP and there is nothing to configure. The server binds `0.0.0.0`
+and `[::]`, and no part of this program reads its own IP to decide anything.
 
-**Hermit's only console is the 16550 UART at `0x3F8`.** There is no VGA text mode, no framebuffer
-console, and no kernel-side logging to anywhere else. A VM without a serial port is a VM that boots
-in complete silence — including when it panics, which on a unikernel means the guest simply stops.
-
-In the Proxmox web UI, on the VM:
-
-1. **Hardware → Add → Serial Port**, port number `0`.
-2. **Options → Display → Serial terminal 0**.
-
-Then `qm terminal <vmid>` from the Proxmox host attaches to it. Under plain QEMU the equivalent is
-`-serial stdio` or `-nographic`.
-
-Do this **before** the first boot. Adding it afterwards works, but the first boot is the one whose
-output decides whether virtio-net attached at all, and that output is gone.
-
-### The configuration channel (`OS-008`, #259)
-
-There is exactly one runtime setting (`KMSRSOS_CONFIG`, `CFG-002` #167) and it reaches a Hermit guest
-through the loader's boot-arguments file, not through anything the hypervisor offers. What a Proxmox
-admin can set from the GUI, and whether it arrives:
-
-| Setting | GUI-settable | Reaches a Hermit guest |
-|---|:---:|---|
-| DHCP, via the network | yes | **yes** — the sanctioned path, and how the guest gets its address (#254) |
-| MAC address | yes | yes — readable by the guest, so it is a per-VM identifier if one is needed |
-| Serial port | yes | yes, and mandatory — see above |
-| CPU type (`host`) | yes | yes, and **required** — see entropy below |
-| SMBIOS type 1 fields | yes | **no** — the kernel has no DMI code and the loader discards the pointer |
-| Cloud-init drive | yes | **no** — it arrives as an ISO9660 block device, and there is no block driver |
-| virtio-fs share | yes | **no** — the driver is not compiled in (`OS-006`, #257) |
-| `args` / kernel command line | **no** (CLI only) | would work, but Proxmox does not expose it in the web UI |
-
-So the whole GUI-settable channel is **DHCP plus the MAC address**. Everything else comes from the
-ESP: a GPT disk whose EFI system partition holds `\EFI\BOOT\BOOTX64.EFI` (the hermit loader),
-`\EFI\hermit\hermit-app` (this binary) and optionally `\EFI\hermit\hermit-bootargs`, a plain text file
-the loader reads. Boot args accept `env=KEY=VALUE` tokens, which is how `KMSRSOS_CONFIG` is set.
-
-Worked example — serve the web UI on 8081 instead of 8080:
-
-```
-# \EFI\hermit\hermit-bootargs on the image's ESP
-env=KMSRSOS_CONFIG="web-ui-port = 8081"
-```
-
-**The quotes are not optional.** The kernel splits boot args with shlex, and a `KMSRSOS_CONFIG` value
-is a TOML document, which contains spaces. Unquoted, the line above becomes three words: the kernel
-takes the first as the setting, logs `could not parse bootarg` twice for the rest, and boots with the
-default port — a failure whose only symptom is that nothing changed. The `hermit-image-boot` check
-passes a quoted value and asserts the web UI moved, rather than asserting the file was read.
-
-Editing that file is the entire in-place reconfiguration story, and it is deliberately small: the
-doctrine is to rebuild the image from the flake (decision 13), and the escape hatch may only touch
-settings that cannot change a byte on the wire (`CFG-001`, #166).
-
-### Addressing is DHCPv4 (`OS-003`, #254)
-
-The guest takes its address from DHCP and there is nothing to configure. The `dhcpv4` feature is in
-the shipped kernel's feature set, the server binds `0.0.0.0`, and no part of this program reads its
-own IP to decide anything — so a lease that arrives late, changes, or is renewed is not an event the
-host has to handle. Give the VM a network the way you would give any other VM one, and reserve an
-address on the DHCP server if you want it to be stable, which you do: the SRV record has to point
+**Today that is the kernel's built-in client (`ip=dhcp`), which takes a lease and never renews it.**
+That is a stopgap, not a design — `OS-019` (#335) replaces it with a real client in the program.
+Until then, reserve the address on your DHCP server. You want to anyway: the SRV record has to point
 somewhere.
-
-The `HERMIT_IP`, `HERMIT_GATEWAY` and `HERMIT_MASK` variables exist, and are **not** the way to give
-this host a static address. With DHCPv4 compiled in the kernel treats them as a pre-lease fallback,
-logs a warning saying so, and overwrites them the moment a lease arrives. Worse, the kernel reads
-them through `option_env!` as well as at runtime, so a value set when the kernel was *built* is baked
-into every image — which is why nothing in `flake.nix` sets one and
-`crates/kmsrs-server/tests/hermit_addressing.rs` fails if that changes.
-
-If a genuinely static address is ever needed, the honest way to get it is a DHCP reservation. The
-kernel's own advice — disable the DHCP feature — would mean a second kernel build whose addressing
-came from the image rather than from the network.
-
-### No disk, structurally (`OS-006`, #257)
-
-Axiom A5 — no disk I/O — is a promise this program keeps on Linux and Windows. On Hermit it is a
-property of the machine. The kernel has no block device driver of any kind, so the two remaining ways
-a guest could reach storage are both Cargo features, and the shipped kernel is built with neither:
-
-- **`virtio-fs`**, the one an operator would attach in the GUI.
-- **`uhyve`**, which is not a device at all: it is a hypercall interface with `open`, `read`, `write`,
-  `close` and a `UHYVE_MOUNT` path map. Dropping it costs nothing here, because QEMU/libvirt is the
-  supported configuration (decision 25) — and an audit that goes looking for *drivers* never finds it.
-
-`write-pcap-file` is off for the same reason from the other end: it writes capture files to a guest
-path. `crates/kmsrs-server/tests/hermit_features.rs` fails if any of them comes back.
-
-Attaching a virtio-fs share, a cloud-init drive or a disk to the VM is therefore harmless and
-pointless: the guest cannot see any of them.
-
-### Set the CPU type to `host`
-
-**Options → Processors → Type: `host`.** Not cosmetic, and not about speed.
-
-Hermit's CSPRNG is properly built — ChaCha20, reseeded every second — but it has to be *seeded*, and
-in this build the only seed source is the **RDSEED** instruction. (`virtio-rng` is not compiled in;
-Proxmox's `virtio-rng-pci` lands on the same conventional PCI bus Hermit rejects, so it would not
-help even if it were.) On a seeding failure `sys_read_entropy` does not fail: it fills the buffer
-from a Park–Miller–Lehmer LCG instead, seeded from the timestamp counter at boot, and emits one
-warning to the serial console. `getrandom` sees an ordinary success and hands it on.
-
-That generator has 31 bits of state and a published multiplier. Every value this host draws — the
-RPC association group, response IVs and salts, the hardware ID, the randomised ePID fields — comes
-from it, and recovering its state from a handful of responses is arithmetic rather than
-cryptanalysis.
-
-Proxmox's default `kvm64` model does not expose RDSEED. Neither do `qemu64` or `x86-64-v2-AES`. So on
-a stock VM this is the likely path rather than the edge case.
-
-> **The start-up self-test does not catch this** — a defect, tracked as
-> [#332](https://github.com/schlarpc/kmsrsos/issues/332). `OS-012` (#263) tests for a source that
-> *repeats*, which is what the kernel used to do; the LCG advances, so two draws differ and the test
-> passes. What the console says is `Unable to read entropy! Fallback to a naive implementation!`,
-> once per draw, and the host then serves normally.
->
-> Until that is fixed, **check the serial console on first boot**. If that line is there, the CPU
-> type is wrong.
-
-The source is still re-tested every five minutes, and a source that starts *repeating* takes
-`/healthz` to 503 and `kmsrsos_entropy_healthy` to 0. That is the failure mode the test was built
-for; it is not this one.
 
 ### Memory (`OS-011`, #262)
 
-A unikernel has a fixed memory budget decided when the VM is created, no swap, and no OOM killer to
-pick a victim: a failed allocation in a program compiled with `panic = "abort"` stops the machine, and
-only the hypervisor can restart it. So the number that matters is not how much this host uses but how
-much it *can* use, and that is bounded by constants rather than by traffic.
+`crates/kmsrs-server/src/budget.rs` adds up the CMID table, the event-log ring buffer and the
+connection state budget, and asserts the total at **compile time**, so a build that would exceed the
+ceiling does not link. The current ceiling is 8 MiB of heap; 512 MiB is a comfortable VM size.
 
-`crates/kmsrs-server/src/budget.rs` adds them up — the CMID table, the event-log ring buffer and the
-connection state budget — and asserts the total at **compile time**, so a build that would exceed the
-ceiling does not link. The product database is not in that sum: it is `static` data in `.rodata`
-(`DB-003`, #127), part of the image rather than of the heap, and `DB-018` (#142) is where it is
-measured.
+The failure mode is worth knowing: this program is PID 1, the kernel refuses to OOM-kill PID 1, and
+`panic = "abort"` means a panic ends the machine. So an allocation failure is a kernel panic on the
+console rather than a silent restart — loud, which is the right direction, and the reason the budget
+is a compile-time assertion rather than a runtime check.
 
-The current ceiling is 8 MiB of heap. A Hermit guest is normally given 64 MiB or more, which leaves
-the kernel, the stacks and the network buffers an order of magnitude more room than this takes.
+### What still needs doing
 
-### virtio-net may not attach at all (`OS-004`, #255)
+The userland is one program, and several things a normal userland provides are not there yet:
 
-Proxmox always places NICs on a conventional PCI bus — `pci.0` is a `pci-bridge` behind an i82801b11
-bridge even on q35 — and **never** emits `disable-legacy=on`; there are zero occurrences of it in
-`qemu-server`. QEMU therefore presents a *transitional* virtio-net device with PCI ID `0x1000`, and
-Hermit refuses anything below `0x1040`.
+| | |
+|---|---|
+| DHCP lease renewal | `OS-019` (#335) |
+| Clock discipline (NTP) | `OS-020` (#336) — kvmclock only, today |
+| Reaper, `/proc` and `/dev` mounts, ACPI shutdown | `OS-021` (#337) |
+| Reporting the guest's address and memory to the hypervisor | `OS-022` (#338) |
 
-This is what happens. The log below is off real hardware — Proxmox 8.2.7, QEMU 9.0.2, a q35 VM
-created in the web UI with one virtio NIC and nothing unusual about it:
-
-```
-06:03 Unclassified device [00FF]: Red Hat, Inc. Virtio memory balloon [1AF4:1002], IRQ 10, …
-06:12 Ethernet controller [0200]: Red Hat, Inc. Virtio network device [1AF4:1000], IRQ 11, …
-Found virtio device with device id 0x1002
-Legacy/transitional Virtio device, with id: 0x1002 is NOT supported, skipping!
-Could not initialize virtio-pci device: Virtio driver failed: DevNotSupported(4098)
-Found virtio device with device id 0x1000
-Legacy/transitional Virtio device, with id: 0x1000 is NOT supported, skipping!
-Could not initialize virtio-pci device: Virtio driver failed: DevNotSupported(4096)
-Try to initialize network!
-…
-{"level":"error","event":"bind","detail":"no address could be bound:
-  0.0.0.0:1688: Network is down (os error 100)"}
-exit status 69
-```
-
-The device ID really is `0x1000` rather than `0x1041`, which was the whole prediction, and the NIC
-really is at `06:12` — behind the bridge pair, exactly where reading `qemu-server` said it would be.
-The balloon device goes the same way for the same reason, which is harmless: nothing here wants it.
-
-The `hermit-proxmox-topology` check in `nix flake check` runs the same thing under a QEMU given that
-device topology by hand, so the day Hermit starts accepting transitional devices, the check fails and
-this section gets rewritten.
-
-**What Proxmox shows you while this is happening is a running VM.** QEMU is started with
-`-no-shutdown`, so when the guest powers itself off the process stays and the run state parks at
-`prelaunch`. `qm status <vmid>` reports `prelaunch`, but the API's `status` field — which is what the
-green dot in the web UI reads — still says `running`, and the uptime counter still climbs. So the
-guest does exit 69 and does say why, and on Proxmox specifically it says it to a serial port that a
-VM created in the web UI does not have. That is the failure that costs an afternoon, and it is the
-real reason [the serial port is mandatory](#a-serial-port-is-mandatory-os-005-256): without one the
-only symptom is a VM that looks healthy and answers nothing.
-
-#### The workaround
-
-Proxmox has no GUI field for this, but `qm set` can append raw QEMU arguments:
-
-```shell
-$ qm set <vmid> --args '-set device.net0.disable-legacy=on'
-```
-
-Tested on the hardware the log above came from, and it works. The device becomes `[1AF4:1041]`, the
-driver attaches, and the same boot that had exited 69 now reads:
-
-```
-Found virtio device with device id 0x1041
-Features have been negotiated between virtio-net device and driver.
-virtio-net device has been initialized by driver!
-Virtio-net link is up after initialization!
-MAC address: bc-24-11-3c-a3-59
-{"level":"info","event":"listening","detail":"0.0.0.0:1688"}
-{"level":"info","event":"web-listening","detail":"0.0.0.0:8080"}
-DHCP config acquired!
-IP address:   10.42.1.75/22
-```
-
-It is not pretty, and it is one line. Note that `--args` replaces the whole string rather than
-appending to it, so anything already there has to be repeated.
-
-`rtl8139` is the other documented fallback and this build **cannot** use it: the kernel's feature set
-is pinned and does not include that driver (`OS-006`, #257). Taking it would mean a second kernel
-build, and the argument against is that it trades a one-line VM setting for a second artefact that
-has to be tested separately. If Proxmox ever makes `disable-legacy` unavailable, that is the point at
-which to reconsider.
-
-Whichever route, the serial console says which one happened on the first boot — the other reason to
-attach one before that boot rather than after.
-
----
+Until `OS-021`, `qm shutdown` does nothing — the ACPI power-button event has no userland to act on
+it — and only `qm stop` will stop the VM.
 
 ## What is not in the artifact
 

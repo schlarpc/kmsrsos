@@ -14,10 +14,10 @@ These constrain everything. A proposal that violates one is wrong by default, no
 
 | # | Axiom | Consequence |
 |---|---|---|
-| A1 | Pure safe Rust | `#![forbid(unsafe_code)]` in every crate except a documented `kmsrs-os` boundary |
+| A1 | Pure safe Rust | `#![forbid(unsafe_code)]` in every crate, with no exception — the one documented boundary went with Hermit (#334) |
 | A2 | Correct by construction | Illegal states unrepresentable; no runtime panics; no runtime validation of what a type could carry |
 | A3 | Configuration is compile-time | One narrow runtime escape hatch, restricted to settings that cannot change a byte on the wire |
-| A4 | Linux + Windows + bare metal (Hermit, virtio-net) | Thin swappable platform layer; core builds for `no_std + alloc` |
+| A4 | Linux + Windows + bare metal (Linux as PID 1, virtio-net) | Thin swappable platform layer; core builds for `no_std + alloc` |
 | A5 | No disk I/O; logs to stderr | One narrow exception: six lifecycle events to the Windows Event Log (#192) |
 | A6 | Maximal client compatibility, permissive time band | Defaults say *yes*; strictness is opt-in at build time |
 | A7 | Sans-io core | Protocol crates take `&[u8]` → events; sockets live at the edges; fuzzable and cross-testable |
@@ -33,10 +33,10 @@ These constrain everything. A proposal that violates one is wrong by default, no
 
 | # | Decision | Outcome |
 |---|---|---|
-| 1 | Crate split | 8 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary (#1) |
+| 1 | Crate split | 7 crates; `web` folded into `server`; `dbgen` and `crypto` separate for dependency isolation and audit boundary. Was 8 until `kmsrs-os` went with Hermit (#1, #334) |
 | 2 | Framing | `zerocopy` end to end, including checked prefix-splitting for variable DCE/RPC sections (#11) |
 | 3 | Panic-freedom | Lints everywhere + a symbol-level CI gate on `proto`/`crypto` + `panic = "abort"`; [what the gate found](#what-the-panic-freedom-gate-actually-found-arch-009-9) (#9) |
-| 4 | Concurrency | One `mio` event loop on all three targets — superseded the original two-driver plan, [see below](#superseding-decision--one-mio-event-loop-not-two-drivers-arch-005-5) (#5) |
+| 4 | Concurrency | One `mio` event loop on both targets — superseded the original two-driver plan, [see below](#superseding-decision--one-mio-event-loop-not-two-drivers-arch-005-5). Under review in #340 now that its only justification is gone (#5) |
 | 5 | Crypto | One minimal Rijndael in `kmsrs-crypto` with exhaustive KATs, quarantined as the A8 exception (#41) |
 | 6 | Product-data source | Microsoft `pkeyconfig` artifacts, extracted by `kmsrs-dbgen` (#125, #126) |
 | 7 | Product gate | **Split**: permissive on unknown KMS IDs; strict on retail/preview and AppID mismatch (#98) |
@@ -57,20 +57,51 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 22 | SRV publishing | RFC 2136 dropped → [D15](#d15). Instructions page emits zone snippet, `nsupdate` **and** `dnscmd`/PowerShell (#148) |
 | 23 | mDNS | Measurement harness first, as a standalone deliverable (#146) |
 | 24 | `TCP_NODELAY` | OS default; measured in the harness (#164) |
-| 25 | Proxmox | Nice-to-have. QEMU/libvirt is the supported configuration (#255) |
+| 25 | Proxmox | **Supported, and the reason the bare-metal target changed.** Superseded the nice-to-have framing (#255, #333, #334) |
 | 26 | OS packages | `.deb`/`.rpm` as CI artifacts; no repo, no Homebrew (#246) |
 | 27 | Kubernetes | Plain manifests, `replicas: 1` hardcoded. No Helm → [D17](#d17) |
-| 28 | Linux appliance image | Skipped → [D16](#d16) |
+| 28 | Linux appliance image | **Built** — reverses [D16](#d16); it is now the bare-metal target (#333) |
 | 29 | Upstream proxy / chaining | Declined → [D12](#d12) |
 | 30 | Build-time identity harvesting | Out of scope → [D13](#d13) |
 | 31 | C library API | Declined → [D8](#d8) |
-| 32 | Hermit addressing | DHCPv4, on by default (#254) |
+| 32 | Bare-metal addressing | DHCPv4. Kernel `ip=dhcp` today, a real client with lease renewal in #335 (#254) |
 | 33 | ePID day-of-year / LCID / channel | 1-based / unpadded / always `03` (#109–#111) |
 | 34 | Win 11 build 28000 | Real, ships 2026-02-10 — include (#135) |
 | 35 | Licence | MIT (#206) |
 | 36 | Absurd `N_Policy` | Floor the reported count at the demand only up to 100; past that report the world, [see below](#absurd-n_policy-pol-019-313) (#313) |
-| 37 | Hermit build | Kernel as its own derivation; the `hermit` crate is never a dependency, [see below](#the-hermit-build-does-not-use-the-hermit-crate-pkg-013-250) (#250, #251) |
-| 38 | Second bare-metal target | Linux with `kmsrs-server` as PID 1, built and checked; boots on stock Proxmox where Hermit does not. Reverses [D16](#d16). Which one ships is open (#333, #334) |
+| 37 | ~~Hermit build~~ | Removed with the target (#334). Kept in history because `PKG-013`/`PKG-014` (#250, #251) are cited in commits |
+| 38 | Bare-metal target | Linux with `kmsrs-server` as PID 1. Reverses [D16](#d16); **replaced** Hermit rather than joining it, [see below](#hermit-was-removed-rather-than-kept-os-018-334) (#333, #334) |
+
+### Hermit was removed rather than kept (`OS-018`, #334)
+
+Both targets worked. The question was never which one *ran*, it was which one an operator could
+deploy without being told three things first, and Hermit needed all of: `qm set --args
+'-set device.net0.disable-legacy=on'` for a NIC that would otherwise not attach at all (`OS-004`,
+#255), a CPU-model change away from the Proxmox default or the CSPRNG silently fell back to a
+31-bit LCG (`OS-016`, #332), and a serial port added before first boot, because it is the only
+console Hermit has and without it the other two failures are invisible. The web UI can express one
+of those three.
+
+Worse, the failure was quiet. QEMU runs with `-no-shutdown`, so when the guest exited 69 the process
+stayed and the run state parked at `prelaunch` — `qm status` said so, but the API's `status` field,
+which is what the green dot in the web UI reads, still said `running` and the uptime kept climbing.
+
+The Linux target needs none of the three, boots from SeaBIOS or OVMF, and is smaller (14 MB against
+17 MB). Keeping both would have meant two bare-metal targets with their own boot checks, their own
+differential runs and their own section of the deployment guide, for one deployment story — and the
+one being kept for interest's sake would be the one nobody could deploy.
+
+**What was actually lost.** A5 was *inexpressible* on Hermit rather than merely absent: there was no
+syscall to reach a disk. On Linux with `CONFIG_BLOCK` unset it is a syscall with nothing behind it,
+which is very close and not identical. That is the whole cost, and it is worth naming rather than
+pretending the two were equivalent.
+
+**What was not the argument.** TCB size. It does not survive `SEC-013` (#205): nothing secret ships,
+so the blast radius of either kernel is a box that answers KMS on a LAN. A unikernel also has no
+privilege separation at all — the application runs in ring 0 with the kernel — so "fewer lines" and
+"smaller attack surface" were never the same claim, and the network-reachable surface was smoltcp
+against the most heavily fuzzed TCP stack in existence. This decision went the way it did on
+deployability, and it should not be re-litigated on TCB grounds.
 
 ### Notes on the three decisions that took the most argument
 

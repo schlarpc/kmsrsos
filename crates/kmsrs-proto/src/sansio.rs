@@ -12,9 +12,10 @@
 //! * **Differential testing** — the same byte sequence can be replayed against
 //!   vlmcsd and py-kms and compared, because time and randomness are arguments
 //!   rather than ambient state (`TEST-004`, #225).
-//! * **The Hermit split** — tokio on Linux and Windows, blocking `std::net` and
-//!   `std::thread` on Hermit, with no async abstraction layer in between and no
-//!   second copy of the protocol logic (`ARCH-005`, #5).
+//! * **Swapping the driver** — the I/O layer can be replaced wholesale without
+//!   a second copy of the protocol logic (`ARCH-005`, #5). That is not
+//!   hypothetical: this split is what let the bare-metal target change from a
+//!   unikernel to Linux (`OS-018`, #334) with no change here at all.
 //!
 //! # Deviation from the issue text
 //!

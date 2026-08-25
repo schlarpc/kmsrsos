@@ -38,7 +38,6 @@ pub use config::{BuildStamp, Compiled, Discovered, Operational};
 pub use entropy::OsEntropy;
 pub use host::{Host, RequestContext};
 pub use log::{Logger, Severity};
-pub use platform::{SIGNALS_EXIST, SINGLE_SOCKET_ONLY, SignalHandling};
 pub use server::{Handled, Server};
 
 /// The name the emulator reports for itself. Used by the log sink and the web

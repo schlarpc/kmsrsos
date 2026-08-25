@@ -232,8 +232,8 @@ fn database_section(out: &mut String) {
          | Locales | {} |\n\
          \n\
          The arrays occupy {} bytes, against a {}-byte ceiling asserted at\n\
-         compile time (`DB-018`, #142) — on Hermit every byte of `.rodata` is a\n\
-         byte of the guest's memory, permanently.",
+         compile time (`DB-018`, #142) — on the bare-metal target every byte\n\
+         of `.rodata` is a byte of the guest's memory, permanently.",
         kmsrs_db::APPLICATIONS.len(),
         kmsrs_db::PRODUCTS.len(),
         kmsrs_db::CSVLKS.len(),
