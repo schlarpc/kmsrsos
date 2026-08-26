@@ -45,6 +45,12 @@
   # `{ name = { enable = [ … ]; disable = [ … ]; }; }` when the question is what
   # something *costs to keep* rather than what it costs to add — which is the
   # direction `OS-023` (#339) asks in.
+  #
+  # A variant may also carry `image`, which overrides which file in `$out` is
+  # measured. Exactly one question needs it and it is a real one:
+  # `CONFIG_EFI_ZBOOT` does not make `Image` smaller, it makes a *different
+  # file* — a compressed PE called `vmlinuz.efi` — so a delta taken on `Image`
+  # would report zero and be wrong twice over (`OS-032`, #376).
 , variants ? { }
 , kernel ? pkgs.linux_6_12
 }:
@@ -59,8 +65,9 @@ let
   '';
 
   # The command line is fixed too, and short: it is inside the image, so a
-  # longer one is a bigger image.
-  cmdline = "console=${arch.console} panic=-1";
+  # longer one is a bigger image. One console, not the shipped list — a delta
+  # is a difference, and both sides of it carry the same short string.
+  cmdline = "console=${builtins.head arch.consoles} panic=-1";
 
   # Both spellings, so a list stays the common case.
   normalise = spec:
@@ -108,15 +115,23 @@ let
     sed -i 's/^ *//' $out
   '';
 
+  # Which file in a variant's `$out` the report measures.
+  imageOf = spec:
+    if builtins.isList spec then arch.image else spec.image or arch.image;
+
   buildFor = name: spec: pkgs.linuxKernel.manualConfig {
     inherit (kernel) version src;
     pname = "kmsrsos-delta-${arch.name}-${name}";
     configfile = configFor name spec;
     allowImportFromDerivation = true;
+    target = imageOf spec;
   };
 
   built = { baseline = buildFor "baseline" [ ]; }
     // builtins.mapAttrs buildFor variants;
+
+  images = { baseline = arch.image; }
+    // builtins.mapAttrs (_: imageOf) variants;
 
   names = builtins.attrNames built;
 in
@@ -128,14 +143,15 @@ pkgs.runCommand "kmsrsos-kernel-deltas-${arch.name}" { } ''
 
   baseline=$(stat -Lc %s ${built.baseline}/${arch.image})
   {
-    echo "${arch.image} sizes, initramfs held constant (OS-025, #342)"
+    echo "kernel image sizes, initramfs held constant (OS-025, #342)"
     echo
-    printf '%-24s %10s %10s\n' variant bytes delta
-    printf '%-24s %10s %10s\n' ------- ----- -----
+    printf '%-24s %-14s %10s %10s\n' variant image bytes delta
+    printf '%-24s %-14s %10s %10s\n' ------- ----- ----- -----
     ${builtins.concatStringsSep "\n" (map
       (name: ''
-        size=$(stat -Lc %s ${built.${name}}/${arch.image})
-        printf '%-24s %10s %+10s\n' ${name} "$size" "$((size - baseline))"
+        size=$(stat -Lc %s ${built.${name}}/${images.${name}})
+        printf '%-24s %-14s %10s %+10s\n' ${name} ${images.${name}} "$size" \
+          "$((size - baseline))"
       '')
       names)}
   } > $out/report

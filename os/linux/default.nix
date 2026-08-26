@@ -61,10 +61,14 @@
   # without the tee, which is what makes the boot check in `nix flake check` a
   # real regression test rather than a formality.
   #
-  # Which serial device that first console *is* is the architecture's
-  # (`OS-031`, #375): `ttyS0` is an 8250 at a legacy I/O port, which is a fact
-  # about x86 and not about Linux.
-, cmdline ? "console=${arch.console} console=tty0 panic=-1 loglevel=6"
+  # Which devices those consoles *are* is the architecture's (`OS-031`, #375;
+  # `OS-032`, #376). `ttyS0` is an 8250 at a legacy I/O port, which is a fact
+  # about x86 and not about Linux — and aarch64 needs two serial entries, not
+  # one, because QEMU's `virt` has a PL011 and EC2's Graviton has a 16550A.
+  # `tty0` is last on every architecture, for the `OS-028` (#345) reason.
+, cmdline ? builtins.concatStringsSep " "
+    ((map (device: "console=${device}") arch.consoles)
+      ++ [ "panic=-1" "loglevel=6" ])
 , base ? pkgs.linux_6_12
   # `PKG-016` (#366): what every timestamp in the ISO is set to.
   #
@@ -127,11 +131,17 @@ let
     sed -i 's/^ *//' $out
   '';
 
+  # `target` is what `make` is asked for and what lands in `$out`. nixpkgs
+  # picks it from the host platform — `bzImage` on x86, `Image` on aarch64 —
+  # and that default is wrong for a target using `CONFIG_EFI_ZBOOT`, which
+  # produces `vmlinuz.efi` and leaves `Image` where it was (`OS-032`, #376).
+  # The descriptor already names the file, so it names it here too.
   kernel = pkgs.linuxKernel.manualConfig {
     inherit (base) version src;
     pname = "kmsrsos-linux-${arch.name}";
     inherit configfile;
     allowImportFromDerivation = true;
+    target = arch.image;
   };
 
   # The UEFI bootloader (`OS-030`, #348).

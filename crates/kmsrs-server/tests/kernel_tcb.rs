@@ -84,12 +84,20 @@ struct Target {
 }
 
 /// Every bare-metal target, and the only place this file names one.
-const TARGETS: &[Target] = &[Target {
-    arch: "x86_64",
-    config: "os/linux/kernel.config",
-    absent: X86_64_MUST_BE_ABSENT,
-    present: X86_64_MUST_BE_PRESENT,
-}];
+const TARGETS: &[Target] = &[
+    Target {
+        arch: "x86_64",
+        config: "os/linux/kernel.config",
+        absent: X86_64_MUST_BE_ABSENT,
+        present: X86_64_MUST_BE_PRESENT,
+    },
+    Target {
+        arch: "aarch64",
+        config: "os/linux/kernel.config.aarch64",
+        absent: AARCH64_MUST_BE_ABSENT,
+        present: AARCH64_MUST_BE_PRESENT,
+    },
+];
 
 /// The generated configuration, as text.
 fn built_config(target: &Target) -> String {
@@ -386,6 +394,326 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::Unreachable,
         "gated by SWAP and BLOCK",
     ),
+];
+
+/// Axiom A5 and the small-TCB claim on **aarch64** (`OS-032`, #376).
+///
+/// Not the x86 list with substitutions. Six entries at the end have no x86
+/// counterpart at all, and four x86 entries are missing because the symbols
+/// they name do not exist on this architecture — `INTEL_MEI` and
+/// `HYPERV_TIMER` among them. Copying the other list would have produced
+/// entries that read as assertions and check nothing, which is what
+/// [`Absence::Unreachable`] cannot distinguish from a misspelling.
+const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
+    // Axiom A5, structurally, exactly as on x86: no block *layer*.
+    (
+        "BLOCK",
+        Absence::TurnedOff,
+        "axiom A5: this machine has no storage",
+    ),
+    ("SCSI", Absence::Unreachable, "gated by BLOCK"),
+    ("ATA", Absence::Unreachable, "gated by BLOCK"),
+    ("NVME_CORE", Absence::Unreachable, "gated by BLOCK"),
+    ("VIRTIO_BLK", Absence::Unreachable, "gated by BLOCK"),
+    ("MD", Absence::Unreachable, "gated by BLOCK"),
+    ("EXT4_FS", Absence::Unreachable, "gated by BLOCK"),
+    ("VFAT_FS", Absence::Unreachable, "gated by BLOCK"),
+    // The machine's kernel lives in a FAT filesystem it cannot read, and
+    // boots from a CD-ROM it cannot read either. Firmware reads both.
+    ("ISO9660_FS", Absence::Unreachable, "gated by BLOCK"),
+    (
+        "NFS_FS",
+        Absence::Unreachable,
+        "gated by NETWORK_FILESYSTEMS",
+    ),
+    ("9P_FS", Absence::Unreachable, "gated by NET_9P"),
+    ("VIRTIO_FS", Absence::Unreachable, "gated by FUSE_FS"),
+    ("OVERLAY_FS", Absence::TurnedOff, "axiom A5"),
+    ("FUSE_FS", Absence::TurnedOff, "axiom A5"),
+    (
+        "MODULES",
+        Absence::TurnedOff,
+        "nothing may be loaded at runtime",
+    ),
+    (
+        "KEXEC",
+        Absence::Unreachable,
+        "nothing may replace this kernel",
+    ),
+    (
+        "NETFILTER",
+        Absence::TurnedOff,
+        "no firewall, and no configurator",
+    ),
+    (
+        "BPF_SYSCALL",
+        Absence::TurnedOff,
+        "a JIT reachable from userland",
+    ),
+    ("FTRACE", Absence::TurnedOff, "tracing nothing here reads"),
+    ("KPROBES", Absence::TurnedOff, "the same"),
+    (
+        "DEBUG_MISC",
+        Absence::TurnedOff,
+        "debug code with no better home",
+    ),
+    ("DYNAMIC_DEBUG", Absence::TurnedOff, "a runtime log surface"),
+    (
+        "DEBUG_FS",
+        Absence::TurnedOff,
+        "a filesystem; A5 twice over",
+    ),
+    (
+        "KGDB",
+        Absence::TurnedOff,
+        "a debugger on a network service",
+    ),
+    ("KASAN", Absence::Unreachable, "gated by its own arch menu"),
+    (
+        "KCSAN",
+        Absence::TurnedOff,
+        "instrumentation in a shipped kernel",
+    ),
+    ("UBSAN", Absence::TurnedOff, "the same"),
+    ("DEBUG_KMEMLEAK", Absence::TurnedOff, "the same"),
+    ("GDB_SCRIPTS", Absence::Unreachable, "gated by DEBUG_INFO"),
+    (
+        "MAGIC_SYSRQ",
+        Absence::TurnedOff,
+        "a console that can panic the host",
+    ),
+    ("USB_SUPPORT", Absence::TurnedOff, "no USB is attached"),
+    ("SOUND", Absence::TurnedOff, "no"),
+    (
+        "WLAN",
+        Absence::TurnedOff,
+        "a hypervisor emulates no wireless",
+    ),
+    ("BT", Absence::TurnedOff, "the same"),
+    ("KVM", Absence::Unreachable, "gated by VIRTUALIZATION"),
+    ("VFIO", Absence::TurnedOff, "nothing is passed through"),
+    ("NAMESPACES", Absence::TurnedOff, "there is one process"),
+    ("CGROUPS", Absence::TurnedOff, "there is one process"),
+    (
+        "SECURITY",
+        Absence::TurnedOff,
+        "no LSM is or could be configured",
+    ),
+    // `OS-026` (#343): the power button needs the event layer and nothing
+    // else, here as much as on x86.
+    (
+        "INPUT_KEYBOARD",
+        Absence::TurnedOff,
+        "OS-026: not a keyboard",
+    ),
+    ("INPUT_MOUSE", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_MOUSEDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_JOYDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    (
+        "SERIO",
+        Absence::TurnedOff,
+        "OS-026: nothing sits on a PS/2 bus",
+    ),
+    (
+        "HID",
+        Absence::TurnedOff,
+        "the button is ACPI, read through evdev",
+    ),
+    ("HID_GENERIC", Absence::Unreachable, "gated by HID"),
+    ("I2C_HID", Absence::Unreachable, "gated by HID"),
+    (
+        "ACPI_THERMAL",
+        Absence::TurnedOff,
+        "a guest has no thermal zones",
+    ),
+    (
+        "XEN",
+        Absence::TurnedOff,
+        "OS-025: declined on the measurement",
+    ),
+    ("XEN_NETDEV_FRONTEND", Absence::Unreachable, "gated by XEN"),
+    (
+        "IP_PNP",
+        Absence::TurnedOff,
+        "OS-019: kmsrs-os speaks DHCP itself",
+    ),
+    ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    (
+        "SUSPEND",
+        Absence::TurnedOff,
+        "a host that suspends is a host down",
+    ),
+    (
+        "HIBERNATION",
+        Absence::Unreachable,
+        "gated by SWAP and BLOCK",
+    ),
+    // --- from here down there is no x86 counterpart ---
+    //
+    // These are what makes this a list rather than a copy, and each one is a
+    // fact about this architecture that has no analogue on the other.
+    //
+    // The four NIC drivers are the interesting group: they are *absent by
+    // decision*, not by accident. `OS-025` (#342)'s matrix is a claim about
+    // products, and every product behind these four is x86-only — VirtualBox
+    // has no aarch64 guests, Hyper-V Generation 1 is x86, Xen HVM does not run
+    // aarch64 guests, and VMware's aarch64 products offer no vmxnet3. Asserting
+    // their absence is what stops the arm allowlist quietly growing into a copy
+    // of the x86 one.
+    (
+        "COMPAT",
+        Absence::TurnedOff,
+        "OS-032: a second syscall table for a userland of one aarch64 binary",
+    ),
+    (
+        "PERF_EVENTS",
+        Absence::TurnedOff,
+        "OS-032: perf_event_open(2) has no user in a one-program image",
+    ),
+    (
+        "THERMAL_OF",
+        Absence::TurnedOff,
+        "OS-032: the device-tree twin of ACPI_THERMAL; no zones either way",
+    ),
+    (
+        "ARM64_VA_BITS_52",
+        Absence::TurnedOff,
+        "OS-032: 48-bit, which is what every distribution ships",
+    ),
+    (
+        "ARM64_LPA2",
+        Absence::Unreachable,
+        "gated by the 52-bit choice above",
+    ),
+    (
+        "ARM64_64K_PAGES",
+        Absence::TurnedOff,
+        "OS-032: 4K, for the same reason as the VA size",
+    ),
+    (
+        "VMXNET3",
+        Absence::TurnedOff,
+        "OS-032: Fusion on Apple Silicon offers no vmxnet3",
+    ),
+    (
+        "PCNET32",
+        Absence::TurnedOff,
+        "OS-032: VirtualBox has no aarch64 guests",
+    ),
+    (
+        "8139CP",
+        Absence::TurnedOff,
+        "OS-032: Xen HVM does not run aarch64 guests",
+    ),
+    (
+        "TULIP",
+        Absence::Unreachable,
+        "OS-032: Hyper-V Generation 1 is x86; Arm Azure is Gen 2, so VMBus",
+    ),
+];
+
+/// `OS-025` (#342) on **aarch64**: every driver the arm matrix promises.
+///
+/// Half of this list has no x86 counterpart, and that half is the reason
+/// `OS-032` (#376) says the two files are not ports of each other. On x86 the
+/// interrupt controller, the timer, the PCI host bridge and the power-off
+/// mechanism are all implicit; here every one of them is a driver that can be
+/// left out, and leaving any of them out produces a machine that does not boot
+/// at all rather than one that boots and serves nobody.
+const AARCH64_MUST_BE_PRESENT: &[(&str, &str)] = &[
+    // --- the platform, none of which x86 has to name ---
+    (
+        "ARM_GIC_V3",
+        "every server-class Arm machine: QEMU virt, and Graviton",
+    ),
+    (
+        "ARM_GIC_V3_ITS",
+        "PCIe MSI, which is how a virtio NIC raises an interrupt at all",
+    ),
+    (
+        "ARM_ARCH_TIMER",
+        "the clock source; the counterpart of x86's kvmclock",
+    ),
+    (
+        "ARM_PSCI_FW",
+        "OS-026 (#343): SYSTEM_OFF, which is how this machine powers down",
+    ),
+    (
+        "PCI_HOST_GENERIC",
+        "the ECAM host bridge QEMU virt and the Arm SBSA describe",
+    ),
+    ("PCI_ECAM", "the same bridge's configuration space"),
+    (
+        "ARM64_4K_PAGES",
+        "what Amazon Linux, Debian and every other aarch64 distribution ship",
+    ),
+    (
+        "ARM64_VA_BITS_48",
+        "the same; 52-bit VA drags in LPA2, which nobody ships",
+    ),
+    // --- the console, which is two drivers here and one on x86 ---
+    (
+        "SERIAL_AMBA_PL011_CONSOLE",
+        "QEMU virt and Proxmox VE for arm64, whose UART is a PL011",
+    ),
+    (
+        "SERIAL_8250_CONSOLE",
+        "EC2 Graviton, whose UART is a 16550A — observed, not assumed",
+    ),
+    ("FRAMEBUFFER_CONSOLE", "Proxmox's noVNC window"),
+    ("VT_CONSOLE", "the same"),
+    // Boot.
+    (
+        "EFI_STUB",
+        "every aarch64 platform, since every one of them is UEFI",
+    ),
+    ("BLK_DEV_INITRD", "the initramfs is the whole userland"),
+    (
+        "RANDOMIZE_BASE",
+        "OS-032 (#376): KASLR, which x86 had and this silently did not",
+    ),
+    // Networking.
+    (
+        "VIRTIO_NET",
+        "Proxmox VE for arm64, and every other KVM-derived hypervisor",
+    ),
+    (
+        "E1000",
+        "Proxmox's E1000 entry, whose model list is one list for all arches",
+    ),
+    ("E1000E", "Parallels and VMware Fusion on Apple Silicon"),
+    (
+        "ENA_ETHERNET",
+        "EC2 Graviton, which is Nitro and therefore ENA",
+    ),
+    (
+        "HYPERV",
+        "Azure's Cobalt 100 instances, which are Hyper-V Generation 2",
+    ),
+    ("HYPERV_NET", "the same — this *is* the NIC there"),
+    // `OS-026` (#343): the polite stop, which arrives through the ACPI
+    // Generic Event Device here rather than a fixed-hardware button.
+    (
+        "INPUT_EVDEV",
+        "OS-026 (#343): reading the power key the GED raises",
+    ),
+    (
+        "ACPI_BUTTON",
+        "OS-026 (#343): the device the GED raises it on",
+    ),
+    // `OS-022` (#338).
+    ("VIRTIO_CONSOLE", "OS-022 (#338): the guest-agent channel"),
+    ("VIRTIO_BALLOON", "OS-022 (#338): memory statistics"),
+    // Entropy, of which this machine has two sources and x86 has one.
+    ("HW_RANDOM_VIRTIO", "OS-023 (#339): worth ~2.3 s of boot"),
+    (
+        "HW_RANDOM_ARM_SMCCC_TRNG",
+        "OS-032 (#376): the architected firmware TRNG, which needs no device",
+    ),
+    // What pid 1 needs to exist at all.
+    ("DEVTMPFS", "OS-021 (#337): /dev has one node without it"),
+    ("PROC_FS", "OS-028 (#345): /proc/consoles"),
+    ("SYSFS", "OS-026 (#343) and OS-022 (#338) both read it"),
 ];
 
 /// Every target's must-stay-out list, against that target's own kernel.

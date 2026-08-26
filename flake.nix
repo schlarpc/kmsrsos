@@ -469,9 +469,18 @@
           # exist twice.
           grubFormat = "x86_64-efi";
 
-          # `console=`. `ttyS0` is an 8250 at a legacy I/O port, which is an
-          # x86 platform fact rather than a Linux one.
-          console = "ttyS0,115200";
+          # Every `console=` the kernel command line carries, in order.
+          #
+          # A list rather than one device, because an architecture can have
+          # more than one plausible serial port and the kernel simply ignores a
+          # `console=` naming a device that is not there. Order stopped
+          # deciding anything in `OS-028` (#345) — pid 1 reads `/proc/consoles`
+          # and tees to all of them — but `/dev/console` still resolves to the
+          # last one, so `tty0` stays last for the reason that issue gives.
+          #
+          # `ttyS0` is an 8250 at a legacy I/O port, which is an x86 platform
+          # fact rather than a Linux one.
+          consoles = [ "ttyS0,115200" "tty0" ];
 
           # Whether firmware for this target can boot without UEFI. It decides
           # whether the image needs isolinux, an isohybrid MBR and a bootloader
@@ -487,6 +496,145 @@
 
           # What boots it in a check.
           qemu = "qemu-system-x86_64";
+        };
+
+        # `OS-032` (#376). Proxmox VE 9.2 for arm64 shipped on 5 August 2026,
+        # and KVM is same-architecture: an operator on one of those hosts can
+        # run aarch64 guests and nothing else. The audience is the clients
+        # rather than the hosts, and on Apple Silicon the entire lab is
+        # aarch64.
+        #
+        # Almost every field below differs from the one above, and the ones
+        # that differ most are the ones that look like they should not.
+        aarch64 = {
+          name = "aarch64";
+          system = "aarch64-linux";
+
+          # `arm64`, which is neither `aarch64` nor `aarch64-linux`. Three
+          # spellings of one architecture is exactly why this is a field.
+          kernelArch = "arm64";
+
+          # `vmlinuz.efi`, not `Image`, and the difference is 3.87 MB.
+          #
+          # arm64 has no self-decompressing counterpart of `bzImage`: `Image`
+          # is the kernel uncompressed, 6 611 456 bytes here.
+          # `CONFIG_EFI_ZBOOT` produces a compressed PE instead — 2 740 736
+          # bytes, 58 % smaller — which firmware runs directly through the same
+          # EFI stub. Measured with `.#linux-deltas`; it matters most in
+          # `OS-033` (#377), where the kernel goes back into a FAT filesystem.
+          #
+          # It is EFI-only, and that costs nothing on a target where every
+          # firmware is UEFI.
+          image = "vmlinuz.efi";
+
+          # The removable-media path for AArch64, from the same UEFI
+          # specification table `BOOTX64.EFI` comes from.
+          efiFile = "BOOTAA64.EFI";
+
+          # Unused while `bios` is false — there is no bootloader in the arm
+          # image, because there is no second firmware to share a kernel with
+          # (`OS-033`, #377). Stated so the descriptor has no hole in it.
+          grubFormat = "arm64-efi";
+
+          # Two serial ports and a framebuffer, and the first two are not
+          # interchangeable. QEMU's `virt` machine has a PL011 (`ttyAMA0`);
+          # **EC2's aarch64 instances have a 16550A** (`ttyS0`) — observed on a
+          # Graviton host, where ACPI SPCR reads `uart,mmio,0x90a0000` and the
+          # kernel reports `ttyS0 … is a 16550A`. A machine that named only one
+          # of them would boot silently on the other platform, which is
+          # `OS-005` (#256) all over again.
+          consoles = [ "ttyAMA0,115200" "ttyS0,115200" "tty0" ];
+
+          # **No BIOS anywhere.** Proxmox VE for arm64 boots every VM through
+          # AAVMF and SeaBIOS is not available; nor is there a legacy firmware
+          # on any other Arm hypervisor. So there is no second reader of the
+          # image, no sharing problem, and nothing for a bootloader to solve
+          # (`OS-033`, #377).
+          bios = false;
+
+          config = ./os/linux/kernel.config.aarch64;
+
+          qemu = "qemu-system-aarch64";
+        };
+      };
+
+      # What `.#linux-deltas` measures, per architecture.
+      #
+      # Two lists rather than one, because a delta is only meaningful against a
+      # question somebody is asking, and the questions differ: on x86 they are
+      # about NIC drivers for hypervisors that exist there, and on aarch64 the
+      # expensive question is the *image format* rather than any driver
+      # (`OS-032`, #376).
+      linuxDeltaVariants = {
+        x86_64 = {
+          # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
+          # for a modern Linux guest on ESXi and Workstation.
+          vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
+          # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
+          rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
+          # VirtualBox's older adapter choices.
+          pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
+          # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
+          tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
+          # EC2 Nitro (`OS-027`, #344).
+          ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
+          # Hyper-V and Azure. The one item `OS-025` calls "genuinely
+          # large", and the reason this output exists rather than an
+          # estimate in a comment.
+          hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
+          # Xen PV networking on XCP-ng and Citrix Hypervisor.
+          xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
+          # `OS-023` (#339) asks in the other direction: what does something
+          # already in the allowlist cost to *keep*? A negative delta is the
+          # saving available if it were removed.
+          no-smp = { disable = [ "SMP" ]; };
+          no-elf-core = { disable = [ "ELF_CORE" ]; };
+          no-seccomp = { disable = [ "SECCOMP" ]; };
+          no-ipv6 = { disable = [ "IPV6" ]; };
+          no-packet = { disable = [ "PACKET" ]; };
+        };
+
+        aarch64 = {
+          # What the compressed image is worth, asked in the `OS-023` (#339)
+          # direction: this is the *cost of not having it*.
+          #
+          # `CONFIG_EFI_ZBOOT` is in the allowlist, so the baseline is already
+          # `vmlinuz.efi`. Turning it off produces a different file rather than
+          # a bigger one — the uncompressed `Image` — which is what the `image`
+          # override is for. Measuring `Image` on both sides would report no
+          # change and be wrong twice.
+          no-efi-zboot = { disable = [ "EFI_ZBOOT" ]; image = "Image"; };
+
+          # The three drivers the arm matrix claims beyond virtio, each priced
+          # the way `OS-025` (#342) requires.
+          ena = { disable = [ "ENA_ETHERNET" ]; };
+          e1000 = { disable = [ "NET_VENDOR_INTEL" ]; };
+          hyperv = { disable = [ "HYPERV" ]; };
+
+          # A virtio-gpu console. `virt` machines with a virtio GPU rather than
+          # a `ramfb` lose the EFI framebuffer at `ExitBootServices`, so
+          # `simpledrm` has nothing to take over and the noVNC window freezes
+          # on the firmware logo. Not in the allowlist; this is what adding it
+          # would cost if that turns out to be what Proxmox VE for arm64
+          # attaches.
+          virtio-gpu = [ "DRM_VIRTIO_GPU" ];
+
+          # KASLR is the one mitigation this architecture had to be *told* to
+          # have (`OS-032`, #376), so what it costs is worth knowing.
+          no-kaslr = { disable = [ "RANDOMIZE_BASE" ]; };
+
+          # The same "cost to keep" questions `OS-023` (#339) asks on x86.
+          #
+          # There is no `no-smp` here, and the reason is worth writing down
+          # because its absence looks like an oversight. `arch/arm64/Kconfig`
+          # has `config SMP` / `def_bool y`: it cannot be turned off, so the
+          # variant produced a config identical to the baseline and a delta of
+          # exactly zero — a number that reads as "SMP is free" and means "the
+          # question was not asked". Same shape as the `DEBUG_KERNEL` finding
+          # in `OS-023`.
+          no-seccomp = { disable = [ "SECCOMP" ]; };
+          no-ipv6 = { disable = [ "IPV6" ]; };
+          no-packet = { disable = [ "PACKET" ]; };
         };
       };
 
@@ -810,6 +958,239 @@
           done
         '';
 
+      # `OS-032` (#376): the same claims as `linuxBootCheckFor`, on the machine
+      # where none of the answers carry over.
+      #
+      # A twin rather than a parameter, and that is the point of the issue. What
+      # `linux-boot` varies across its two runs is the *firmware*; what varies
+      # here is the interrupt controller, the timer, the console device, the way
+      # the machine powers off and the shape of the PCI topology. A check
+      # parametrised over all of that would be two checks sharing a `for` loop.
+      #
+      # Three things this does not have, each because the platform does not:
+      #
+      #   * **No BIOS run.** Arm64 guests boot UEFI through AAVMF; SeaBIOS does
+      #     not exist for them. The firmware axis of the x86 check halves, which
+      #     is the same fact that removes the bootloader in `OS-033` (#377).
+      #   * **No bridge pair.** `qemu-server` emits `i82801b11-bridge` +
+      #     `pci-bridge` for a q35 machine so that a transitional virtio device
+      #     lands on a legacy bus — `OS-004` (#255), the thing Hermit refuses.
+      #     `virt` has a single PCIe root, and the NIC goes on it.
+      #   * **No `-drive … media=cdrom`.** There is no arm image yet: `OS-033`
+      #     (#377) builds it. The kernel is handed to AAVMF with `-kernel`,
+      #     which EDK2's `QemuKernelLoaderFsDxe` presents as a boot option — so
+      #     this still boots through real UEFI and through the EFI stub, which
+      #     is the part that has to work before an image can be wrapped round
+      #     it.
+      #
+      # `gic-version=3` is stated rather than left to `max`. The kernel has both
+      # GICv2 and GICv3 — `ARM_GIC` arrives with the architecture — so a machine
+      # that silently chose v2 would boot, and the `ARM_GIC_V3_ITS` entry that
+      # the allowlist claims is load-bearing for PCIe MSI would go unexercised.
+      #
+      # `ramfb` is the framebuffer. `virt` has no display device at all by
+      # default, and without one `/proc/consoles` has a single entry — which
+      # would make the `OS-028` (#345) tee assertions below vacuous rather than
+      # false.
+      armBootCheckFor = { system, arch }:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor { inherit system arch; };
+
+          virtTopology = builtins.concatStringsSep " " [
+            "-netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688"
+            "-device virtio-net-pci,netdev=u1,bus=pcie.0,id=net0"
+          ];
+        in
+        pkgs.runCommand "linux-boot"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm pkgs.socat ];
+            meta.timeout = 900;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          serial="$PWD/uefi.log"
+          monitor="$PWD/uefi.mon"
+          agent="$PWD/uefi.agent"
+
+          cp ${pkgs.OVMF.variables} "$PWD/vars.fd"
+          chmod +w "$PWD/vars.fd"
+
+          # `-no-shutdown` is deliberately absent, for the same reason as on
+          # x86: this check's point is that the guest powers *itself* off and
+          # qemu exits on its own. On arm64 that path ends in PSCI SYSTEM_OFF
+          # rather than an ACPI write, which is the half of `OS-026` (#343) that
+          # had never been run on this architecture.
+          ${arch.qemu} \
+            -machine virt,gic-version=3 -cpu cortex-a57 \
+            -smp 1 -m 512M -display none -no-reboot \
+            -serial "file:$serial" \
+            -monitor "unix:$monitor,server,nowait" \
+            -drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware} \
+            -drive if=pflash,format=raw,unit=1,file=$PWD/vars.fd \
+            -device ramfb \
+            -kernel ${linux.kernel}/${arch.image} \
+            -device virtio-serial-pci \
+            -chardev "socket,path=$agent,server=on,wait=off,id=ga" \
+            -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \
+            ${virtTopology} &
+          qemu=$!
+
+          serving=0
+          for attempt in $(seq 1 240); do
+            if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                 127.0.0.1:1688; then
+              serving=1
+              break
+            fi
+            if ! kill -0 $qemu 2>/dev/null; then
+              echo "qemu exited before the guest answered" >&2
+              cat "$serial" >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if [ "$serving" -ne 1 ]; then
+            echo "the aarch64 guest never answered" >&2
+            cat "$serial" >&2 || true
+            kill $qemu 2>/dev/null || true
+            exit 1
+          fi
+
+          for attempt in $(seq 1 60); do
+            grep -q '"event":"agent"' "$serial" && break
+            sleep 1
+          done
+
+          # The `sleep` keeps stdin open; see `linuxBootCheckFor` for why an
+          # immediate EOF reads as "there is no agent".
+          ask() {
+            { printf '%s\n' "$1"; sleep 5; } \
+              | socat -T8 - "UNIX-CONNECT:$agent" 2>/dev/null || true
+          }
+          ask '{"execute":"guest-network-get-interfaces"}' > $out/uefi.ifaces
+          ask '{"execute":"guest-get-osinfo"}' > $out/uefi.osinfo
+          ask '{"execute":"guest-exec","arguments":{"path":"/bin/sh"}}' > $out/uefi.exec
+
+          for attempt in $(seq 1 60); do
+            grep -q '"event":"clock"' "$serial" && break
+            sleep 1
+          done
+
+          # `OS-026` (#343) on a machine that has no ACPI fixed-hardware power
+          # button. On `virt` the press arrives through the ACPI **Generic Event
+          # Device**, and whether it surfaces as the same evdev `KEY_POWER` is
+          # exactly the thing #376 said had to be observed rather than reasoned
+          # about. This is the observation.
+          echo system_powerdown | socat - "UNIX-CONNECT:$monitor" >/dev/null
+
+          stopped=0
+          for attempt in $(seq 1 90); do
+            if ! kill -0 $qemu 2>/dev/null; then
+              stopped=1
+              break
+            fi
+            sleep 1
+          done
+          wait $qemu 2>/dev/null || true
+          cp "$serial" $out/uefi.log
+
+          if [ "$stopped" -ne 1 ]; then
+            echo "the aarch64 guest ignored system_powerdown, so 'qm shutdown' \
+        does nothing and only 'qm stop' would stop it. On this machine the \
+        press comes through the ACPI Generic Event Device rather than a fixed \
+        power button (OS-026, #343; OS-032, #376)" >&2
+            cat "$serial" >&2 || true
+            kill -9 $qemu 2>/dev/null || true
+            exit 1
+          fi
+
+          # Everything below is the same set of claims `linux-boot` makes on
+          # x86. They are repeated rather than shared because each one is about
+          # a different mechanism here, and a shared helper would hide that.
+          grep -q '"event":"listening"' $out/uefi.log || {
+            echo "no listener reported" >&2; exit 1; }
+
+          # `OS-021` (#337).
+          grep -q 'mounted /dev /proc /sys' $out/uefi.log || {
+            echo "pid 1 did not mount all three pseudo-filesystems (OS-021, \
+        #337)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+
+          # `OS-028` (#345). The reasoning there was that ordering stopped
+          # deciding anything because pid 1 reads /proc/consoles and tees. That
+          # was a claim about an 8250; this is the same claim on a PL011, which
+          # is a different driver reached through a different bus.
+          grep -q '"event":"console".*logging to.*ttyAMA0' $out/uefi.log || {
+            echo "pid 1 did not tee its log to the PL011. With tty0 last, every \
+        line above reached the framebuffer only (OS-028, #345; OS-032, #376)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+          grep -q '"event":"console".*logging to.*tty0' $out/uefi.log || {
+            echo "pid 1 found no framebuffer console, so this check is not \
+        exercising the two-console case OS-028 (#345) is about — which on this \
+        machine needs a ramfb, since virt has no display device" >&2
+            cat $out/uefi.log >&2; exit 1; }
+
+          # `OS-022` (#338).
+          grep -q '"event":"agent".*answering on vport' $out/uefi.log || {
+            echo "the guest agent found no channel (OS-022, #338)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+          grep -q '"hardware-address"' $out/uefi.ifaces || {
+            echo "guest-network-get-interfaces was not answered (OS-022, #338)" >&2
+            cat $out/uefi.ifaces >&2 || true; exit 1; }
+          grep -q '"ip-address": "10.0.2.15"' $out/uefi.ifaces || {
+            echo "the agent did not report the leased address (OS-022, #338)" >&2
+            cat $out/uefi.ifaces >&2 || true; exit 1; }
+          grep -q 'CommandNotFound' $out/uefi.exec || {
+            echo "guest-exec was not refused with an error (OS-022, #338)" >&2
+            cat $out/uefi.exec >&2 || true; exit 1; }
+
+          # `OS-032` (#376): the agent stopped hardcoding `x86_64`. Asserted on
+          # the *answer*, because that is what a hypervisor UI displays, and a
+          # host that reports the wrong architecture is worse than one that
+          # reports none.
+          grep -q '"machine": "aarch64"' $out/uefi.osinfo || {
+            echo "guest-get-osinfo reports the wrong machine on aarch64. It \
+        hardcoded x86_64 until OS-032 (#376), which is a false statement a \
+        management tool would believe" >&2
+            cat $out/uefi.osinfo >&2 || true; exit 1; }
+
+          # `OS-026` (#343): stopped, and stopped the right way.
+          grep -q '"event":"power".*watching event' $out/uefi.log || {
+            echo "pid 1 found no power button: the GED event has nowhere to go \
+        and 'qm shutdown' is silently a no-op (OS-026, #343; OS-032, #376)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+          grep -q '"event":"power".*acpi power button: draining' $out/uefi.log || {
+            echo "the button was watched but the press did not reach the drain" >&2
+            cat $out/uefi.log >&2; exit 1; }
+          grep -q '"event":"stopped"' $out/uefi.log || {
+            echo "the host stopped without draining (NET-007, #157; OS-026, \
+        #343)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+
+          # `OS-020` (#336).
+          grep -qE '"event":"clock".*(no time server answered|stepped)' $out/uefi.log || {
+            echo "the clock task said something that is neither a step nor a \
+        report of no answer (OS-020, #336)" >&2
+            cat $out/uefi.log >&2; exit 1; }
+
+          if grep -qi 'Attempted to kill init' $out/uefi.log; then
+            echo "pid 1 returned instead of powering the machine off, so the \
+        operator sees a kernel panic after pressing Shutdown. On aarch64 that \
+        power-off is PSCI SYSTEM_OFF (OS-026, #343)" >&2
+            cat $out/uefi.log >&2; exit 1
+          fi
+
+          if grep -qi 'unable to open an initial console' $out/uefi.log; then
+            echo "init had no stdio: the /dev/console node is missing from the \
+        initramfs manifest (OS-017, #333)" >&2
+            exit 1
+          fi
+        '';
+
       # `OS-025` (#342): one boot per NIC model this project claims to support,
       # asserting that the machine **serves** rather than that it boots.
       #
@@ -937,6 +1318,145 @@
             echo "a machine with no interface should still bind and serve \
           whatever route it does have — refusing to start is not the behaviour \
           OS-025 (#342) asked for" >&2
+            cat $out/no-nic.log >&2; exit 1; }
+        '';
+
+      # `OS-025` (#342) on aarch64, where the matrix is a third of the size and
+      # the reason is the platform rather than the driver (`OS-032`, #376).
+      #
+      # Four of the seven x86 rows have no arm counterpart at all, and dropping
+      # them is a claim about products rather than about kernels:
+      #
+      #   * **pcnet32** is VirtualBox's older adapter list. VirtualBox has no
+      #     aarch64 guest support to offer it from.
+      #   * **tulip** is Hyper-V Generation 1's "Legacy Network Adapter".
+      #     Generation 1 is x86 only; Azure's Arm instances are Generation 2 and
+      #     therefore VMBus, which is `hv_netvsc` and is in the allowlist.
+      #   * **8139cp** is Xen HVM's default emulated NIC on XCP-ng and Citrix,
+      #     neither of which runs aarch64 guests.
+      #   * **vmxnet3** is VMware's. Fusion on Apple Silicon offers virtio-net
+      #     and an emulated Intel adapter, not vmxnet3; ESXi-on-Arm was a fling
+      #     and is discontinued.
+      #
+      # What is left is virtio-net, which is every KVM-derived hypervisor's
+      # default, and the Intel pair — kept because Proxmox's model list is one
+      # static list for every architecture, so the dropdown that offered E1000
+      # on x86 offers it here too, and because Parallels and Fusion on Apple
+      # Silicon both present an emulated Intel adapter.
+      #
+      # `ena` is in the allowlist and is **not** a row here, and the distinction
+      # matters: QEMU has no ENA device model, so there is nothing to boot
+      # against. It is claimed on the strength of a Graviton instance reporting
+      # an `ena` interface, which is an observation of the platform rather than
+      # of this kernel — `docs/deployment.md` says so in the row.
+      #
+      # Port 11688 for the same reason the x86 twin uses it: `nix flake check`
+      # runs checks in parallel and `linux-boot` already forwards 1688.
+      armNicBootCheckFor = { system, arch }:
+        let
+          pkgs = pkgsFor system;
+          configured = mkKmsrsos { inherit system; };
+          linux = linuxFor { inherit system arch; };
+
+          models = [
+            "virtio-net-pci:virtio_net"
+            "e1000:e1000"
+            "e1000e:e1000e"
+          ];
+        in
+        pkgs.runCommand "linux-nics"
+          {
+            nativeBuildInputs = [ pkgs.qemu_kvm ];
+            meta.timeout = 1800;
+          } ''
+          set -euo pipefail
+          mkdir -p $out
+
+          cp ${pkgs.OVMF.variables} "$PWD/vars.fd"
+          chmod +w "$PWD/vars.fd"
+
+          firmware="-drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware}"
+          firmware="$firmware -drive if=pflash,format=raw,unit=1,file=$PWD/vars.fd"
+
+          serves() {
+            local model="''${1%%:*}"
+            local driver="''${1##*:}"
+            local serial="$PWD/$driver.log"
+
+            ${arch.qemu} \
+              -machine virt,gic-version=3 -cpu cortex-a57 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$serial" \
+              $firmware \
+              -kernel ${linux.kernel}/${arch.image} \
+              -netdev user,id=u1,hostfwd=tcp:127.0.0.1:11688-:1688 \
+              -device "$model,netdev=u1,bus=pcie.0,id=net0" &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 240); do
+              if ${configured.client}/bin/kmsrs-client --quiet --healthcheck \
+                   127.0.0.1:11688; then
+                kill $qemu 2>/dev/null || true
+                wait $qemu 2>/dev/null || true
+                cp "$serial" $out/$driver.log
+                echo "$model serves, via $driver"
+                return 0
+              fi
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$serial" $out/$driver.log 2>/dev/null || true
+            echo "$model never served. The kernel needs $driver, and \
+        os/linux/kernel.config.aarch64 is where it is missing from (OS-025, \
+        #342; OS-032, #376)" >&2
+            cat "$serial" >&2 || true
+            return 1
+          }
+
+          ${builtins.concatStringsSep "\n          "
+            (map (model: "serves ${model}") models)}
+
+          # The other half of `OS-025` (#342), and the one a driver list can
+          # never cover: a machine whose NIC has no driver at all must say so on
+          # the console rather than reporting `listening` and going quiet.
+          echo "checking that a machine with no interface says so"
+          ${arch.qemu} \
+            -machine virt,gic-version=3 -cpu cortex-a57 \
+            -smp 1 -m 512M -display none -no-reboot \
+            -serial "file:$PWD/no-nic.log" \
+            $firmware \
+            -kernel ${linux.kernel}/${arch.image} \
+            -nic none &
+          nonic=$!
+
+          found=0
+          for attempt in $(seq 1 120); do
+            if grep -q 'no Ethernet interface' "$PWD/no-nic.log" 2>/dev/null; then
+              found=1
+              break
+            fi
+            kill -0 $nonic 2>/dev/null || break
+            sleep 1
+          done
+          kill $nonic 2>/dev/null || true
+          wait $nonic 2>/dev/null || true
+          cp "$PWD/no-nic.log" $out/no-nic.log 2>/dev/null || true
+
+          if [ "$found" -ne 1 ]; then
+            echo "a machine with no network interface did not say so. That is \
+        the silent failure OS-025 (#342) was filed about: it boots, it reports \
+        listening, and it serves nobody forever" >&2
+            cat $out/no-nic.log >&2 || true
+            exit 1
+          fi
+          grep -q '"event":"listening"' $out/no-nic.log || {
+            echo "a machine with no interface should still bind and serve \
+        whatever route it does have — refusing to start is not the behaviour \
+        OS-025 (#342) asked for" >&2
             cat $out/no-nic.log >&2; exit 1; }
         '';
 
@@ -1391,7 +1911,6 @@
           # field — and this one does, from BIOS or UEFI, unmodified.
           #
           # Which of the two ships is `OS-018` (#334), and is not decided here.
-          linuxIso = (linuxFor { inherit system; arch = linuxArch; }).iso;
           linux-kernel = (linuxFor { inherit system; arch = linuxArch; }).kernel;
 
           # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
@@ -1424,34 +1943,21 @@
           linux-deltas = import ./os/linux/delta.nix {
             inherit pkgs;
             arch = linuxArch;
-            variants = {
-              # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
-              # for a modern Linux guest on ESXi and Workstation.
-              vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
-              # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
-              rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
-              # VirtualBox's older adapter choices.
-              pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
-              # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
-              tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
-              # EC2 Nitro (`OS-027`, #344).
-              ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
-              # Hyper-V and Azure. The one item `OS-025` calls "genuinely
-              # large", and the reason this output exists rather than an
-              # estimate in a comment.
-              hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
-              # Xen PV networking on XCP-ng and Citrix Hypervisor.
-              xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
-              # `OS-023` (#339) asks in the other direction: what does something
-              # already in the allowlist cost to *keep*? A negative delta is the
-              # saving available if it were removed.
-              no-smp = { disable = [ "SMP" ]; };
-              no-elf-core = { disable = [ "ELF_CORE" ]; };
-              no-seccomp = { disable = [ "SECCOMP" ]; };
-              no-ipv6 = { disable = [ "IPV6" ]; };
-              no-packet = { disable = [ "PACKET" ]; };
-            };
+            variants = linuxDeltaVariants.${linuxArch.name};
           };
+        }
+        # The bootable image, which for the moment only the architecture with a
+        # BIOS has (`OS-032`, #376).
+        #
+        # Not a statement about BIOS as such — it is a statement about *this
+        # recipe*, which is isolinux plus a GRUB in the ESP, and which exists
+        # because isolinux reads ISO9660 and UEFI reads FAT. An architecture
+        # with no second firmware has no sharing problem and therefore needs
+        # neither, so its image is a different image rather than this one with
+        # parts switched off. `OS-033` (#377) writes it and removes this gate.
+        //
+        pkgs.lib.optionalAttrs (linuxArch != null && linuxArch.bios) {
+          linuxIso = (linuxFor { inherit system; arch = linuxArch; }).iso;
         });
 
       checks = eachSystem (system:
@@ -1587,24 +2093,42 @@
         # check set's `let`, and this splice is outside it.
         // nixpkgs.lib.optionalAttrs (linuxArch != null) {
           # `OS-017` (#333): boots and serves on the topology Hermit cannot,
-          # from BIOS and UEFI, with no `--args`.
-          linux-boot = linuxBootCheckFor {
-            inherit system;
-            arch = linuxArch;
-          };
+          # with no `--args`. Two firmwares on x86; one on aarch64, because
+          # there is only one (`OS-032`, #376).
+          #
+          # Selected by name rather than by a feature flag, and deliberately
+          # with no fallback: a new architecture must decide which boot check
+          # is right for it, and the failure for one that has not is an
+          # evaluation error naming it rather than a check that quietly runs
+          # the wrong machine's topology.
+          linux-boot =
+            {
+              x86_64 = linuxBootCheckFor;
+              aarch64 = armBootCheckFor;
+            }.${linuxArch.name} {
+              inherit system;
+              arch = linuxArch;
+            };
 
           # `OS-025` (#342): one boot per supported NIC model, each asserting
           # that the machine *serves* — plus the machine with no NIC at all,
           # which must say so rather than reporting `listening` and going quiet.
-          linux-nics = nicBootCheckFor {
-            inherit system;
-            arch = linuxArch;
-          };
+          linux-nics =
+            {
+              x86_64 = nicBootCheckFor;
+              aarch64 = armNicBootCheckFor;
+            }.${linuxArch.name} {
+              inherit system;
+              arch = linuxArch;
+            };
 
           # `SEC-005` (#197): the Windows binaries are built with Control Flow
           # Guard, read off the PE header rather than off the recipe.
           windows-mitigations = windowsMitigationsCheckFor system;
-
+        }
+        # The checks that are about the *image*, which aarch64 does not have
+        # until `OS-033` (#377). See the matching gate on `linuxIso`.
+        // nixpkgs.lib.optionalAttrs (linuxArch != null && linuxArch.bios) {
           # `PKG-016` (#366): two builds of the ISO are the same bytes.
           reproducible-iso = reproducibleIsoCheckFor {
             inherit system;
