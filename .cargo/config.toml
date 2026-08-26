@@ -37,3 +37,18 @@ color = "auto"
 # Override locally with CARGO_TERM_PROGRESS_WHEN=auto for an interactive bar.
 when = "never"
 width = 80
+
+# `PKG-017`: the MSVC CRT is linked statically.
+#
+# Without this the binary imports `VCRUNTIME140.dll`, which is the Visual C++
+# redistributable and is **not** present on a clean Windows install — so the
+# shipped .exe fails to start with `0xC0000135` (STATUS_DLL_NOT_FOUND) before
+# it can log a single line. Found by running the cross-built binary on a real
+# Windows guest (`SEC-019`, #356); nothing that only cross-compiles can catch it.
+#
+# The nix build sets its own `CARGO_TARGET_..._RUSTFLAGS`, which overrides this
+# table rather than appending to it, so the same flag is in `flake.nix` as well
+# and `windows-mitigations` reads the import table of the artifact to prove the
+# two have not drifted.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -75,6 +75,8 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
 | 41 | SRV weighting | RFC 2782's running-sum selection, **not** the `isqrt` formula `DISC-001` quoted from vlmcsd, [see below](#the-srv-weighting-is-the-specifications-not-vlmcsds-disc-001-143) (#143) |
 | 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
+| 43 | `TCP_NODELAY` | Left at the OS default, having been **measured** rather than assumed: Nagle cannot engage in this protocol, so the option is unobservable, [see below](#tcp_nodelay-is-unobservable-so-it-is-not-set-net-015-164) (#164) |
+| 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -394,6 +396,103 @@ zero-weight record "a small chance of being selected", which the running-sum met
 free; implementations that sort zero-weight records last never try them first, and since the
 recommended zone has *every* record at weight zero, that difference is the whole ordering.
 
+### `TCP_NODELAY` is unobservable, so it is not set (`NET-015`, #164)
+
+`NET-015` guessed that "Nagle likely never engages and the setting is probably unobservable", and
+declined to act on the guess. It is now measured, against Windows 11 Enterprise 25H2 through the
+harness in `harness/windows/`, and the guess was right for a reason worth writing down.
+
+**Nagle needs a second small write with the first still unacknowledged.** This protocol never
+produces one. The driver does exactly one `write_all` per request it has read (`NET-006`, #156), and
+a client's next request always carries the ACK for the previous response — so at the moment the
+server writes, there is never unacknowledged data outstanding.
+
+The obvious objection is pipelining, where two requests arrive in one segment and the driver answers
+with two writes back to back. That was tested directly, by replaying two complete request PDUs in a
+single write from the guest:
+
+| | server response segments | turnaround |
+|---|---|---|
+| OS default (Nagle on) | `[108, 56, 600]` | 0.135 / 0.089 / 0.224 ms |
+| `TCP_NODELAY` set | `[108, 56, 600]` | 0.143 / 0.095 / 0.227 ms |
+
+Identical segmentation, and turnarounds separated by microseconds of noise. The two 300-byte
+responses leave as **one 600-byte segment either way**, because both writes complete within the same
+event-loop turn and the socket buffer coalesces them before anything is transmitted. Nagle does the
+coalescing it exists to do and costs nothing, because there was never a round trip to wait for.
+
+So the option is not "off because we prefer it off". It is *not set*, because setting it would be a
+syscall per connection and a line of code claiming to prevent a stall that cannot occur — and a
+reader would reasonably infer from its presence that one could.
+
+This also settles the anti-fingerprinting half, which is the part `FP-027` (#265) cares about:
+whatever a genuine Microsoft host does with `TCP_NODELAY` is equally unobservable, so parity is
+automatic rather than something to maintain. The measurable TCP-layer differences are the ones
+`FP-027` already names — they are properties of the host OS stack, not of this program.
+
+One limit on the above: it was measured over QEMU user-mode networking, where the round trip is
+sub-millisecond. That does not weaken it, because the argument is structural — the write pattern is
+fixed by the protocol and does not change with latency — but a capture across a real network has not
+been taken.
+
+### The unsafe boundary was reopened, for five calls (`SEC-019`, #356)
+
+The workspace forbade `unsafe` with no exception, and the test enforcing it over-reached on purpose:
+it failed on the word appearing anywhere in a shipped crate, so *"a reader grepping this tree for
+`unsafe` should find nothing and never have to decide which hits are real."* That property is real
+and was worth something. It has been given up, deliberately, for
+`SetProcessMitigationPolicy` — the only thing that has ever needed it.
+
+**What was bought.** All five policies apply, and they were verified in force on a live process
+rather than assumed from a return value — `Get-ProcessMitigation` on the running server reports
+`DisableWin32kSystemCalls: ON`, `BlockDynamicCode: ON`, `DisableExtensionPoints: ON`,
+`BlockRemoteImageLoads: ON`, `BlockLowLabelImageLoads: ON`, `StrictHandle.Enable: ON`. The server
+runs normally with all six in force, including the win32k one, which was the likeliest to break
+something in a process that writes to a console.
+
+**What it cost, and why it is bounded.** One `unsafe` block, in one function, in one file. The
+workspace lint stays at `forbid`; only `kmsrs-server` sets `deny`, which is the weaker level an
+`#[expect(unsafe_code)]` can lift. Two tests keep it from spreading:
+
+* `no_shipped_crate_contains_unsafe` no longer merely forbids — it *counts*. `unsafe` outside
+  `crates/kmsrs-server/src/sandbox.rs` fails, and more than one occurrence inside it fails too, so
+  the boundary cannot grow quietly.
+* `server_lints_match_the_workspace` compares that crate's duplicated lint tables against
+  `[workspace.lints]` in both directions. Duplicating a table is how it drifts; this makes drift a
+  test failure rather than a discovery.
+
+The buffer width is asserted rather than commented: each `PROCESS_MITIGATION_*` structure is a union
+of a `DWORD Flags` and a bitfield, so [`set`] passes a `u32`, and a test fails if any of the five
+ever grows past four bytes — which is the only way that call could quietly start passing a short
+buffer to something that reads `dwlength` bytes.
+
+The alternative was option 4 in #356: declare the asymmetry permanent. That was rejected because
+`DisallowWin32kSystemCalls` is worth more than the grep property, and because the grep property was
+only ever a proxy for "the unsafe in this tree is auditable" — which one call site with a safety
+comment satisfies directly.
+
+### Control Flow Guard produced a binary that did not start (`PKG-018`)
+
+`SEC-005` turned on `-C control-flow-guard` for the Windows target and added a check that reads
+`DllCharacteristics` out of the PE optional header to prove the bit was set. The check was right, the
+bit was set, and **the binary died on startup on every Windows it was run on**: `0xC0000409` with
+fast-fail code 10, `FAST_FAIL_GUARD_ICALL_CHECK_FAILURE`, before a single line reached stderr.
+
+The load-config table is populated — 337 entries, `GuardFlags = 0x10500` — so this is not a missing
+table but an incomplete one: an indirect call to a target the table does not list. A three-line
+hello-world cross-built the same way fails identically, and `lto = "fat"`, `thin` and `off` all fail,
+so it is neither this program nor an LTO interaction. The likeliest cause is that the precompiled
+`std` for `x86_64-pc-windows-msvc` is not built with CFG, which would need `-Zbuild-std` to fix and
+that is confined to the fuzzing shell.
+
+So CFG is off, and `windows-mitigations` now asserts it is **absent** rather than present — a check
+that fails if it comes back without the crash being fixed.
+
+The lesson is the one worth keeping. `DllCharacteristics` is a statement about the artifact and that
+is why the check was written that way, but it is a statement about the artifact's *header*. Nothing
+in the tree had ever executed the artifact. `SEC-019` put a Windows guest in front of it
+(`harness/windows/`) and it failed inside thirty seconds.
+
 ### The sandbox is what could be verified (`SEC-005`, #197)
 
 `SEC-005` asks for three Linux measures and five Windows ones. **Two shipped.** The rest were split
@@ -430,18 +529,19 @@ every libc, allocator, kernel and tokio version it ships against — and the cos
 the process being killed on something nobody predicted, under load, in production, with no log line
 because the process is gone. That list has to be measured, on both libc targets, which is #355.
 
-#### Why the Windows mitigations were split out
+#### Why the Windows mitigations were split out, and how it was settled
 
-`SetProcessMitigationPolicy` is self-applicable and would close a great deal —
+`SetProcessMitigationPolicy` is self-applicable and closes a great deal —
 `DisallowWin32kSystemCalls` alone removes the largest source of Windows kernel escalations, and this
-is a console service with no GUI. It is not called because **it cannot be**: every binding is raw FFI,
-and this workspace sets `unsafe_code = "forbid"` at the root with a test that fails on the word
-appearing anywhere in a shipped crate. That is a real conflict between two things the project wants,
-and `no_shipped_crate_contains_unsafe` says in its own doc comment that reopening the boundary is a
-decision for a review. #356 is where it gets taken.
+is a console service with no GUI. It was not called at first because **it could not be**: every
+binding is raw FFI, and this workspace sets `unsafe_code = "forbid"` at the root with a test that
+fails on the word appearing anywhere in a shipped crate. That was a real conflict between two things
+the project wants, and `SEC-019` (#356) is where it was taken — see
+[decision 44](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356).
 
-Control Flow Guard, the sixth mitigation, *is* purely a compile flag and needed no such decision, so
-it is on.
+Control Flow Guard was described here as the sixth mitigation, "purely a compile flag" and therefore
+free. It was neither: the binary it produced did not start. See
+[below](#control-flow-guard-produced-a-binary-that-did-not-start-pkg-018).
 
 #### Reporting
 
@@ -795,3 +895,22 @@ The check runs on every PR and is self-validating: a second build with `--featur
 must **fail** the audit, because a check that has never been observed failing is not a check. Both
 builds need nightly for `-Zbuild-std`, which is confined to `nix develop .#fuzz` and is the same
 nightly the fuzzers use; nothing that ships is built with it.
+
+<a id="d43"></a>**D43 — An mDNS responder for `_vlmcs._tcp.local` (`DISC-005`, #147).** Declined on
+measurement, not on taste. `DISC-003` (#145) asked whether SPP's SRV lookup goes through the generic
+Windows DNS Client path, which handles `.local` via mDNS. It does — and **that path has no code for
+SRV.** Using plain `Resolve-DnsName` on Windows 11 25H2, with no licensing involved, `A` and `AAAA`
+for a `.local` name go to unicast *and* to `224.0.0.251`/`ff02::fb`; `SRV` and `PTR` for one never
+leave unicast. The DNS Client's mDNS support is an address-record resolver, and DNS-SD on Windows
+lives in a separate WinRT stack (`Windows.Networking.ServiceDiscovery.Dnssd`) that SPP does not
+call.
+
+A responder would therefore answer a question Windows never asks, and no configuration on either
+side changes that. This is the sibling of **D32**: LLMNR cannot carry SRV at all, and mDNS can but
+will not be asked. Evidence and captures: `docs/discovery-findings.md`, scenarios `H-dhcp15-local`
+and `W-why-mdns`.
+
+What survives is the *hostname* half, which does work: `slmgr /skms kmsrsos.local` resolves by mDNS,
+giving a name that survives DHCP address changes with no DNS server and no hosts file. Shipping a
+hostname-only mDNS responder for that is a different proposition from this one and is not declined
+here — it simply has no issue yet.

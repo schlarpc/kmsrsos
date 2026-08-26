@@ -1,0 +1,13 @@
+[package]
+name = "srv-responder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately outside the workspace: this is a measurement tool that runs on
+# the guest, not something that ships, and it should not appear in the
+# workspace's dependency graph, lockfile or lint policy.
+[workspace]
+
+[profile.release]
+opt-level = 1

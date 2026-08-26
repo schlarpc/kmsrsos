@@ -28,6 +28,7 @@ pub mod clock;
 pub mod config;
 pub mod entropy;
 pub mod entry;
+pub mod eventlog;
 pub mod facts;
 pub mod host;
 pub mod log;
@@ -35,6 +36,7 @@ pub mod net;
 pub mod platform;
 pub mod sandbox;
 pub mod server;
+pub mod service;
 pub mod web;
 
 pub use clock::WallClock;

@@ -180,23 +180,25 @@
             "-Lnative=${xwinSdk}/sdk/lib/um/x86_64"
             "-Lnative=${xwinSdk}/sdk/lib/ucrt/x86_64"
 
-            # `SEC-005` (#197): Control Flow Guard. The compiler emits a check
-            # before every indirect call, against a bitmap of the addresses that
-            # are legitimate call targets — so an overwritten function pointer
-            # or vtable entry faults instead of transferring control.
+            # `SEC-005` (#197) added `-C control-flow-guard` here and
+            # `PKG-018` removed it, because **the binary it produced did not
+            # start.** Running it on Windows 11 26200 gives `0xC0000409` with
+            # fast-fail code 10, `FAST_FAIL_GUARD_ICALL_CHECK_FAILURE` — an
+            # indirect call to an address the guard table does not list — before
+            # a single line is logged. A three-line hello-world cross-built the
+            # same way fails identically, so this is the toolchain, not this
+            # program.
             #
-            # This is the one Windows mitigation `SEC-005` names that needs no
-            # `unsafe`, because it is a link-time property rather than a call.
-            # The other five go through `SetProcessMitigationPolicy`, which is
-            # raw FFI in every binding that exists, and this workspace forbids
-            # `unsafe` with no exception — see `SEC-019` (#356), where that
-            # conflict gets decided.
+            # It was not caught because nothing ever ran the artifact. The
+            # `windows-mitigations` check read `DllCharacteristics` and found
+            # the CFG bit honestly set, which is a true statement about a
+            # binary that crashes. `SEC-019` (#356) put a Windows guest in
+            # front of it and it failed in the first thirty seconds.
             #
-            # Cheap for this program: the cost of CFG is proportional to how
-            # many indirect calls a program makes on a hot path, and the hot
-            # path here is one 384-byte request through a state machine of
-            # direct calls.
-            "-C control-flow-guard"
+            # The five `SetProcessMitigationPolicy` policies do apply and are
+            # verified in force on a live process — see `crate::sandbox`.
+            # Restoring CFG is `PKG-018`; the likely requirement is a `std`
+            # rebuilt with it, since the precompiled one is not.
           ];
 
           CC_x86_64_pc_windows_msvc = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang-cl";
@@ -971,7 +973,8 @@
           disk uefi
         '';
 
-      # `SEC-005` (#197): Control Flow Guard is in the shipped Windows binaries.
+      # `PKG-018`: Control Flow Guard is **absent** from the shipped Windows
+      # binaries, and that is asserted rather than merely true.
       #
       # Read out of the PE optional header, not off the `RUSTFLAGS` line that is
       # supposed to put it there. A flag in a build file is a statement about
@@ -983,9 +986,16 @@
       # in the ISO bytes: the comment in `default.nix` said "twice" for the whole
       # time it was three.
       #
-      # CFG is the one Windows mitigation `SEC-005` asks for that needs no
-      # `unsafe`. The other five go through `SetProcessMitigationPolicy`, which
-      # is raw FFI in every binding that exists — see `SEC-019` (#356).
+      # The direction is inverted from what `SEC-005` (#197) wrote, and the
+      # reason is that the flag produced a binary that fast-fails on startup
+      # (`FAST_FAIL_GUARD_ICALL_CHECK_FAILURE`) on every Windows it was run on.
+      # A check that only asserted the bit was set passed for the whole time the
+      # artifact was unusable, so this now fails if CFG comes back without the
+      # crash being fixed — see `PKG-018`.
+      #
+      # The other five mitigations are applied at run time through
+      # `SetProcessMitigationPolicy` (`SEC-019`, #356) and are verified in force
+      # on a live process, which no build-time check could do.
       windowsMitigationsCheckFor = system:
         let
           pkgs = pkgsFor system;
@@ -1014,11 +1024,14 @@
               flags = struct.unpack_from("<H", data, pe + 24 + DLL_CHARACTERISTICS)[0]
               guarded = bool(flags & GUARD_CF)
               print(f"{path.name:20} DllCharacteristics=0x{flags:04x} GUARD_CF={guarded}")
-              assert guarded, (
-                  f"{path.name} was built without Control Flow Guard. It is set by "
-                  "`-C control-flow-guard` in this flake's Windows RUSTFLAGS "
-                  "(SEC-005, #197); if that is still there, the toolchain has "
-                  "stopped honouring it"
+              assert not guarded, (
+                  f"{path.name} was built with Control Flow Guard. On this "
+                  "toolchain that produces a binary that dies at startup with "
+                  "0xC0000409 / FAST_FAIL_GUARD_ICALL_CHECK_FAILURE before it "
+                  "logs anything, which is strictly worse than the mitigation "
+                  "is worth (PKG-018). If this is being re-enabled, run the "
+                  "artifact on a Windows guest first - harness/windows/ exists "
+                  "for that and is how this was found"
               )
           PYTHON
         '';

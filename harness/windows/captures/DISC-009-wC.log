@@ -1,0 +1,124 @@
+srv-responder: listening on 0.0.0.0:53 and [::]:53, forwarding to 10.0.2.3
+  SRV prio=0 weight=25 port=1701 target=a -> 10.0.2.2
+  SRV prio=0 weight=50 port=1702 target=b -> 10.0.2.2
+  SRV prio=0 weight=25 port=1703 target=c -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    c.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    a.lab.example  -> 10.0.2.2
+SRV  _VLMCS._TCP.lab.example  -> answering 3 record(s)
+A    a.lab.example  -> 10.0.2.2
+A    b.lab.example  -> 10.0.2.2
+A    c.lab.example  -> 10.0.2.2

@@ -254,22 +254,37 @@ fn the_bare_metal_entry_point_does_not_sandbox_itself() {
         .filter(|line| line.contains("serve_inner("))
         .collect();
 
+    // Counting callers was the original form of this check, and `PKG-008`
+    // (#245) added a third — `serve_reporting_ready`, the Windows service
+    // path — which made the count fail for a change that was correct. The
+    // count was never the invariant. *Which* callers opt out is.
+    let unsandboxed: Vec<&&str> = calls.iter().filter(|line| line.contains("false")).collect();
+    let sandboxed: Vec<&&str> = calls.iter().filter(|line| line.contains("true")).collect();
+
+    assert!(
+        !calls.is_empty(),
+        "no calls to `serve_inner` at all, so this test is not looking at the \
+         right file and would pass if the sandbox were removed"
+    );
     assert_eq!(
-        calls.len(),
-        2,
-        "there should be exactly two callers of `serve_inner` — `serve`, which \
-         sandboxes, and `serve_with`, which does not: {calls:#?}"
+        unsandboxed.len(),
+        1,
+        "exactly one entry point may decline the sandbox: `serve_with`, which \
+         is pid 1 on the bare-metal target and needs mounts, netlink and \
+         `reboot(2)` for the life of the machine. Any other opt-out is a \
+         hosted build quietly giving up `SEC-005` (#197) and `SEC-019` \
+         (#356): {calls:#?}"
     );
     assert!(
-        calls.iter().any(|line| line.contains("true")),
+        !sandboxed.is_empty(),
         "no entry point asks to be sandboxed, so `SEC-005` (#197) applies to \
          nothing: {calls:#?}"
     );
-    assert!(
-        calls.iter().any(|line| line.contains("false")),
-        "every entry point sandboxes itself, including `serve_with` — which is \
-         pid 1 on the bare-metal target and needs mounts, netlink and \
-         `reboot(2)` for the life of the machine: {calls:#?}"
+    assert_eq!(
+        sandboxed.len().saturating_add(unsandboxed.len()),
+        calls.len(),
+        "a call to `serve_inner` passes neither `true` nor `false` on its own \
+         line, so this test cannot tell whether it sandboxes: {calls:#?}"
     );
 }
 

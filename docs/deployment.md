@@ -11,6 +11,7 @@ any of this are in [`decisions.md`](decisions.md).
 - [DNS: the `_vlmcs._tcp` SRV record](#dns-the-_vlmcs_tcp-srv-record)
 - [Building it, and configuring it](#building-it-and-configuring-it)
 - [systemd](#systemd)
+- [Windows, as a service](#windows-as-a-service)
 - [Containers and Kubernetes](#containers-and-kubernetes)
 - [Bare metal: Linux, on QEMU or Proxmox](#bare-metal-linux-on-qemu-or-proxmox)
 - [What is not in the artifact](#what-is-not-in-the-artifact)
@@ -240,6 +241,91 @@ destroys both the stable ePID and the CMID table **while continuing to answer** 
 vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declined-with-rationale)).
 
 ---
+
+## Windows, as a service
+
+`PKG-008` (#245). The binary detects for itself whether it was started by the Service Control
+Manager — `StartServiceCtrlDispatcher` fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` when it
+was not — so the same `.exe` is both a console program and a service with no switch to get wrong.
+
+Installation is one line, and there is deliberately no `--install` verb:
+
+```
+sc.exe create kmsrsos binPath= "C:\Program Files\kmsrsos\kmsrs-server.exe" start= auto DisplayName= "kmsrsos KMS host"
+sc.exe start kmsrsos
+```
+
+The spaces after `binPath=`, `start=` and `DisplayName=` are `sc.exe`'s syntax, not typos.
+
+**Why there is no installer.** An in-binary installer is the code that produced both of vlmcsd's
+service bugs — a password embedded in the `ImagePath` where any user can read it out of the
+registry, and a `strcat` overflow building that command line. This program takes no arguments at all
+(`CFG-007`, #172), so there is no argv to embed and no argv to concatenate: both bugs are
+unrepresentable rather than fixed. The cost is that you type the line above.
+
+### The web UI is not optional here
+
+**A Windows service has no stderr.** This program writes its log to stderr and nowhere else — no
+files, no Event Log for the request stream (axiom A5) — so under the SCM that output goes nowhere.
+In service mode the request log is readable **only** through the web UI on port 8080.
+
+That is a real constraint, not a preference. If you firewall off 8080 on a Windows service
+installation, you have a KMS host you cannot observe at all.
+
+Start-up failures are the sharper edge, because a bind failure or a failed entropy self-test means
+the web listener never comes up either — there is nothing to browse to and nothing on stderr.
+`OBS-016` (#192) is the six-event Windows Event Log that exists for exactly that window.
+
+### Registering the Event Log source
+
+`OBS-016` (#192). Do this next to the `sc.exe create` above, and for the same reason there is no
+installer — it is one line, and a line you can read:
+
+```
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\kmsrsos" /v EventMessageFile /t REG_SZ /d "C:\Program Files\kmsrsos\kmsrs-server.exe" /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\kmsrsos" /v TypesSupported /t REG_DWORD /d 7 /f
+```
+
+The binary is its own message file, which is what the first line says. Skip it and the events still
+arrive, but Event Viewer renders every one of them as *"The description for Event ID 1 cannot be
+found"* — which looks like a broken program rather than a missing registry value.
+
+**Six events, and the request stream is not among them:**
+
+| Id | Level | When |
+|---:|---|---|
+| 1 | Information | Listeners bound and serving |
+| 2 | Information | Drain finished, stopping cleanly |
+| 3 | Error | Nothing could be bound |
+| 4 | Error | The entropy self-test failed |
+| 5 | Error | `KMSRSOS_CONFIG` could not be parsed |
+| 6 | Error | The process panicked |
+
+Every one carries the underlying error as its message. Activations are **not** logged here and will
+not be: the Event Log is shared, size-limited and administrator-visible, and a KMS host filling it
+with one record per request would be a denial of service against everything else that logs there.
+The request stream stays on stderr and the web UI.
+
+Events 3, 4 and 5 are the ones this exists for — each happens before any listener is up, so the web
+UI cannot report them and, under the SCM, neither can stderr.
+
+### What the service does and does not accept
+
+| Control | Behaviour |
+|---|---|
+| `STOP` | Stop accepting, drain in-flight connections, then report `STOPPED` |
+| `SHUTDOWN` | The same — the machine going down is not a different question |
+| `INTERROGATE` | Answered |
+| `PAUSE` / `CONTINUE` | Not implemented. A paused KMS host is a KMS host that fails activations while claiming to be installed |
+
+The state transitions are the honest ones. `START_PENDING` is reported while the entropy self-test
+runs and the listeners bind, accepting no controls, with a 30-second wait hint; `RUNNING` is reported
+**at the moment the listeners are bound and before the first connection is accepted**, not when the
+process started. Anything with a service dependency on this one therefore starts after there is
+something to talk to.
+
+If start-up never gets that far, the service reports `STOPPED` with `ERROR_PROCESS_ABORTED` rather
+than a clean exit, so the SCM and any recovery policy can tell a failed start from a normal stop.
 
 ## Containers and Kubernetes
 

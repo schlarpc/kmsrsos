@@ -65,17 +65,17 @@
 //! deployed than the mitigation is worth, and `PKG-008` (#245) deliberately has
 //! no installer for the same reason.
 //!
-//! What *is* self-applicable is a set of process mitigation policies — and they
-//! are **not** applied either, because every route to
-//! `SetProcessMitigationPolicy` is raw FFI and this workspace forbids `unsafe`
-//! with no exception. That conflict is real and is a decision for a review:
-//! `SEC-019` (#356). Until it is taken, the Windows build reports
-//! `process_mitigations: Failed` rather than claiming a hardening it does not
-//! have.
+//! What *is* self-applicable is a set of process mitigation policies, and
+//! `SEC-019` (#356) applies five of them. Doing so required reopening the
+//! workspace's unsafe boundary, because every route to
+//! `SetProcessMitigationPolicy` is raw FFI and no safe wrapper exists on any
+//! crate. That was a decision taken in review rather than a gap filled in
+//! passing; the argument is in `docs/decisions.md`, and the boundary is one
+//! call in the Windows `platform` module below.
 //!
-//! The result is that a Windows host is genuinely less confined than a Linux
-//! one, and [`Report`] says so in as many words rather than reporting
-//! "hardened" on both.
+//! The result is that a Windows host is still genuinely less confined than a
+//! Linux one — it has no filesystem sandbox at all — and [`Report`] says so in
+//! as many words rather than reporting "hardened" on both.
 
 /// Whether this target has a sandbox to apply at all (`SEC-005`, #197).
 ///
@@ -336,36 +336,149 @@ mod platform {
     //! truth rather than a gap being glossed: **a Windows host is less confined
     //! than a Linux one.**
     //!
-    //! # What Windows *could* do, and why it does not yet
+    //! # What Windows does do (`SEC-019`, #356)
     //!
-    //! `SetProcessMitigationPolicy` is self-applicable and would close a great
-    //! deal — `DisallowWin32kSystemCalls` alone removes the largest source of
-    //! Windows kernel escalations, and this is a console service with no GUI, so
-    //! it costs nothing.
+    //! `SetProcessMitigationPolicy` is self-applicable, and five policies are
+    //! applied here. `DisallowWin32kSystemCalls` is the one that matters most
+    //! and costs least: it removes the `win32k.sys` attack surface, by a wide
+    //! margin the largest source of Windows kernel escalations, and this is a
+    //! console service that writes to stderr and speaks TCP, so it has no use
+    //! for it at all.
     //!
-    //! It is not called here because **it cannot be called from this
-    //! workspace**. Every route to it is raw FFI: `windows-sys` and `windows`
-    //! both expose it as an `unsafe extern` function, and this workspace sets
-    //! `unsafe_code = "forbid"` at the root with no exception —
-    //! `no_shipped_crate_contains_unsafe` fails on the word appearing anywhere
-    //! in a shipped crate, deliberately over-reaching so that a reader grepping
-    //! for it finds nothing.
-    //!
-    //! That is a real conflict between two things this project wants, and
-    //! resolving it is a decision for a review rather than something to slip in
-    //! beside a Linux change. `SEC-019` (#356) is where it gets taken. Until
-    //! then this reports `Failed` rather than `NotOnThisTarget`, because the
-    //! capability *does* exist on this target and is not being used — and those
-    //! are different facts.
+    //! Every route to that function is raw FFI — `windows-sys` and `windows`
+    //! both expose it as an `unsafe extern` function and no safe wrapper crate
+    //! exists — so this module is **the one unsafe boundary in the workspace**.
+    //! `SEC-019` is where that was decided rather than assumed; the reasoning
+    //! is in `docs/decisions.md`. The boundary is one call in [`set`], the
+    //! manifest downgrades `unsafe_code` from `forbid` to `deny` so that call
+    //! must name itself, and `unsafe_is_confined_to_the_one_boundary` fails if
+    //! it ever appears anywhere else.
 
     use super::{Applied, Report};
+    use windows_sys::Win32::System::Threading::{
+        PROCESS_MITIGATION_POLICY, ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy,
+        ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy, ProcessSystemCallDisablePolicy,
+        SetProcessMitigationPolicy,
+    };
 
-    pub(super) const fn apply() -> Report {
+    /// The policies applied, each with the flag word that enables it.
+    ///
+    /// Every one of these `PROCESS_MITIGATION_*` structures is a union of a
+    /// `DWORD Flags` and a bitfield of the same width, so a bare `u32` is the
+    /// buffer the call wants. `the_policy_structures_are_still_flag_words`
+    /// fails if a future SDK grows one past four bytes, which is the only way
+    /// this could quietly start passing a short buffer.
+    const POLICIES: [(&str, PROCESS_MITIGATION_POLICY, u32); 5] = [
+        // Bit 0, `DisallowWin32kSystemCalls`. The whole win32k surface, which a
+        // service with no GUI never touches.
+        ("win32k", ProcessSystemCallDisablePolicy, 0b1),
+        // Bit 0, `ProhibitDynamicCode`. Nothing here makes a page executable at
+        // run time, so injected shellcode has nowhere to live.
+        ("dynamic-code", ProcessDynamicCodePolicy, 0b1),
+        // Bit 0, `DisableExtensionPoints`. AppInit DLLs, IMEs and window hooks
+        // — third-party code the loader would otherwise inject.
+        ("extension-points", ProcessExtensionPointDisablePolicy, 0b1),
+        // Bits 0 and 1, `NoRemoteImages` and `NoLowMandatoryLabelImages`: no
+        // DLL from a remote or low-integrity location.
+        ("image-load", ProcessImageLoadPolicy, 0b11),
+        // Bits 0 and 1, `RaiseExceptionOnInvalidHandleReference` and
+        // `HandleExceptionsPermanentlyEnabled`: an invalid handle becomes an
+        // exception rather than a silent bug.
+        ("strict-handles", ProcessStrictHandleCheckPolicy, 0b11),
+    ];
+
+    /// Apply one mitigation policy to this process.
+    ///
+    /// Returns whether the kernel accepted it. A refusal is not fatal and not
+    /// even unexpected — see [`apply`].
+    fn set(policy: PROCESS_MITIGATION_POLICY, flags: u32) -> bool {
+        // SAFETY: `SetProcessMitigationPolicy` reads `dwlength` bytes from
+        // `lpbuffer` and writes nothing. `flags` is a live `u32` local for the
+        // whole call, so the pointer is valid and aligned for the four bytes
+        // named by `size_of_val`, and the length cannot disagree with the
+        // buffer because it is derived from that same local. The policy
+        // identifier is one of the constants above, so it names a policy this
+        // Windows either knows — in which case the flag word is the documented
+        // width — or does not, in which case it fails cleanly and returns 0.
+        // There is no handle, no allocation and no lifetime beyond the call.
+        #[expect(
+            unsafe_code,
+            reason = "the one boundary in the workspace: SetProcessMitigationPolicy \
+                      has no safe wrapper on any crate (`SEC-019`, #356)"
+        )]
+        let accepted = unsafe {
+            SetProcessMitigationPolicy(
+                policy,
+                core::ptr::from_ref(&flags).cast(),
+                size_of_val(&flags),
+            )
+        };
+        accepted != 0
+    }
+
+    /// Which policies this process failed to apply, in [`POLICIES`] order.
+    ///
+    /// Separate from [`apply`] so a refusal can be attributed to a policy
+    /// rather than reported as a bare "something failed".
+    fn refused() -> Vec<&'static str> {
+        POLICIES
+            .into_iter()
+            .filter(|&(_, policy, flags)| !set(policy, flags))
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
+    pub(super) fn apply() -> Report {
         Report {
             filesystem: Applied::NotOnThisTarget,
             no_new_privileges: Applied::NotOnThisTarget,
             syscalls: Applied::NotOnThisTarget,
-            process_mitigations: Applied::Failed,
+            process_mitigations: if refused().is_empty() {
+                Applied::Yes
+            } else {
+                Applied::Failed
+            },
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            reason = "test code: a failed expectation should abort loudly"
+        )]
+
+        use windows_sys::Win32::System::SystemServices::{
+            PROCESS_MITIGATION_DYNAMIC_CODE_POLICY,
+            PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY,
+            PROCESS_MITIGATION_IMAGE_LOAD_POLICY, PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY,
+            PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY,
+        };
+
+        /// `SEC-019` (#356): every policy buffer is still a four-byte flag word.
+        ///
+        /// [`super::set`] passes a `u32`. If a future SDK widens any of these
+        /// structures, that becomes a short buffer for a call that reads
+        /// `dwlength` bytes — so the assumption is asserted rather than
+        /// commented.
+        #[test]
+        fn the_policy_structures_are_still_flag_words() {
+            assert_eq!(
+                size_of::<PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY>(),
+                4
+            );
+            assert_eq!(size_of::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>(), 4);
+            assert_eq!(
+                size_of::<PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY>(),
+                4
+            );
+            assert_eq!(size_of::<PROCESS_MITIGATION_IMAGE_LOAD_POLICY>(), 4);
+            assert_eq!(
+                size_of::<PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY>(),
+                4
+            );
         }
     }
 }
