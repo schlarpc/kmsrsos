@@ -39,7 +39,7 @@ Design goals, in the order that shapes the code:
 
 | Document | Contents |
 |---|---|
-| [`docs/decisions.md`](docs/decisions.md) | Axioms, the 36 decisions taken, and 41 things deliberately not built |
+| [`docs/decisions.md`](docs/decisions.md) | Axioms, the 47 decisions taken, and 46 things deliberately not built |
 | [`docs/reference.md`](docs/reference.md) | Generated from the code: routes, metrics, exit codes, what a build decides, what is in the database |
 | [`docs/releasing.md`](docs/releasing.md) | What a tag produces, how to verify it, and the release-notes template |
 | [`docs/deployment.md`](docs/deployment.md) | Where the host has to live, the SRV record, the container and Kubernetes manifests, the bare-metal ISO on Proxmox, and what is not in the artifact |
