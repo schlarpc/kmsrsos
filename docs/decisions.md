@@ -77,7 +77,8 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
 | 43 | `TCP_NODELAY` | Left at the OS default, having been **measured** rather than assumed: Nagle cannot engage in this protocol, so the option is unobservable, [see below](#tcp_nodelay-is-unobservable-so-it-is-not-set-net-015-164) (#164) |
 | 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
-| 45 | The arm image has no bootloader | `OS-030`'s GRUB solves two firmwares sharing one kernel; aarch64 has one firmware, so the kernel goes in the ESP and nothing loads it, [see below](#the-arm-image-has-no-bootloader-os-033-377) (#377) |
+| 45 | A second architecture is supported | aarch64, because Proxmox VE for arm64 shipped and KVM is same-architecture — and because on Apple Silicon the whole lab is Arm, [see below](#a-second-architecture-is-supported-os-032-376-pkg-019-378) (#376, #378) |
+| 46 | The arm image has no bootloader | `OS-030`'s GRUB solves two firmwares sharing one kernel; aarch64 has one firmware, so the kernel goes in the ESP and nothing loads it, [see below](#the-arm-image-has-no-bootloader-os-033-377) (#377) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -263,6 +264,45 @@ That is the whole procedure", and CD-ROM-from-SeaBIOS is the *default* path on t
 Twelve per cent is not worth the supported platform's default path, and the size argument is weak
 anyway: de-duplicating the kernel is worth 3.00 MiB and both options get that; the choice between them
 is worth 0.64 MiB.
+
+### A second architecture is supported (`OS-032`, #376; `PKG-019`, #378)
+
+Decision 25 said "Proxmox is the supported platform", and Proxmox was x86-only. **Proxmox VE 9.2 for
+arm64 shipped on 5 August 2026**, same codebase, full parity, and KVM is same-architecture — so an
+operator on one of those hosts can run aarch64 guests and nothing else. For them this appliance did
+not exist.
+
+**The audience is the clients, not the hosts, and that is the stronger half of the argument.** On
+Apple Silicon the entire lab is aarch64: Parallels and Fusion run Arm guests only and UTM's x86_64
+path is TCG, so someone with a Windows 11 on Arm VM had no way to run this beside it except emulating
+an x86 kernel — for a program whose pitch is that you attach the ISO and it boots. Snapdragon X and
+Windows Dev Kit machines are the same case without the hypervisor.
+
+**What "supported" is taken to mean here**, because a second architecture is easy to claim and hard
+to keep:
+
+- **Its own TCB statement.** `os/linux/kernel.config.aarch64` is generated the same way and asserted
+  by the same test, against **its own two lists** rather than the x86 ones with substitutions
+  (`OS-031`, #375). An architecture's TCB is not the other's plus a delta.
+- **Its own boot check, not a parameter of the x86 one.** What differs is the interrupt controller,
+  the timer, the console device, the PCI topology and the way the machine powers off; a check
+  parametrised over all of that would be two checks sharing a `for` loop.
+- **Built natively.** The arm ISO is built and booted on the arm runner, never cross-compiled. Same
+  build path as x86, on its own hardware.
+- **Its own row in the platform matrix, honestly marked.** The arm matrix is a third of the size,
+  because four x86 rows name products that have no aarch64 guests at all.
+
+**What it cost to find out.** Four of the things the issue predicted would be needed were wrong, and
+every one of them was wrong in the direction of an allowlist entry that reads as a decision and does
+nothing: `ACPI_GED` is not a Kconfig option, `RANDOM_TRUST_*` no longer exists on any architecture
+(`OS-034`, #382), `olddefconfig` picks a page-table format nobody ships, and the console is **not**
+`ttyAMA0` alone — EC2's aarch64 instances have a 16550A. And one thing nobody predicted: x86 had
+KASLR and aarch64 silently did not, because `tinyconfig` answers `y` to `RANDOMIZE_BASE` on one and
+not the other.
+
+That last pair is the general lesson, and it is `OS-006` (#257) again in its most expensive form: a
+second target inherits none of the first one's *defaults*, so anything the first one got without
+asking is something the second one silently does without.
 
 ### The arm image has no bootloader (`OS-033`, #377)
 

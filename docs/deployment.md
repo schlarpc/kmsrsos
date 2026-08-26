@@ -399,12 +399,34 @@ This used to be a [Hermit](https://github.com/hermit-os) unikernel. `OS-018` (#3
 needed three non-default VM settings, only one of which the Proxmox web UI can express, and failed
 quietly when they were missing.
 
-### The artifact (`OS-017`, #333)
+### The artifact (`OS-017`, #333; `PKG-019`, #378)
+
+**Two images, one per architecture**, each built on its own architecture's runner and each named for
+it. `.#linuxIso` on a system is the image *for* that system; there is no cross-compiled image and no
+dual-architecture one (declined as [D44](decisions.md#d44)).
 
 ```shell
-$ nix build .#linuxIso        # kmsrsos-linux.iso, 5.3 MiB
-$ nix build .#linux-kernel    # the bzImage on its own
+$ nix build .#linuxIso        # kmsrsos-x86_64.iso 5.3 MiB, kmsrsos-aarch64.iso 4.4 MiB
+$ nix build .#linux-kernel    # the kernel on its own
 ```
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| firmware | SeaBIOS **or** UEFI | UEFI only — arm64 guests have no BIOS |
+| kernel file | `bzImage`, 3 560 448 B | `vmlinuz.efi`, 3 760 640 B — `CONFIG_EFI_ZBOOT`, against 7 660 032 B uncompressed |
+| bootloader | isolinux for BIOS, a six-module GRUB in the ESP for UEFI | **none** |
+| kernel lives in | ISO9660 | the EFI System Partition |
+| ESP | 2 MiB | 4 MiB |
+| whole image | 5 582 848 B | 4 603 904 B |
+
+The arm image is **strictly simpler and slightly smaller**, and the reason is that `OS-030`'s GRUB
+solves a problem it does not have: isolinux reads ISO9660, UEFI reads FAT, and a bootloader in the
+ESP is what lets one kernel serve both. With one firmware there is nothing to bridge, so the kernel
+is the EFI executable and firmware runs it directly. The full argument and the measurements are in
+[`decisions.md`](decisions.md#the-arm-image-has-no-bootloader-os-033-377).
+
+Everything below this line describes the x86_64 image unless it says otherwise; the arm one has its
+own section further down.
 
 **One ISO, both firmwares, and one copy of the kernel** (`OS-030`, #348). The 3.4 MiB `bzImage` lives
 in the ISO9660 filesystem and nowhere else. isolinux reads it there for BIOS; a small `grubx64.efi` in
@@ -436,7 +458,7 @@ The initramfs and the kernel command line are *inside* that file
 bootloader passing a different command line is **ignored**, so the kernel command line is a
 build-time decision like every other setting here (axiom A3, `CFG-001` #166).
 
-### Which hypervisors this runs on (`OS-025`, #342)
+### Which hypervisors this runs on — x86_64 (`OS-025`, #342)
 
 **The column that matters is the last one.** A driver list is never complete, and the failure this
 matrix exists to prevent is not "it did not boot" — it is a machine that boots to completion, prints
@@ -508,6 +530,84 @@ smaller image should start there and not with the drivers.
 "drags in the whole VMBus stack, which is not a driver-sized cost". Measured, it is 40 KiB — less
 than twice a plain PCI driver. The estimate had never been taken on a built image.
 
+### Which hypervisors this runs on — aarch64 (`OS-032`, #376)
+
+**Proxmox VE 9.2 for arm64 shipped on 5 August 2026** — Debian 13.5, Linux 7.0, the same codebase as
+the x86-64 edition, with parity across KVM, LXC, ZFS and Ceph. NVIDIA Grace and Vera are fully
+supported; other UEFI Armv8-A/Armv9-A hardware is best-effort. Device-tree-only boards such as the
+Raspberry Pi are **not** supported, because the host must boot through UEFI and describe its hardware
+through ACPI.
+
+KVM is same-architecture, so an operator on one of those hosts can run aarch64 guests and nothing
+else. The audience is wider than the hosts, though: on Apple Silicon the entire lab is aarch64 —
+Parallels and Fusion run Arm guests only, and UTM's x86_64 path is TCG — and Snapdragon X and Windows
+Dev Kit machines are Arm Windows clients that want a KMS host on the same LAN.
+
+**The matrix is a third of the size, and that is a claim about products rather than about kernels.**
+
+| Platform | Firmware | Default NIC | Driver | Checked how |
+|---|---|---|---|---|
+| **Proxmox VE for arm64 / QEMU-KVM** | UEFI (AAVMF) only | virtio-net | `virtio_net` | **Observed**: boots and serves under `qemu-system-aarch64 -machine virt` |
+| Proxmox — *Intel E1000* | UEFI | e1000 | `e1000` | **Observed** in QEMU. Whether the arm64 web UI still offers the model is *not* observed |
+| Proxmox — *Intel E1000E* | UEFI | e1000e | `e1000e` | **Observed** in QEMU; same caveat |
+| **EC2 Graviton** | UEFI | ENA | `ena` | **Observed on a real instance** — see [On EC2](#on-ec2-os-027-344) |
+| **Apple Silicon: Parallels, VMware Fusion** | UEFI | virtio-net or an emulated Intel adapter | `virtio_net`, `e1000e` | Device models observed in QEMU; the products not booted |
+| **UTM** (Apple Virtualization or QEMU) | UEFI | virtio-net | `virtio_net` | Reasoned — it is the same device model |
+| **Azure Cobalt 100** | UEFI | synthetic only (VMBus) | `hv_netvsc` | **Not observed.** VMBus cannot be exercised in QEMU at all |
+| ~~VirtualBox~~ | — | — | — | no aarch64 guests exist to support |
+| ~~Hyper-V Generation 1~~ | — | — | — | Generation 1 is x86; Arm Azure is Generation 2, so VMBus |
+| ~~Xen HVM (XCP-ng, Citrix)~~ | — | — | — | no aarch64 guests |
+| ~~VMware ESXi~~ | — | — | — | ESXi-on-Arm was a fling and is discontinued |
+
+`vmxnet3`, `8139cp`, `pcnet32` and `tulip` are therefore **absent from the arm kernel**, and
+`kernel_tcb.rs` asserts their absence — which is what stops the arm allowlist quietly growing into a
+copy of the x86 one.
+
+#### What each row costs
+
+`nix build .#linux-deltas && cat result/report` on an aarch64 machine, initramfs held constant,
+against a 2 740 736-byte `vmlinuz.efi` baseline:
+
+| Driver | Cost | For |
+|---|---|---|
+| `e1000` + `e1000e` | +100 KiB | Proxmox's Intel entries; Parallels and Fusion on Apple Silicon |
+| `hv_netvsc` | +40 KiB | Azure Cobalt 100 |
+| `ena` | +32 KiB | EC2 Graviton |
+| KASLR | +4 KiB | `RANDOMIZE_BASE`, which x86 had by default and this did not |
+| ~~`virtio-gpu`~~ | ~~+12 KiB~~ | **not taken** — see the console note below |
+
+**The image format dominates every driver.** `CONFIG_EFI_ZBOOT` is worth **3.69 MiB**, thirty times
+the largest driver: arm64's `Image` is uncompressed and there is no self-decompressing counterpart of
+`bzImage`.
+
+#### The console is two devices, not one
+
+**QEMU's `virt` machine has a PL011 (`ttyAMA0`). EC2's aarch64 instances have a 16550A (`ttyS0`).**
+Both are in the kernel and both are on the command line, because a kernel naming only the first would
+boot correctly on EC2 and print nothing at all — `OS-005` (#256) with no symptom. Observed on a
+Graviton host, where ACPI SPCR reads `uart,mmio,0x90a0000,115200` and the kernel reports
+`ttyS0 … is a 16550A`.
+
+The framebuffer half is less settled. `-machine virt` has **no display device by default**; a `ramfb`
+gives an EFI GOP that `simpledrm` takes over, and a `virtio-gpu` does not — the EFI framebuffer stops
+being scanned out at `ExitBootServices` and the window freezes on the firmware logo. `DRM_VIRTIO_GPU`
+would cost 12 KiB and is not in the kernel, because nothing observed needs it yet. If a Proxmox arm64
+VM shows a frozen console, that is the reason and the fix is measured.
+
+#### Powering it off
+
+`qm shutdown` works, and the mechanism is different: on `-machine virt` the press arrives through the
+ACPI **Generic Event Device** rather than a fixed-hardware power button, and the machine powers down
+through **PSCI `SYSTEM_OFF`** rather than an ACPI register write. It surfaces as the same evdev
+`KEY_POWER`, so `OS-026` (#343)'s drain runs unchanged. Observed on every `nix flake check`.
+
+#### KASLR needs an RNG the firmware can offer
+
+`CONFIG_RANDOMIZE_BASE` is compiled in, and arm64 takes its seed from `EFI_RNG_PROTOCOL`. Under a
+plain AAVMF with no RNG source the boot log says `KASLR disabled due to lack of seed` and the kernel
+runs at its link address; on EC2, where firmware has one, it is seeded and that line is absent.
+**Attach `virtio-rng`** — it is the same checkbox that is worth a second of boot time on x86.
+
 **The Xen paravirtual path is the expensive one, and is declined.** 148 KiB is 6 % of the whole
 kernel, because it is xenbus, grant tables and event channels rather than a driver. What it buys is
 throughput on XCP-ng and Citrix Hypervisor — whose *default* emulated NIC is RTL8139 and therefore
@@ -530,9 +630,16 @@ not a host that should refuse to start.
 
 #### On Proxmox
 
-Create a VM with **no disk**, upload `kmsrsos-linux.iso` to your ISO storage, attach it to the
+Create a VM with **no disk**, upload `kmsrsos-x86_64.iso` to your ISO storage, attach it to the
 CD-ROM drive, and boot it. That is the whole procedure. SeaBIOS or OVMF both work, so the default
 BIOS setting is fine and an EFI disk is only needed if you choose OVMF.
+
+**On Proxmox VE for arm64 the procedure is the same, with `kmsrsos-aarch64.iso`**, and there is no
+BIOS setting to leave alone because there is no BIOS. **No EFI disk is needed either**: the kernel
+sits at `\EFI\BOOT\BOOTAA64.EFI`, which is the UEFI specification's removable-media path, so
+firmware runs it with nothing registered in NVRAM. That is checked rather than assumed — the arm
+`linux-iso-layout` boots the image twice from a variable store that is a fresh copy of the template
+both times, which is exactly a VM with no `efidisk0`.
 
 Two things are worth adding, neither of which is required for it to serve:
 
@@ -571,15 +678,35 @@ needed a CLI-only workaround. Linux has driven transitional virtio devices for f
 ```shell
 $ qemu-system-x86_64 -machine q35 -cpu qemu64 -enable-kvm \
     -smp 1 -m 512M -display none -serial stdio -no-reboot \
-    -drive file=result/kmsrsos-linux.iso,media=cdrom,readonly=on \
+    -drive file=result/kmsrsos-linux-x86_64.iso,media=cdrom,readonly=on \
     -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
     -device virtio-net-pci,netdev=u1 \
     -device virtio-rng-pci
 ```
 
+The aarch64 image, which needs firmware because there is no other way to start it:
+
+```shell
+$ cp $(nix eval --raw nixpkgs#OVMF.variables) vars.fd && chmod +w vars.fd
+$ qemu-system-aarch64 -machine virt,gic-version=3 -cpu host -enable-kvm \
+    -smp 1 -m 512M -display none -serial stdio -no-reboot \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file=$(nix eval --raw nixpkgs#OVMF.firmware) \
+    -drive if=pflash,format=raw,unit=1,file=vars.fd \
+    -device ramfb \
+    -drive file=result/kmsrsos-linux-aarch64.iso,media=cdrom,readonly=on \
+    -netdev user,id=u1,hostfwd=tcp:127.0.0.1:1688-:1688 \
+    -device virtio-net-pci,netdev=u1,bus=pcie.0 \
+    -device virtio-rng-pci
+```
+
+`-cpu host -enable-kvm` only on an aarch64 host; drop both for TCG and use `-cpu cortex-a57`.
+`vars.fd` is a scratch copy that is thrown away — nothing is written to NVRAM, which is the same
+reason a Proxmox VM needs no `efidisk0`.
+
 `kmsrs-client 127.0.0.1:1688` is the check that it answers *correctly*. The `linux-boot` check in
-`nix flake check` runs exactly this on both firmwares, on the PCI topology `qemu-server` emits, with
-no `--args` — so the two conditions that defeated the unikernel are exercised on every change.
+`nix flake check` runs exactly this on both firmwares on x86_64 — on the PCI topology `qemu-server`
+emits, with no `--args`, so the two conditions that defeated the unikernel are exercised on every
+change — and its arm twin runs the second block above.
 
 ### The console (`OS-028`, #345)
 
@@ -756,6 +883,9 @@ $ aws ec2 register-image --region eu-west-1 \
     --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=$(cat snapshot-id),VolumeSize=1,DeleteOnTermination=true}"
 ```
 
+For the arm image, `--architecture arm64`; everything else is identical, and `--boot-mode uefi` is
+not optional there because nothing else exists.
+
 `--boot-mode uefi` is the load-bearing one: firmware reads the ESP off the volume and Linux never
 touches a block layer, exactly as it does from a CD-ROM, so axiom A5 is untroubled.
 `--ena-support` matches `CONFIG_ENA_ETHERNET` in the kernel — without it a Nitro instance lands in
@@ -767,16 +897,31 @@ Read the log with `aws ec2 get-console-output`, which reads `ttyS0` and nothing 
 because pid 1 writes to every registered console (`OS-028`, #345) rather than to whichever one the
 command line ended with.
 
-**Not verified on a real instance.** Everything above is derived from observation of the artifact —
-the GPT layout, the ESP type GUID, and booting the same bytes as a raw disk under OVMF — and from
-AWS documentation for the two API calls. Nobody has launched it. Two claims in particular are
-untested and would show up immediately if wrong:
+**Verified on a real instance — on aarch64** (`OS-033`, #377). The arm image was uploaded with
+`coldsnap`, registered as an arm64 UEFI AMI and booted on a `t4g.nano`. It took a DHCP lease, stepped
+its clock off SNTP and served a real activation to a client outside the VPC:
 
-- **The backup GPT header is not at the volume's last LBA.** The upload is ~5.3 MB and the volume
-  rounds up to 1 GiB, so the backup header sits ~5.3 MB in rather than at the end of the disk.
-  Firmware generally boots from the primary header alone. *Generally* is not a test.
-- **`ena` binding on a real Nitro instance.** The driver is compiled in and has never seen the
-  hardware.
+```
+EFI stub: Decompressing Linux Kernel...
+[    0.102548] ena 0000:00:05.0: LLQ is not supported Fallback to host mode policy.
+[    0.107906] ena 0000:00:05.0 eth0: no PCI slot information
+{"level":"info","event":"console","detail":"logging to tty0 ttyS0"}
+{"level":"info","event":"listening","detail":"0.0.0.0:1688"}
+```
+
+That settles the two claims this section used to list as untested, and one it did not:
+
+- **The backup GPT header is not at the volume's last LBA**, and it does not matter. The upload is
+  4.4 MB into a volume that rounds up to 1 GiB, so the backup header sits 4.4 MB in. It booted.
+- **`ena` binds on real Nitro hardware.** The line above is the driver claiming the device.
+- **`get-console-output` works, and it reads `ttyS0`.** The tee (`OS-028`, #345) is what makes that
+  true: the command line names `ttyAMA0` first, and EC2 has no PL011, so a program that wrote only to
+  `/dev/console` might still have been readable — but a kernel that named *only* `ttyAMA0` would have
+  produced an empty console log on a machine that was working perfectly. Expect roughly five minutes
+  before the output appears; that is EC2's buffering, not the guest's.
+
+**The x86_64 image is still unverified on EC2.** Nothing above depends on the architecture except the
+`ena` binding and the console device, and both are shared — but that is an argument, not a test.
 
 ### Telling the hypervisor about itself (`OS-022`, #338)
 

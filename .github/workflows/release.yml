@@ -11,7 +11,7 @@
 #   * `.deb` and `.rpm` for both, carrying the hardened systemd unit
 #   * the container image, to GHCR, multi-arch
 #   * Windows `.exe`s, cross-compiled
-#   * the bootable Hermit OS image and ISO, x86_64 only (OS-002, #253)
+#   * the bootable bare-metal ISO, one per architecture (OS-033, #377)
 #   * an SBOM per artifact, checksums, and a cosign signature over the lot
 name: Release
 
@@ -37,8 +37,14 @@ jobs:
       matrix:
         include:
           - name: x86_64-linux
+            arch: x86_64
             runner: ubuntu-latest
+          # `PKG-019` (#378): the arm ISO is built on the leg that is already
+          # aarch64, and its checks run there too — same-architecture TCG
+          # rather than cross-TCG on an x86 runner, which is also the faster
+          # place to boot a guest.
           - name: aarch64-linux
+            arch: aarch64
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7.0.0
@@ -66,9 +72,16 @@ jobs:
           cp result-rpm/*.rpm out/
           cp result-container "out/kmsrsos-container-${{ matrix.name }}.tar.gz"
 
-          # The bare-metal ISO is x86_64 and nothing else: `pkgs.syslinux` is
-          # unavailable elsewhere, and the flake gates the output by system
-          # accordingly (`OS-017`, #333).
+          # One bare-metal ISO per architecture, each built on its own leg
+          # (`PKG-019`, #378).
+          #
+          # There is no `if` here any more, and the one that was here is worth
+          # remembering: it tested the matrix name against the x86 leg, because
+          # `pkgs.syslinux` is unavailable off x86 and the whole target was
+          # gated by system. That reasoning is now *correct and irrelevant* —
+          # the arm recipe has no BIOS path, so it never reaches syslinux
+          # (`OS-033`, #377) — and the gate that remains lives in the flake,
+          # where `linuxArches` decides which systems build a target at all.
           #
           # This block used to build `.#osImage` and `.#osIso` and ship
           # `kmsrsos-hermit.img`. `OS-018` (#334) removed that target and left
@@ -76,13 +89,11 @@ jobs:
           # attribute — and `the_release_workflow_builds_what_the_gate_checks`
           # did not catch it, because it was asserting the same stale names.
           #
-          # Shipped uncompressed. It is 8.3 MiB since `OS-029` (#347), and a
-          # `.iso.gz` is one more step between an operator and a running host —
-          # the whole deployment procedure is "upload it, attach it, boot it".
-          if [ "${{ matrix.name }}" = "x86_64-linux" ]; then
-            nix build .#linuxIso --print-build-logs --out-link result-iso
-            cp result-iso out/kmsrsos-x86_64.iso
-          fi
+          # Shipped uncompressed: 5.3 MiB on x86_64 and 4.4 MiB on aarch64, and
+          # a `.iso.gz` is one more step between an operator and a running host
+          # — the whole deployment procedure is "upload it, attach it, boot it".
+          nix build .#linuxIso --print-build-logs --out-link result-iso
+          cp result-iso "out/kmsrsos-${{ matrix.arch }}.iso"
 
       # `SEC-010` (#202): the binaries are static, so "what is in this" is a
       # question the file itself has to answer. An SBOM derived from the
@@ -107,8 +118,15 @@ jobs:
       # Two builds of one revision are the same bytes. Checked on every pull
       # request too (SEC-010, #202; CFG-008, #173), and again here because a
       # release is the artifact the claim is actually about.
+      #
+      # The ISO as well as the binary since `PKG-019` (#378). `reproducible-iso`
+      # already runs in the gate above on both legs; this makes the same claim
+      # about the file somebody downloads, on the machine that produced it.
       - name: Prove the build is reproducible
-        run: nix build .#server --rebuild --print-build-logs
+        run: |
+          set -euo pipefail
+          nix build .#server   --rebuild --print-build-logs
+          nix build .#linuxIso --rebuild --print-build-logs
 
       - name: Checksums
         run: |
