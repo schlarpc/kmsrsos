@@ -15,7 +15,10 @@ profile = "default"
 components = ["rust-src", "rust-analyzer", "llvm-tools-preview"]
 # Cross-compilation targets.
 #
-#   * `x86_64-pc-windows-msvc` — Windows, via cargo-xwin or `nix build .#windows`.
+#   * `*-pc-windows-msvc`      — Windows, via cargo-xwin or
+#     `nix build .#windows-x86_64` / `.#windows-aarch64`. Both, since
+#     `PKG-020` (#379): Snapdragon X and Windows Dev Kit machines run Windows
+#     on Arm natively, and on Apple Silicon it is the only Windows there is.
 #   * `*-unknown-linux-musl`   — the static binaries the scratch container image
 #     is built over (`PKG-004`, #241). Static rather than glibc because the
 #     claim the image makes is that it contains two files, and a dynamically
@@ -23,6 +26,7 @@ components = ["rust-src", "rust-analyzer", "llvm-tools-preview"]
 #     among other things.
 targets = [
   "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
   "x86_64-unknown-linux-musl",
   "aarch64-unknown-linux-musl",
 ]

@@ -169,7 +169,7 @@ The flake's own outputs, without configuring anything:
 | `server` | the server binary, statically linked against musl on Linux |
 | `client` | the diagnostic and detection-resistance client |
 | `container` | the container image, as a `tar.gz` ready for `docker load` |
-| `windows` | `kmsrs-server.exe` and `kmsrs-client.exe`, cross-compiled |
+| `windows-x86_64`, `windows-aarch64` | `kmsrs-server.exe` and `kmsrs-client.exe`, cross-compiled. Both are named; neither is the default (`PKG-020`, #379) |
 
 `nix flake check` runs the whole gate: build, clippy, fmt, tests, coverage with a floor under the
 sans-io crates, the data-integrity check, the feature powerset, a configured build through
@@ -243,6 +243,16 @@ vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declin
 ---
 
 ## Windows, as a service
+
+**Two binaries since `PKG-020` (#379): `kmsrs-server-windows-x86_64.exe` and
+`kmsrs-server-windows-aarch64.exe`.** Take the one that matches the machine — Snapdragon X, a Windows
+Dev Kit, or a Windows 11 on Arm VM on Apple Silicon all want the second — and rename it to
+`kmsrs-server.exe` if you are following the `sc.exe` line below literally.
+
+**The ARM64 binary has not been run on ARM64 Windows.** Everything in this section is written from
+the x86_64 build. The five process mitigations of `SEC-019` (#356) are verified in force on x86_64
+only; if the ARM64 kernel declines any of them the host reports which, by name, at start-up, rather
+than claiming a mitigation it does not have. #385 is where that gets observed.
 
 `PKG-008` (#245). The binary detects for itself whether it was started by the Service Control
 Manager — `StartServiceCtrlDispatcher` fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` when it

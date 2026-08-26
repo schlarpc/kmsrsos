@@ -15,7 +15,7 @@ was tested is a release nobody tested.
 | `kmsrsos_X.Y.Z_{amd64,arm64}.deb` | with the hardened systemd unit (`PKG-007`, #244) |
 | `kmsrsos-X.Y.Z-1.{x86_64,aarch64}.rpm` | the same payload |
 | `ghcr.io/schlarpc/kmsrsos:X.Y.Z` | multi-arch; two static binaries and nothing else |
-| `kmsrs-server.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+| `kmsrs-{server,client}-windows-{x86_64,aarch64}.exe` | cross-compiled against a pinned MSVC CRT and SDK (`PKG-020`, #379) |
 | `kmsrsos-{x86_64,aarch64}.iso` | the bootable bare-metal image (`OS-017`, #333; `PKG-019`, #378); uncompressed, **and the two are not the same image** — see below |
 | `sbom-*.cdx.json` | CycloneDX, derived from the lockfile |
 | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksum file |
@@ -29,6 +29,16 @@ ISO9660 tree that the bootloader existed to read. `docs/decisions.md` has the nu
 
 Both are built on their own architecture's runner, and both get the same SBOM, checksum, signature
 and `--rebuild` treatment. There is no cross-compiled image and no release-only build path.
+
+**Neither Windows binary is named `kmsrs-server.exe`**, and that is deliberate (`PKG-020`, #379).
+There are two of them now, and the one that used to carry the bare name was the x86_64 build — a
+release artifact named after a default is one nobody can tell apart from the other. Rename on
+install if the service registration in [`deployment.md`](deployment.md) is being followed literally.
+
+**The ARM64 binary has never been run on ARM64 Windows.** Its build-time checks pass — the PE machine
+type is read off the artifact and Control Flow Guard is asserted absent — and no process has started.
+`SEC-019`'s five mitigations are verified in force on x86_64 only; if the ARM64 kernel declines any,
+the host says so on its console rather than claiming it. See #385.
 
 There is no apt or yum repository and no Homebrew tap (decision 26): a repository is ongoing
 infrastructure with signing keys that have to be rotated, a downloadable package captures most of the

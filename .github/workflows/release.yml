@@ -10,7 +10,7 @@
 #   * Linux binaries for x86_64 and aarch64, statically linked against musl
 #   * `.deb` and `.rpm` for both, carrying the hardened systemd unit
 #   * the container image, to GHCR, multi-arch
-#   * Windows `.exe`s, cross-compiled
+#   * Windows `.exe`s for x86_64 and ARM64, cross-compiled (PKG-020, #379)
 #   * the bootable bare-metal ISO, one per architecture (OS-033, #377)
 #   * an SBOM per artifact, checksums, and a cosign signature over the lot
 name: Release
@@ -139,12 +139,20 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  # One job per Windows architecture (`PKG-020`, #379). Both cross-compile from
+  # the same Linux runner, so this is a matrix over a build *target* rather than
+  # over a machine — unlike the Linux legs above, where each image is built on
+  # its own hardware.
   windows:
-    name: windows-x86_64
+    name: windows-${{ matrix.arch }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: DeterminateSystems/nix-installer-action@v22
@@ -153,17 +161,28 @@ jobs:
       # Cross-compiled from Linux, against a pinned MSVC CRT and SDK in a
       # fixed-output derivation. That is why there is no Windows runner here:
       # the artifact is a pure function of the flake inputs, and building it on
-      # Windows would make it a function of the runner image as well.
-      - run: nix build .#windows --print-build-logs --out-link result-windows
+      # Windows would make it a function of the runner image as well. The same
+      # holds for ARM64, and there is no ARM64 Windows runner to use anyway.
+      - run: |
+          nix build .#windows-${{ matrix.arch }} \
+            --print-build-logs --out-link result-windows
+
+      # Named by architecture, both of them (`PKG-020`, #379). `.#windows` used
+      # to mean the x86_64 build and the artifact was a bare `kmsrs-server.exe`;
+      # with two of them a name that does not say which is a name nobody can
+      # act on.
       - run: |
           set -euo pipefail
           mkdir -p out
-          cp result-windows/bin/*.exe out/
-          cd out && sha256sum * > SHA256SUMS-windows-x86_64
+          cp result-windows/bin/kmsrs-server.exe \
+             "out/kmsrs-server-windows-${{ matrix.arch }}.exe"
+          cp result-windows/bin/kmsrs-client.exe \
+             "out/kmsrs-client-windows-${{ matrix.arch }}.exe"
+          cd out && sha256sum * > "SHA256SUMS-windows-${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: artifacts-windows-x86_64
+          name: artifacts-windows-${{ matrix.arch }}
           path: out/
           if-no-files-found: error
 

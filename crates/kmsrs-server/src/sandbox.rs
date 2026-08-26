@@ -353,6 +353,35 @@ mod platform {
     //! manifest downgrades `unsafe_code` from `forbid` to `deny` so that call
     //! must name itself, and `unsafe_is_confined_to_the_one_boundary` fails if
     //! it ever appears anywhere else.
+    //!
+    //! # On which Windows this has been observed (`PKG-020`, #379)
+    //!
+    //! **Windows 11 26200 on x86_64, and nowhere else.** There is an ARM64
+    //! build since `PKG-020`, and nobody has run it on an ARM64 Windows
+    //! machine: none of GitHub's hosted runners is one, EC2 offers no Windows
+    //! on Graviton, and emulating ARM64 Windows to test a *process mitigation*
+    //! would answer a question about the emulator.
+    //!
+    //! Two things are true and neither is the same as having tested it. The
+    //! API is architecture-independent — every structure here is a flag word
+    //! rather than anything with a register layout, and
+    //! [`the_policy_structures_are_still_flag_words`](tests::the_policy_structures_are_still_flag_words)
+    //! asserts that on whichever target it compiles for. And a refusal is
+    //! already handled: [`refused`] attributes it to a policy by name, and
+    //! [`apply`] reports `Failed` rather than aborting, precisely because
+    //! "this kernel declined a mitigation" is a thing that happens on older
+    //! builds and is not a reason to stop serving.
+    //!
+    //! What is *not* established is whether the ARM64 kernel accepts the same
+    //! five. `ProcessSystemCallDisablePolicy` is the interesting one: it
+    //! removes the `win32k.sys` surface, and `win32k` on ARM64 is a different
+    //! build of a driver with its own history of what is and is not
+    //! filterable. If it is refused, this program says so on the console at
+    //! start-up rather than claiming a mitigation it does not have — which is
+    //! the property that makes shipping the untested binary defensible.
+    //!
+    //! Running it is `PKG-022` (#385). `harness/windows/` is the shape that
+    //! would do it and it has no ARM64 image to drive.
 
     use super::{Applied, Report};
     use windows_sys::Win32::System::Threading::{

@@ -17,7 +17,7 @@ comments**, because it survives even if an issue is closed and superseded.
 
 Two documents hold what a tracker holds badly:
 
-- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 46
+- **[`docs/decisions.md`](docs/decisions.md)** — the axioms that constrain every item, the 47
   decisions taken and why, and 44 things deliberately *not* built. Declined items have no issue by
   definition, so this is the only record that they were considered. **Read this before proposing
   anything that looks obviously missing.**
@@ -120,7 +120,8 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 ### Nix
 
 - `nix build` — build the package
-- `nix build .#windows` — cross-compile for Windows (x86_64-pc-windows-msvc)
+- `nix build .#windows-x86_64` / `.#windows-aarch64` — cross-compile for Windows. Both are
+  named; neither is the default (`PKG-020`, #379)
 - `nix build .#linuxIso` — the bare-metal ISO; `.#linux-kernel` for the bzImage alone
 - `nix build .#linux-config && cp result os/linux/kernel.config` — regenerate the kernel allowlist.
   Through the flake, never `nix build -f os/linux/config.nix`: that reads `<nixpkgs>` from the
@@ -131,9 +132,11 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 
 ### Windows cross-compilation
 
-- `cargo xwin build --release --target x86_64-pc-windows-msvc` — cross-compile from the dev shell
-- The pure Nix build gets the MSVC CRT/SDK from a pinned `xwin` fixed-output derivation in
-  `flake.nix`; to bump the pinned versions, update them there, set `outputHash = pkgs.lib.fakeHash`,
+- `cargo xwin build --release --target x86_64-pc-windows-msvc` — cross-compile from the dev shell;
+  `aarch64-pc-windows-msvc` for Windows on Arm. `rust-toolchain.toml` carries both targets
+- The pure Nix build gets the MSVC CRT/SDK from **one** pinned `xwin` fixed-output derivation in
+  `flake.nix`, carrying both architectures — two would be two hashes to update and one chance to
+  forget. To bump the pinned versions, update them there, set `outputHash = pkgs.lib.fakeHash`,
   build, and copy the real hash from the mismatch error.
 
 ---
