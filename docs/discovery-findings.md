@@ -43,6 +43,7 @@ WMI, so every observation below is SPP's behaviour, not slmgr's.
 | `G-skms-wins` | `suffix.example` | — | — | `10.0.2.2:1688` | **nothing** — connected directly |
 | `H-dhcp15-local` | — | `local` | — | — | `_VLMCS._TCP.local`, **unicast DNS only** |
 | `I-skms-dotlocal` | — | — | — | `kmsrsos.local:1688` | `kmsrsos.local` A/AAAA on unicast **and** mDNS |
+| `W-why-mdns` | — | — | — | — | `Resolve-DnsName` control: A/AAAA reach mDNS, SRV and PTR do not |
 
 ### DHCP option 15 is sufficient on its own
 
@@ -112,7 +113,31 @@ each.
 So the Windows DNS Client's `.local` handling is live and working; SPP's SRV
 lookup simply does not go through the path that would use it.
 
-**Recommendation for #145: no-go on SRV-over-mDNS.** The de-risking fallback
+### Why — and it is not SPP's doing
+
+`W-why-mdns` asks the same questions through `Resolve-DnsName`, which is the
+plain DNS Client with no licensing involved:
+
+| name | type | channels used |
+|---|---|---|
+| `probe-a.local` | A | unicast **+ mDNS** |
+| `probe-aaaa.local` | AAAA | unicast **+ mDNS** |
+| `_probe-srv._tcp.local` | SRV | unicast only |
+| `_probe-ptr._tcp.local` | PTR | unicast only |
+
+The Windows DNS Client's mDNS support is an **address-record resolver**. A and
+AAAA go to multicast; SRV and PTR never enter that path at all. DNS-SD on
+Windows lives in a separate stack — the WinRT
+`Windows.Networking.ServiceDiscovery.Dnssd` APIs — which SPP does not use.
+
+So SPP is not declining to use mDNS. It calls the ordinary resolver, and the
+ordinary resolver will not put a SRV question on multicast. That is worth
+stating precisely because it changes the strength of the conclusion: this is not
+"SPP happens not to", which a future Windows version might change, but "the
+resolver SPP uses has no code path for it".
+
+**Recommendation for #145: no-go on SRV-over-mDNS**, and the reason is
+structural rather than incidental. The de-risking fallback
 that issue describes survives intact and is now measured rather than assumed —
 `slmgr /skms kmsrsos.local` will resolve by mDNS, which delivers a name that
 survives DHCP address changes with no DNS server and no hosts file.
