@@ -28,6 +28,7 @@ pub mod clock;
 pub mod config;
 pub mod entropy;
 pub mod entry;
+pub mod eventlog;
 pub mod facts;
 pub mod host;
 pub mod log;

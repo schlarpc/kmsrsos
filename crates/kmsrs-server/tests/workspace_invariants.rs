@@ -490,30 +490,46 @@ fn no_shipped_crate_contains_unsafe() {
         }
     }
 
-    // The one boundary, named exactly. `SEC-019` (#356).
-    let boundary = Path::new("crates")
-        .join("kmsrs-server")
-        .join("src")
-        .join("sandbox.rs");
-    let (inside, outside): (Vec<_>, Vec<_>) = found
-        .iter()
-        .partition(|hit| hit.contains(&boundary.display().to_string()));
+    // The boundaries, named exactly, with how many calls each is allowed.
+    // Naming them is the point: "nowhere except here" is a rule a reader can
+    // check, where "not too much" is not.
+    let boundaries: [(&str, usize); 2] = [
+        // `SEC-019` (#356): SetProcessMitigationPolicy.
+        ("sandbox.rs", 1),
+        // `OBS-016` (#192): RegisterEventSourceW, ReportEventW,
+        // DeregisterEventSource.
+        ("eventlog.rs", 3),
+    ];
+
+    let source_dir = Path::new("crates").join("kmsrs-server").join("src");
+    let mut outside = Vec::new();
+    let mut counts = BTreeMap::new();
+    for hit in &found {
+        match boundaries
+            .iter()
+            .find(|(file, _)| hit.contains(&source_dir.join(file).display().to_string()))
+        {
+            Some((file, _)) => *counts.entry(*file).or_insert(0_usize) += 1,
+            None => outside.push(hit),
+        }
+    }
 
     assert!(
         outside.is_empty(),
-        "`unsafe` appears outside the one documented boundary in \
-         {} (SEC-001, #193; OS-013, #264; SEC-019, #356). Widening it is a \
+        "`unsafe` appears outside the documented boundaries (SEC-001, #193; \
+         OS-013, #264; SEC-019, #356; OBS-016, #192). Opening a third is a \
          decision for a review and this test is what should be updated in the \
-         same commit: {outside:#?}",
-        boundary.display()
+         same commit: {outside:#?}"
     );
-    assert_eq!(
-        inside.len(),
-        1,
-        "the boundary is one call to SetProcessMitigationPolicy and nothing \
-         else (SEC-019, #356). If it has grown, say why in review rather than \
-         letting the count drift: {inside:#?}"
-    );
+    for (file, allowed) in boundaries {
+        assert_eq!(
+            counts.get(file).copied().unwrap_or_default(),
+            allowed,
+            "{file} should hold exactly {allowed} `unsafe` call(s). A boundary \
+             that grows quietly is one nobody re-reviews; if this is \
+             deliberate, change the number here in the same commit."
+        );
+    }
 }
 
 /// `SEC-019` (#356): `kmsrs-server`'s lint tables match the workspace's.
@@ -1046,4 +1062,65 @@ fn rust_sources_with_paths(dir: &Path) -> Vec<(PathBuf, String)> {
         }
     }
     out
+}
+
+/// `OBS-016` (#192): the message table and the event identifiers agree.
+///
+/// An event carries an identifier, and the viewer resolves it through the
+/// message table linked into this binary. If the two drift, every affected
+/// event renders as *"The description for Event ID N cannot be found"* — which
+/// looks broken to an operator, is worse than logging nothing, and is invisible
+/// to every test that does not read both sides.
+///
+/// Read as text out of `build.rs` and `src/eventlog.rs`, because the table is a
+/// build-time artifact for a target this test does not run on.
+#[test]
+fn the_message_table_matches_the_events() {
+    let root = workspace_root();
+    let server = root.join("crates").join("kmsrs-server");
+
+    let build = std::fs::read_to_string(server.join("build.rs")).expect("build.rs is readable");
+    let events =
+        std::fs::read_to_string(server.join("src").join("eventlog.rs")).expect("eventlog.rs");
+
+    // The message table's identifiers are positions, so counting the string
+    // literals in `MESSAGES` is counting the identifiers.
+    let table = build
+        .split_once("const MESSAGES: &[&str] = &[")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(body, _)| body.matches("\"kmsrsos").count())
+        .unwrap_or_default();
+
+    // `Started = 1,` — the identifiers the code reports.
+    let mut declared: Vec<u32> = Vec::new();
+    for line in events.lines() {
+        let trimmed = line.trim().trim_end_matches(',');
+        if let Some((name, value)) = trimmed.split_once(" = ")
+            && name.chars().next().is_some_and(char::is_uppercase)
+            && let Ok(id) = value.trim().parse::<u32>()
+        {
+            declared.push(id);
+        }
+    }
+
+    assert!(
+        table > 0 && !declared.is_empty(),
+        "one side parsed as empty, so this test is not reading what it thinks \
+         it is: table={table} declared={declared:?}"
+    );
+    assert_eq!(
+        declared,
+        (1..=u32::try_from(table).expect("six fits")).collect::<Vec<_>>(),
+        "the message table in build.rs and the Event identifiers in \
+         eventlog.rs have drifted (OBS-016, #192). Identifiers are positions \
+         in MESSAGES, so Event must be 1..={table} in order. Any event whose \
+         id is outside the table renders as \"The description for Event ID N \
+         cannot be found\"."
+    );
+    assert_eq!(
+        declared.len(),
+        6,
+        "OBS-016 says six lifecycle events and no more; the request stream \
+         stays on stderr and the web UI: {declared:?}"
+    );
 }

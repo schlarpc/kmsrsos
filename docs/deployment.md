@@ -276,6 +276,39 @@ Start-up failures are the sharper edge, because a bind failure or a failed entro
 the web listener never comes up either — there is nothing to browse to and nothing on stderr.
 `OBS-016` (#192) is the six-event Windows Event Log that exists for exactly that window.
 
+### Registering the Event Log source
+
+`OBS-016` (#192). Do this next to the `sc.exe create` above, and for the same reason there is no
+installer — it is one line, and a line you can read:
+
+```
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\kmsrsos" /v EventMessageFile /t REG_SZ /d "C:\Program Files\kmsrsos\kmsrs-server.exe" /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\kmsrsos" /v TypesSupported /t REG_DWORD /d 7 /f
+```
+
+The binary is its own message file, which is what the first line says. Skip it and the events still
+arrive, but Event Viewer renders every one of them as *"The description for Event ID 1 cannot be
+found"* — which looks like a broken program rather than a missing registry value.
+
+**Six events, and the request stream is not among them:**
+
+| Id | Level | When |
+|---:|---|---|
+| 1 | Information | Listeners bound and serving |
+| 2 | Information | Drain finished, stopping cleanly |
+| 3 | Error | Nothing could be bound |
+| 4 | Error | The entropy self-test failed |
+| 5 | Error | `KMSRSOS_CONFIG` could not be parsed |
+| 6 | Error | The process panicked |
+
+Every one carries the underlying error as its message. Activations are **not** logged here and will
+not be: the Event Log is shared, size-limited and administrator-visible, and a KMS host filling it
+with one record per request would be a denial of service against everything else that logs there.
+The request stream stays on stderr and the web UI.
+
+Events 3, 4 and 5 are the ones this exists for — each happens before any listener is up, so the web
+UI cannot report them and, under the SCM, neither can stderr.
+
 ### What the service does and does not accept
 
 | Control | Behaviour |

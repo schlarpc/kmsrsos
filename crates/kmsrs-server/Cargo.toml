@@ -57,7 +57,11 @@ socket2.workspace = true
 # lives. This is the crate that makes the one unsafe boundary necessary; see
 # the `[lints.rust]` note below.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
+windows-sys = { workspace = true, features = [
+  "Win32_System_Threading",
+  # `OBS-016` (#192): RegisterEventSourceW / ReportEventW / DeregisterEventSource.
+  "Win32_System_EventLog",
+] }
 windows-service.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -134,6 +134,8 @@ fn serve_inner<F>(housekeeping: F, sandboxed: bool) -> ExitCode
 where
     F: FnOnce(Housekeeping) + Send + 'static,
 {
+    record_panics();
+
     // `CFG-007` (#172): this binary takes no arguments. Silently ignoring them
     // is worse than refusing — an operator who typed something expects it to
     // have had an effect. vlmcsd documents `-h` and `-?` that are not in its
@@ -160,6 +162,10 @@ where
         Ok(operational) => operational,
         Err(error) => {
             eprintln!("{PRODUCT_NAME}: {error}");
+            // `OBS-016` (#192): under the SCM that `eprintln!` goes nowhere,
+            // and this failure happens before any listener exists, so the web
+            // UI cannot report it either.
+            crate::eventlog::report(crate::eventlog::Event::ConfigInvalid, &error.to_string());
             return ExitCode::from(EXIT_BAD_CONFIG);
         }
     };
@@ -216,6 +222,9 @@ where
 
     let (bound, failures) = bind_all().map_err(|error| {
         logger.message(Severity::Error, "bind", &error.to_string());
+        // `OBS-016` (#192): nothing bound means the web UI never comes up, so
+        // this is the only channel that can say why.
+        crate::eventlog::report(crate::eventlog::Event::BindFailed, &error.to_string());
         EXIT_UNAVAILABLE
     })?;
 
@@ -280,6 +289,9 @@ where
     // every client with the same "random" values is worse than one that does
     // not answer, because nobody finds out.
     if let Err(failure) = OsEntropy.self_test() {
+        // `OBS-016` (#192): same window as the bind failure — this returns
+        // before anything is listening.
+        crate::eventlog::report(crate::eventlog::Event::EntropyFailed, &failure.to_string());
         logger.message(
             Severity::Error,
             "entropy",
@@ -289,6 +301,9 @@ where
         );
         return Err(EXIT_UNAVAILABLE);
     }
+
+    // Counted before the driver takes ownership, for the `Started` event.
+    let bound_count = listeners.len();
 
     let runtime = build_runtime().map_err(|error| {
         logger.message(Severity::Error, "startup", &error.to_string());
@@ -323,6 +338,15 @@ where
             report_sandbox(logger, crate::sandbox::apply());
         }
 
+        // `OBS-016` (#192): the listeners are bound and the sandbox is applied,
+        // which is the same instant `PKG-008` (#245) reports `RUNNING` to the
+        // SCM. Recorded before `housekeeping`, so the two cannot disagree
+        // about when this host started serving.
+        crate::eventlog::report(
+            crate::eventlog::Event::Started,
+            &format!("{bound_count} listener(s) bound."),
+        );
+
         // Inside `block_on` and before `run`, so anything it spawns is on this
         // runtime and starts before the first connection (`OS-019`, #335).
         housekeeping(Housekeeping {
@@ -337,6 +361,7 @@ where
     });
     outcome?;
 
+    crate::eventlog::report(crate::eventlog::Event::Stopped, "The drain completed.");
     logger.message(Severity::Info, "stopped", PRODUCT_NAME);
     Ok(())
 }
@@ -407,6 +432,30 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
             &format!("no handler installed: {error}"),
         ),
     }
+}
+
+/// Report a panic to the Windows Event Log as well as to stderr
+/// (`OBS-016`, #192).
+///
+/// Chained onto the default hook rather than replacing it: stderr is still the
+/// right place when there is one, and the panic message with its location is
+/// what a maintainer needs. This adds the case where there is no stderr at all
+/// because the process is a service, which is exactly when a panic would
+/// otherwise vanish without trace.
+///
+/// The release profile sets `panic = "abort"`, so the hook runs and then the
+/// process aborts; there is no unwinding and no second chance to report.
+fn record_panics() {
+    // Installed once. A second call would chain the hook onto itself and report
+    // every panic twice.
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            crate::eventlog::report(crate::eventlog::Event::Panicked, &info.to_string());
+            previous(info);
+        }));
+    });
 }
 
 /// Say what the sandbox did, once, at start-up (`SEC-005`, #197).
