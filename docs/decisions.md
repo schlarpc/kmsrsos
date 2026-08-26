@@ -77,6 +77,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
 | 43 | `TCP_NODELAY` | Left at the OS default, having been **measured** rather than assumed: Nagle cannot engage in this protocol, so the option is unobservable, [see below](#tcp_nodelay-is-unobservable-so-it-is-not-set-net-015-164) (#164) |
 | 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
+| 45 | The arm image has no bootloader | `OS-030`'s GRUB solves two firmwares sharing one kernel; aarch64 has one firmware, so the kernel goes in the ESP and nothing loads it, [see below](#the-arm-image-has-no-bootloader-os-033-377) (#377) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -262,6 +263,71 @@ That is the whole procedure", and CD-ROM-from-SeaBIOS is the *default* path on t
 Twelve per cent is not worth the supported platform's default path, and the size argument is weak
 anyway: de-duplicating the kernel is worth 3.00 MiB and both options get that; the choice between them
 is worth 0.64 MiB.
+
+### The arm image has no bootloader (`OS-033`, #377)
+
+**Two images, and the arm one is strictly simpler.** Not a stripped-down variant of the x86 one: a
+different recipe, arrived at by asking the same question and getting a different answer.
+
+#### The question `OS-030` answered, and why aarch64 does not have to
+
+The GRUB in the x86 ESP exists for exactly one reason: **isolinux reads ISO9660 and UEFI reads FAT**.
+Without something in the ESP that can read ISO9660, each firmware needs the kernel in its own
+filesystem, and the kernel exists twice. That was a close decision — GRUB was declined once, in
+`OS-023` (#339), on arithmetic that turned out to be wrong — and the whole of it is an argument about
+*two firmwares sharing one kernel*.
+
+**Arm64 guests have no BIOS.** Proxmox VE for arm64 boots every VM through AAVMF and SeaBIOS is not
+available for them; no other Arm hypervisor has a legacy firmware either. One reader, no sharing
+problem, nothing for a bootloader to solve. So the kernel goes in the ESP as
+`\EFI\BOOT\BOOTAA64.EFI` and firmware runs it through `CONFIG_EFI_STUB` — which is what the x86
+image did before `OS-030`, and which that issue called "the cleanest thing this image ever did".
+
+| | BIOS | UEFI |
+|---|---|---|
+| **CD-ROM** | *no such firmware* | EFI stub, El Torito pointed at the appended ESP |
+| **raw disk** | *no such firmware* | EFI stub, from the GPT EFI System Partition |
+
+What that deletes from the arm path: isolinux, `ldlinux.c32`, `isolinux.cfg`, `isohdpfx.bin`,
+`-isohybrid-mbr`, `-isohybrid-gpt-basdat`, `grub-mkimage`, the six-module list and the embedded
+`grub.cfg`. `linux-iso-layout` asserts the absence of the first two and of any MBR boot code **in the
+bytes**, because "this image is simpler" is the kind of claim that rots quietly.
+
+#### The cost, measured
+
+The ESP has to hold a kernel again, so it grows. The numbers, which are the whole trade:
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| in the ESP | `grubx64.efi`, ~278 KiB | the kernel, 3 760 640 B |
+| ESP size | 2 MiB | **4 MiB** |
+| kernel copies in the image | 1, in ISO9660 | 1, in the ESP |
+| whole image | 5 582 848 B | **4 603 904 B** |
+
+So the arm image pays **2 MiB more of ESP, and is 0.93 MiB smaller overall** — because what it saves
+is not only the bootloader but the ISO9660 tree the bootloader existed to read. The ISO9660
+filesystem in the arm image is empty.
+
+**`CONFIG_EFI_ZBOOT` is what makes that arithmetic work** (`OS-032`, #376). arm64's `Image` is
+uncompressed — 7 660 032 bytes — and would have needed an **8 MiB** ESP, which is exactly where
+`mkfs.vfat` stops choosing FAT12 and the removable-media guarantee the UEFI specification gives stops
+applying. The compressed `vmlinuz.efi` is 3 760 640 bytes and keeps the ESP at 4 MiB and the
+filesystem at FAT12.
+
+#### Observed, including on hardware
+
+`nix flake check` on `aarch64-linux` boots the image as a **CD-ROM** and as a **raw disk** under
+AAVMF, both asserted by reaching `"event":"listening"` rather than by the guest starting — firmware
+that finds no boot option also starts, and sits at a shell. Both boots use a variable store that is a
+fresh copy of the template, which is the same thing as a Proxmox VM with no `efidisk0`: `\EFI\BOOT`
+is the removable-media path and needs no NVRAM entry.
+
+And once outside QEMU. The same image was uploaded with `coldsnap`, registered as an arm64 UEFI AMI
+and booted on a `t4g.nano`, where it took a DHCP lease, stepped its clock off SNTP and served a real
+activation. Its console shows `EFI stub: Decompressing Linux Kernel...`, `ena … eth0` and
+`{"event":"console","detail":"logging to tty0 ttyS0"}` — the last of which is the `OS-032` (#376)
+finding in its consequence: **EC2's aarch64 instances have a 16550A and no PL011**, so an arm kernel
+that named only `ttyAMA0` would boot correctly there and say nothing at all.
 
 ### SNTP, not NTP, and the host serves without it (`OS-020`, #336)
 
@@ -914,3 +980,15 @@ What survives is the *hostname* half, which does work: `slmgr /skms kmsrsos.loca
 giving a name that survives DHCP address changes with no DNS server and no hosts file. Shipping a
 hostname-only mDNS responder for that is a different proposition from this one and is not declined
 here — it simply has no issue yet.
+
+<a id="d44"></a>**D44 — A single dual-architecture ISO (`OS-033`, #377).** Technically routine: the
+ESP gains a second file and the tree gains a second kernel, which is how Debian ships installer
+media. Declined on what it costs everybody else.
+
+It **doubles the download for every operator** — 4.4 MiB of aarch64 that an x86 user will never
+execute, and 5.3 MiB the other way — and it means shipping x86 BIOS boot code and an isohybrid MBR on
+media whose arm audience has no firmware that can run them. The arm image's claim is that it is
+*strictly simpler* than the x86 one, and merging them gives that up in exchange for one filename.
+
+Two images, named by architecture. If this is ever revisited it should be as its own issue with the
+sizes measured, and this paragraph is the reason it was not done in #377.

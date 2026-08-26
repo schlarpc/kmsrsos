@@ -976,12 +976,11 @@
       #     `pci-bridge` for a q35 machine so that a transitional virtio device
       #     lands on a legacy bus — `OS-004` (#255), the thing Hermit refuses.
       #     `virt` has a single PCIe root, and the NIC goes on it.
-      #   * **No `-drive … media=cdrom`.** There is no arm image yet: `OS-033`
-      #     (#377) builds it. The kernel is handed to AAVMF with `-kernel`,
-      #     which EDK2's `QemuKernelLoaderFsDxe` presents as a boot option — so
-      #     this still boots through real UEFI and through the EFI stub, which
-      #     is the part that has to work before an image can be wrapped round
-      #     it.
+      #   * **No bootloader in the medium.** Since `OS-033` (#377) the arm
+      #     image holds the kernel in its ESP as `\EFI\BOOT\BOOTAA64.EFI`
+      #     and firmware runs it through the EFI stub. So what this attaches is
+      #     the shipped ISO, exactly as the x86 twin does, and what is being
+      #     exercised is the whole path an operator's VM takes.
       #
       # `gic-version=3` is stated rather than left to `max`. The kernel has both
       # GICv2 and GICv3 — `ARM_GIC` arrives with the architecture — so a machine
@@ -1031,7 +1030,7 @@
             -drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware} \
             -drive if=pflash,format=raw,unit=1,file=$PWD/vars.fd \
             -device ramfb \
-            -kernel ${linux.kernel}/${arch.image} \
+            -drive file=${linux.iso},media=cdrom,readonly=on \
             -device virtio-serial-pci \
             -chardev "socket,path=$agent,server=on,wait=off,id=ga" \
             -device virtserialport,chardev=ga,name=org.qemu.guest_agent.0 \
@@ -1582,6 +1581,163 @@
           disk uefi
         '';
 
+      # `OS-033` (#377): the same count and the same two disk paths, on the
+      # image that has no bootloader in it.
+      #
+      # A twin rather than a parameter for the reason the boot check is one:
+      # what varies is not a firmware but everything a firmware implies. The x86
+      # twin boots each disk on SeaBIOS *and* OVMF; here there is only AAVMF,
+      # so the loop that halves is the interesting difference rather than a
+      # detail to abstract over.
+      #
+      # The count is the point that carries across. It has gone 3 -> 2 -> 1 on
+      # x86 across three issues, and the arm image is 1 from the start — but at
+      # a *different offset*, because the one copy lives in the appended ESP
+      # rather than in ISO9660. A regression to 2 would mean the ISO9660 tree
+      # has grown a copy back, which is precisely the `OS-029` (#347) bug; 0
+      # means the ESP lost its kernel and the image boots nothing.
+      #
+      # Three absences are asserted as well, and they are the whole of
+      # `OS-033`'s claim that this image is *simpler* rather than differently
+      # arranged. Asserted in the bytes rather than read off the recipe, for the
+      # reason the count is: the comment in `default.nix` said "twice" for the
+      # whole time it was three.
+      armIsoLayoutCheckFor = { system, arch }:
+        let
+          pkgs = pkgsFor system;
+          linux = linuxFor { inherit system arch; };
+        in
+        pkgs.runCommand "linux-iso-layout"
+          {
+            nativeBuildInputs = [ pkgs.python3 pkgs.qemu_kvm ];
+            meta.timeout = 1800;
+          } ''
+          mkdir -p $out
+          python3 - <<'PYTHON' | tee $out/report
+          import pathlib
+          iso = pathlib.Path("${linux.iso}").read_bytes()
+          kernel = pathlib.Path("${linux.kernel}/${arch.image}").read_bytes()
+
+          # A run from the middle of the kernel, long enough not to collide by
+          # accident and far enough in to miss the PE headers, which also
+          # appear in the El Torito boot catalogue's neighbourhood.
+          needle = kernel[1_000_000:1_000_256]
+          at, hits = 0, []
+          while (i := iso.find(needle, at)) != -1:
+              hits.append(i)
+              at = i + 1
+
+          print(f"ISO          {len(iso)} bytes")
+          print(f"${arch.image}  {len(kernel)} bytes")
+          print(f"copies       {len(hits)} at {[hex(h) for h in hits]}")
+
+          assert len(hits) == 1, (
+              f"the kernel appears {len(hits)} times in the arm image and should "
+              "appear once, in the appended ESP, read there by firmware through "
+              "the EFI stub (OS-033, #377). More than one means the ISO9660 tree "
+              "has grown a copy back — which is the OS-029 (#347) bug — and zero "
+              "means the ESP has lost its kernel and the image boots nothing"
+          )
+
+          # `OS-033` (#377): what this image does *not* contain. Each of these
+          # is a thing the x86 image needs and this one has no firmware for.
+          for marker, why in [
+              (b"isolinux", "isolinux, which only a BIOS could run"),
+              (b"ISOLINUX", "the same, as the loader stamps its own name"),
+              (b"GRUB", "a bootloader; there is no second reader to share with"),
+          ]:
+              assert marker not in iso, (
+                  f"the arm image contains {marker!r}: {why}. OS-033 (#377) is "
+                  "the claim that this image is strictly simpler than the x86 "
+                  "one, and that claim is asserted here rather than assumed"
+              )
+
+          # And no MBR boot code. `-isohybrid-mbr` splices x86 instructions into
+          # the first 446 bytes; a protective MBR from `-appended_part_as_gpt`
+          # leaves them zero. Anything else here is code no firmware on this
+          # architecture can execute.
+          assert iso[:446] == b"\0" * 446, (
+              "the arm image has boot code in its MBR bootstrap area. Nothing "
+              "on this architecture can execute it, and OS-033 (#377) removed "
+              "the isohybrid MBR that puts it there"
+          )
+          # The GPT must still be there: it is what `OS-027` (#344)'s raw-disk
+          # path is read through, and it is the half of the x86 recipe this
+          # image keeps.
+          assert iso[512:520] == b"EFI PART", (
+              "the arm image has no GPT, so a hypervisor importing it as a disk "
+              "finds no EFI System Partition (OS-027, #344)"
+          )
+          PYTHON
+
+          # Booted as a **raw disk**, which is the path `OS-027` (#344) exists
+          # for, and as a CD-ROM, which is what an operator attaches. The store
+          # path is mode 444 and a writable `if=virtio` drive cannot open it,
+          # hence the copy — a lesson from `OS-029` (#347), where a hand-run
+          # qemu failing for that reason looked like a broken disk path for half
+          # an hour.
+          cp ${linux.iso} disk.img
+          chmod +w disk.img
+
+          boots() {
+            local how="$1"
+            local log="$PWD/$how.log"
+            local media=""
+
+            case "$how" in
+              cdrom) media="-drive file=${linux.iso},media=cdrom,readonly=on" ;;
+              disk)  media="-drive file=disk.img,format=raw,if=virtio" ;;
+            esac
+
+            cp ${pkgs.OVMF.variables} "$PWD/$how-vars.fd"
+            chmod +w "$PWD/$how-vars.fd"
+
+            ${arch.qemu} \
+              -machine virt,gic-version=3 -cpu cortex-a57 \
+              -smp 1 -m 512M -display none -no-reboot \
+              -serial "file:$log" \
+              -drive if=pflash,format=raw,unit=0,readonly=on,file=${pkgs.OVMF.firmware} \
+              -drive if=pflash,format=raw,unit=1,file=$PWD/$how-vars.fd \
+              $media \
+              -nic none &
+            local qemu=$!
+
+            local attempt
+            for attempt in $(seq 1 300); do
+              grep -q '"event":"listening"' "$log" 2>/dev/null && break
+              kill -0 $qemu 2>/dev/null || break
+              sleep 1
+            done
+            kill $qemu 2>/dev/null || true
+            wait $qemu 2>/dev/null || true
+            cp "$log" $out/$how.log 2>/dev/null || true
+
+            grep -q '"event":"listening"' $out/$how.log || {
+              echo "the arm image does not boot as a $how under AAVMF. There is \
+          no bootloader in it: firmware loads \\EFI\\BOOT\\${arch.efiFile} from \
+          the ESP and runs the kernel through the EFI stub, so a failure here is \
+          the ESP, El Torito or the GPT rather than a configuration file \
+          (OS-033, #377)" >&2
+              cat $out/$how.log >&2 || true
+              exit 1
+            }
+            echo "boots as a $how under AAVMF"
+          }
+
+          # Both are asserted by reaching `listening`, not by the guest merely
+          # starting: firmware that fails to find a boot option also "starts",
+          # and sits at a shell.
+          boots cdrom
+          boots disk
+
+          # `\EFI\BOOT\<file>` is the removable-media path, so no NVRAM entry is
+          # written and none is needed. The variable store above is a fresh copy
+          # of the template on every run and is thrown away, which is the same
+          # thing as a Proxmox VM with no `efidisk0` — the question
+          # `docs/deployment.md` cannot answer for arm until it is observed.
+          echo "booted twice from a variable store that was new both times"
+        '';
+
       # `PKG-018`: Control Flow Guard is **absent** from the shipped Windows
       # binaries, and that is asserted rather than merely true.
       #
@@ -1945,18 +2101,9 @@
             arch = linuxArch;
             variants = linuxDeltaVariants.${linuxArch.name};
           };
-        }
-        # The bootable image, which for the moment only the architecture with a
-        # BIOS has (`OS-032`, #376).
-        #
-        # Not a statement about BIOS as such — it is a statement about *this
-        # recipe*, which is isolinux plus a GRUB in the ESP, and which exists
-        # because isolinux reads ISO9660 and UEFI reads FAT. An architecture
-        # with no second firmware has no sharing problem and therefore needs
-        # neither, so its image is a different image rather than this one with
-        # parts switched off. `OS-033` (#377) writes it and removes this gate.
-        //
-        pkgs.lib.optionalAttrs (linuxArch != null && linuxArch.bios) {
+          # The bootable image. Two recipes, one attribute: `OS-033` (#377)
+          # gives the architecture with no BIOS an image with no bootloader,
+          # because there is no second firmware for it to share a kernel with.
           linuxIso = (linuxFor { inherit system; arch = linuxArch; }).iso;
         });
 
@@ -2125,22 +2272,23 @@
           # `SEC-005` (#197): the Windows binaries are built with Control Flow
           # Guard, read off the PE header rather than off the recipe.
           windows-mitigations = windowsMitigationsCheckFor system;
-        }
-        # The checks that are about the *image*, which aarch64 does not have
-        # until `OS-033` (#377). See the matching gate on `linuxIso`.
-        // nixpkgs.lib.optionalAttrs (linuxArch != null && linuxArch.bios) {
           # `PKG-016` (#366): two builds of the ISO are the same bytes.
           reproducible-iso = reproducibleIsoCheckFor {
             inherit system;
             arch = linuxArch;
           };
 
-          # `OS-030` (#348): the kernel is in the ISO exactly once, counted,
-          # and it boots as a raw disk on both firmwares.
-          linux-iso-layout = isoLayoutCheckFor {
-            inherit system;
-            arch = linuxArch;
-          };
+          # `OS-030` (#348): the kernel is in the image exactly once, counted
+          # in the bytes, and the image boots as a raw disk on every firmware
+          # the architecture has.
+          linux-iso-layout =
+            {
+              x86_64 = isoLayoutCheckFor;
+              aarch64 = armIsoLayoutCheckFor;
+            }.${linuxArch.name} {
+              inherit system;
+              arch = linuxArch;
+            };
         });
 
       devShells = eachSystem (system:
