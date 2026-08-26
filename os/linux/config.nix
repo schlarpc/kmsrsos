@@ -17,7 +17,19 @@
 # So the default for every subsystem is *off*, and each line below is a
 # deliberate addition that has to justify itself. Growing the list is how this
 # file should change; nothing should ever be enabled to "see if it helps".
-{ pkgs ? import <nixpkgs> { }
+#
+# There is one generated file per architecture and one invocation of this per
+# file (`OS-031`, #375). `arch.config` names which one the caller means, and
+# `arch.kernelArch` is the kernel's own spelling of the target — which agrees
+# with neither the Nix system nor the name in an artifact.
+#
+# `pkgs` lost its `import <nixpkgs> { }` default with the same issue. That
+# default was the `OS-026` (#343) footgun in the parameter list rather than in
+# the documentation: it made `nix build -f os/linux/config.nix` *work*, against
+# whatever channel the caller had, and quietly produce a TCB statement for a
+# different kernel version than the flake pins.
+{ pkgs
+, arch
 , base ? pkgs.linux_6_12
 }:
 
@@ -275,7 +287,7 @@ let
     "XEN" "XEN_NETDEV_FRONTEND"
   ];
 in
-pkgs.runCommand "kmsrsos-kernel-config"
+pkgs.runCommand "kmsrsos-kernel-config-${arch.name}"
 {
   nativeBuildInputs = with pkgs; [
     bison flex bc perl gnumake gcc pkg-config ncurses openssl elfutils
@@ -286,7 +298,7 @@ pkgs.runCommand "kmsrsos-kernel-config"
   cd linux-*
   patchShebangs scripts/
 
-  make ARCH=x86_64 tinyconfig
+  make ARCH=${arch.kernelArch} tinyconfig
 
   for opt in ${builtins.concatStringsSep " " enable}; do
     ./scripts/config --enable "$opt"
@@ -295,7 +307,7 @@ pkgs.runCommand "kmsrsos-kernel-config"
     ./scripts/config --disable "$opt"
   done
 
-  make ARCH=x86_64 olddefconfig
+  make ARCH=${arch.kernelArch} olddefconfig
 
   # The initramfs and command line are appended by `default.nix` at build time,
   # because both reference store paths. Strip any that survived so the checked-in

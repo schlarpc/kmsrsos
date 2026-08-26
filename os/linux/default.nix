@@ -4,7 +4,8 @@
 # `kmsrs-server` as pid 1 and no other userland at all. No init system, no
 # shell, no libc on disk — the initramfs is the binary and one device node.
 #
-# The artefact is a single `bzImage`, and it is deliberately *self-contained*:
+# The artefact is a single kernel image — `arch.image`, which is `bzImage` on
+# x86 — and it is deliberately *self-contained*:
 #
 #   - `CONFIG_INITRAMFS_SOURCE` puts the initramfs inside it, so there is no
 #     separate initrd to load or lose.
@@ -15,10 +16,19 @@
 #
 # `CONFIG_EFI_STUB` makes that file simultaneously a PE/COFF executable and a
 # Linux boot image — `MZ` at 0 and `HdrS` at 0x202 — so the *same bytes* are
-# both `\EFI\BOOT\BOOTX64.EFI` for firmware and an isolinux `KERNEL` line for
-# BIOS. That is why the ISO boots on a Proxmox VM with nothing changed from the
-# defaults, which the Hermit image cannot do (`OS-004`, #255).
+# both the removable-media EFI path for firmware and an isolinux `KERNEL` line
+# for BIOS. That is why the ISO boots on a Proxmox VM with nothing changed from
+# the defaults, which the Hermit image cannot do (`OS-004`, #255).
 { pkgs
+  # The target architecture (`OS-031`, #375), as `linuxArches` in `flake.nix`
+  # describes it. Every architecture literal this file used to hold — the
+  # kernel's `ARCH=`, the image filename, the EFI boot filename, the console
+  # device, and which `kernel.config` is the right one — is a field on it.
+  #
+  # No default. A default would be the thing this issue exists to remove: one
+  # architecture that is "the" architecture, silently correct for the caller
+  # who forgot to say and silently wrong for the one who meant the other.
+, arch
   # `kmsrs-os` (`OS-021`, #337), not `kmsrs-server`: pid 1 mounts devtmpfs,
   # `/proc` and `/sys` and installs a reaper before handing over to the same
   # `serve` the Linux and Windows builds run.
@@ -50,7 +60,11 @@
   # its operator has; and it is the ordering that would silence the serial log
   # without the tee, which is what makes the boot check in `nix flake check` a
   # real regression test rather than a formality.
-, cmdline ? "console=ttyS0,115200 console=tty0 panic=-1 loglevel=6"
+  #
+  # Which serial device that first console *is* is the architecture's
+  # (`OS-031`, #375): `ttyS0` is an 8250 at a legacy I/O port, which is a fact
+  # about x86 and not about Linux.
+, cmdline ? "console=${arch.console} console=tty0 panic=-1 loglevel=6"
 , base ? pkgs.linux_6_12
   # `PKG-016` (#366): what every timestamp in the ISO is set to.
   #
@@ -98,8 +112,8 @@ let
     file /init ${init}/bin/kmsrs-os 0755 0 0
   '';
 
-  configfile = pkgs.runCommand "kmsrsos-linux-config" { } ''
-    cp ${./kernel.config} $out
+  configfile = pkgs.runCommand "kmsrsos-linux-${arch.name}-config" { } ''
+    cp ${arch.config} $out
     chmod +w $out
     cat >> $out <<EOF
     CONFIG_INITRAMFS_SOURCE="${manifest}"
@@ -115,7 +129,7 @@ let
 
   kernel = pkgs.linuxKernel.manualConfig {
     inherit (base) version src;
-    pname = "kmsrsos-linux";
+    pname = "kmsrsos-linux-${arch.name}";
     inherit configfile;
     allowImportFromDerivation = true;
   };
@@ -200,7 +214,7 @@ let
   # passed here would be ignored.
   grubCfg = pkgs.writeText "kmsrsos-grub.cfg" ''
     search --no-floppy --set=root --label KMSRSOS
-    linux /bzImage
+    linux /${arch.image}
     boot
     halt
   '';
@@ -210,10 +224,10 @@ let
   # run time; leaving it empty means there is nowhere for it to look, so the
   # only modules that can ever be loaded are the ones linked in here and the
   # only configuration is the one embedded by `--config`.
-  grub = pkgs.runCommand "kmsrsos-grubx64.efi"
+  grub = pkgs.runCommand "kmsrsos-grub-${arch.name}.efi"
     { nativeBuildInputs = [ pkgs.grub2_efi ]; } ''
     grub-mkimage \
-      --format=x86_64-efi \
+      --format=${arch.grubFormat} \
       --output=$out \
       --config=${grubCfg} \
       --prefix="" \
@@ -235,14 +249,14 @@ let
   # asks for on removable media and what this image has been since `OS-017`
   # (#333). `mkfs.vfat` picks FAT12 for everything up to 8 MiB, so shrinking
   # does not cross a boundary and changes no compatibility variable.
-  esp = pkgs.runCommand "kmsrsos-linux-esp"
+  esp = pkgs.runCommand "kmsrsos-linux-${arch.name}-esp"
     { nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ]; } ''
     bytes=$(stat -Lc %s ${grub})
     sz=$(( (bytes + 262144 + 1048575) / 1048576 ))
     truncate -s "''${sz}M" esp.img
     mkfs.vfat -n ESP esp.img
     mmd -i esp.img ::/EFI ::/EFI/BOOT
-    mcopy -i esp.img ${grub} ::/EFI/BOOT/BOOTX64.EFI
+    mcopy -i esp.img ${grub} ::/EFI/BOOT/${arch.efiFile}
     cp esp.img $out
   '';
 
@@ -279,10 +293,10 @@ let
   # `linux-iso-layout` counts the copies in the bytes rather than reading them
   # off this recipe, which is the only form of the claim that cannot drift —
   # the comment here said "twice" for the whole time it was three.
-  iso = pkgs.runCommand "kmsrsos-linux.iso"
+  iso = pkgs.runCommand "kmsrsos-linux-${arch.name}.iso"
     { nativeBuildInputs = [ pkgs.xorriso pkgs.syslinux ]; } ''
     mkdir -p iso/isolinux
-    cp ${kernel}/bzImage iso/bzImage
+    cp ${kernel}/${arch.image} iso/${arch.image}
     cp ${pkgs.syslinux}/share/syslinux/isolinux.bin iso/isolinux/
     cp ${pkgs.syslinux}/share/syslinux/ldlinux.c32 iso/isolinux/
     chmod +w iso/isolinux/isolinux.bin
@@ -294,7 +308,7 @@ let
     PROMPT 0
     TIMEOUT 1
     LABEL kmsrsos
-      KERNEL /bzImage
+      KERNEL /${arch.image}
     EOF
     sed -i 's/^ *//' iso/isolinux/isolinux.cfg
 

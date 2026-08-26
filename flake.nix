@@ -420,10 +420,99 @@
       # artefacts this one is mostly a kernel configuration, and a 2790-line
       # allowlist is the statement of what is in the machine's TCB. It belongs
       # in a file a reviewer can read, not spliced into this one.
-      linuxFor = system:
+
+      # --- The target architecture, as a value (`OS-031`, #375) ---
+      #
+      # Everything below `os/linux/` used to name x86 in a dozen unmarked
+      # places: `ARCH=x86_64`, `bzImage`, `BOOTX64.EFI`, `x86_64-efi`,
+      # `ttyS0`, and one `kernel.config`. That is fine while there is one
+      # target and becomes the `OS-006` (#257) failure the moment there are
+      # two — a test that reads the wrong file passes while asserting nothing.
+      #
+      # So the architecture is a *descriptor* that flows down into
+      # `default.nix`, `config.nix` and `delta.nix`, and the three of them hold
+      # no architecture literal of their own. Adding a target is then an entry
+      # in this attribute set plus the config file it names, rather than a
+      # second copy of three files.
+      #
+      # Every field here is something that was a literal before this issue, and
+      # nothing here is a preference — each one is a fact about the platform.
+      linuxArches = {
+        x86_64 = {
+          # What this target is called in an artifact name, an output name and
+          # a test's failure message. Not the Nix system and not the kernel's
+          # `ARCH=`, both of which spell some architectures differently.
+          name = "x86_64";
+
+          # The Nix system that *builds* this target. Distinct from the system
+          # a build happens to be running on — see `linuxFor` — and the whole
+          # reason this field exists rather than being inferred.
+          system = "x86_64-linux";
+
+          # `make ARCH=`, which is the kernel's own spelling and agrees with
+          # neither of the two above on aarch64 (`arm64`).
+          kernelArch = "x86_64";
+
+          # What `linuxKernel.manualConfig` leaves in `$out`. x86 self-
+          # decompresses and is therefore `bzImage`; other architectures
+          # produce an uncompressed `Image`.
+          image = "bzImage";
+
+          # The removable-media path UEFI looks for, per the specification's
+          # per-architecture table. Firmware loads exactly this name with no
+          # NVRAM entry, which is what makes a fresh VM boot on its first try.
+          efiFile = "BOOTX64.EFI";
+
+          # `grub-mkimage --format=`. GRUB is in the image for the reason
+          # `OS-030` (#348) gives: isolinux reads ISO9660 and UEFI reads FAT,
+          # so without a loader in the ESP that reads ISO9660 the kernel has to
+          # exist twice.
+          grubFormat = "x86_64-efi";
+
+          # `console=`. `ttyS0` is an 8250 at a legacy I/O port, which is an
+          # x86 platform fact rather than a Linux one.
+          console = "ttyS0,115200";
+
+          # Whether firmware for this target can boot without UEFI. It decides
+          # whether the image needs isolinux, an isohybrid MBR and a bootloader
+          # in the ESP at all — the argument in `OS-033` (#377), which is where
+          # the second value of this field first appears.
+          bios = true;
+
+          # The generated allowlist, which is the statement of what is in this
+          # machine's TCB. One file per architecture: `OS-032` (#376) explains
+          # why the second is not a port of the first, and `kernel_tcb.rs`
+          # asserts each against its own list.
+          config = ./os/linux/kernel.config;
+
+          # What boots it in a check.
+          qemu = "qemu-system-x86_64";
+        };
+      };
+
+      # The descriptor for a system, or `null` if this system builds no
+      # bare-metal target.
+      #
+      # Every target is built **natively**: the arm ISO is built on the arm
+      # runner rather than cross-compiled, which is also the faster place to
+      # run its boot checks under TCG. So this is a lookup rather than a
+      # cross-compilation decision, and a system with no entry gets no
+      # `linux*` outputs at all rather than outputs that fail when built.
+      linuxArchFor = system:
+        nixpkgs.lib.findFirst (arch: arch.system == system) null
+          (builtins.attrValues linuxArches);
+
+      # `system` is where the build runs; `arch` is what it produces.
+      #
+      # Today they always agree, and that is exactly why they have to be two
+      # variables: a second target introduces the distinction, and until this
+      # issue there was one value doing both jobs, so nothing could have
+      # noticed the day it was asked to mean two different things.
+      linuxFor = { system, arch }:
+        assert arch.system == system;
         let pkgs = pkgsFor system;
         in import ./os/linux {
-          inherit pkgs;
+          inherit pkgs arch;
           init = (mkKmsrsos { inherit system; }).os;
           # `PKG-016` (#366): the same stamp the Rust builds get, so the ISO's
           # timestamps are a function of the revision rather than of when
@@ -446,11 +535,11 @@
       #     anyway, so `getrandom(2)` never returns predictable bytes.
       #   * No `-enable-kvm`. A build sandbox has no `/dev/kvm`, and TCG is fast
       #     enough.
-      linuxBootCheckFor = system:
+      linuxBootCheckFor = { system, arch }:
         let
           pkgs = pkgsFor system;
           configured = mkKmsrsos { inherit system; };
-          linux = linuxFor system;
+          linux = linuxFor { inherit system arch; };
 
           # Exactly what `qemu-server` emits for a q35 VM with one virtio NIC.
           proxmoxTopology = builtins.concatStringsSep " " [
@@ -490,7 +579,7 @@
 
             # `-no-shutdown` is deliberately absent: this check's whole point is
             # that the guest powers itself off and qemu exits on its own.
-            qemu-system-x86_64 \
+            ${arch.qemu} \
               -machine q35 -cpu qemu64 \
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$serial" \
@@ -740,11 +829,11 @@
       # one **exits at start-up**, which presents as a guest that booted to a
       # completely empty console and "never served" — a failure that blames the
       # kernel config for a port clash. Observed once; hence the comment.
-      nicBootCheckFor = system:
+      nicBootCheckFor = { system, arch }:
         let
           pkgs = pkgsFor system;
           configured = mkKmsrsos { inherit system; };
-          linux = linuxFor system;
+          linux = linuxFor { inherit system arch; };
 
           # Each is `qemu-device-name:kernel-driver`, so a failure names the
           # driver an operator would have to look for.
@@ -771,7 +860,7 @@
             local driver="''${1##*:}"
             local serial="$PWD/$driver.log"
 
-            qemu-system-x86_64 \
+            ${arch.qemu} \
               -machine q35 -cpu qemu64 \
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$serial" \
@@ -814,7 +903,7 @@
           # exercises the same path as an unrecognised one, since both end with
           # the kernel having created no interface.
           echo "checking that a machine with no interface says so"
-          qemu-system-x86_64 \
+          ${arch.qemu} \
             -machine q35 -cpu qemu64 \
             -smp 1 -m 512M -display none -no-reboot \
             -serial "file:$PWD/no-nic.log" \
@@ -871,10 +960,10 @@
       #
       # A regression to two means a firmware path has grown its own copy back;
       # zero means one of them has lost its kernel entirely.
-      isoLayoutCheckFor = system:
+      isoLayoutCheckFor = { system, arch }:
         let
           pkgs = pkgsFor system;
-          linux = linuxFor system;
+          linux = linuxFor { inherit system arch; };
         in
         pkgs.runCommand "linux-iso-layout"
           {
@@ -885,7 +974,7 @@
           python3 - <<'PYTHON' | tee $out/report
           import pathlib
           iso = pathlib.Path("${linux.iso}").read_bytes()
-          kernel = pathlib.Path("${linux.kernel}/bzImage").read_bytes()
+          kernel = pathlib.Path("${linux.kernel}/${arch.image}").read_bytes()
 
           # A run from the middle of the kernel, long enough not to collide by
           # accident and far enough in to miss the headers that also appear in
@@ -897,7 +986,7 @@
               at = i + 1
 
           print(f"ISO      {len(iso)} bytes")
-          print(f"bzImage  {len(kernel)} bytes")
+          print(f"${arch.image}  {len(kernel)} bytes")
           print(f"copies   {len(hits)} at {[hex(h) for h in hits]}")
 
           assert len(hits) == 1, (
@@ -940,7 +1029,7 @@
               fw="$fw -drive if=pflash,format=raw,unit=1,file=$PWD/$firmware-vars.fd"
             fi
 
-            qemu-system-x86_64 \
+            ${arch.qemu} \
               -machine q35 -cpu qemu64 \
               -smp 1 -m 512M -display none -no-reboot \
               -serial "file:$log" \
@@ -1053,10 +1142,10 @@
       # `--rebuild` builds it again and makes Nix compare, which is the same
       # mechanism the `reproducible` check uses rather than a second way of
       # asking.
-      reproducibleIsoCheckFor = system:
+      reproducibleIsoCheckFor = { system, arch }:
         let
           pkgs = pkgsFor system;
-          linux = linuxFor system;
+          linux = linuxFor { inherit system arch; };
         in
         pkgs.runCommand "reproducible-iso"
           {
@@ -1151,6 +1240,7 @@
           commonArgs = commonArgsFor system;
           cargoArtifacts = cargoArtifactsFor system;
           configured = mkKmsrsos { inherit system; };
+          linuxArch = linuxArchFor system;
         in
         {
           # The whole workspace, which is what a developer means by `nix build`.
@@ -1276,16 +1366,22 @@
             '';
           };
         }
-        # The bare-metal target is x86_64 and nothing else, and until now that
-        # was true of the artifacts without being true of the *attribute set*.
-        # `nix flake check` on aarch64 evaluates every output, reached
-        # `pkgs.syslinux` — which nixpkgs marks as unavailable off x86 — and
-        # failed there rather than anywhere informative (`OS-017`, #333).
+        # The gate is "this system builds a bare-metal target", not "this
+        # system is x86_64" (`OS-031`, #375). The two coincide today, and the
+        # distinction is the point: `linuxArches` is the one place that decides
+        # which systems those are, so a target added there appears here without
+        # this line being touched.
+        #
+        # It has to be a gate at all because `nix flake check` on aarch64 used
+        # to evaluate every output, reach `pkgs.syslinux` — which nixpkgs marks
+        # unavailable off x86 — and fail there rather than anywhere informative
+        # (`OS-017`, #333).
         #
         # An `optionalAttrs` rather than a `meta.platforms`: the point is that
         # the attribute should not *exist* on a system that cannot build it, so
-        # `nix flake show` on aarch64 says so instead of erroring.
-        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+        # `nix flake show` on a system with no target says so instead of
+        # erroring.
+        // pkgs.lib.optionalAttrs (linuxArch != null) {
           # --- The Linux-as-PID-1 target (`OS-017`, #333) ---
           #
           # The second bare-metal target: the same `kmsrs-server` binary as pid
@@ -1295,8 +1391,8 @@
           # field — and this one does, from BIOS or UEFI, unmodified.
           #
           # Which of the two ships is `OS-018` (#334), and is not decided here.
-          linuxIso = (linuxFor system).iso;
-          linux-kernel = (linuxFor system).kernel;
+          linuxIso = (linuxFor { inherit system; arch = linuxArch; }).iso;
+          linux-kernel = (linuxFor { inherit system; arch = linuxArch; }).kernel;
 
           # `nix build .#linux-config` — regenerate `os/linux/kernel.config`.
           #
@@ -1309,7 +1405,10 @@
           # looked like a pare-back. The file is the statement of what is in
           # this machine's TCB; generating it from an unpinned input is exactly
           # the `OS-006` (#257) mistake in a new place.
-          linux-config = import ./os/linux/config.nix { inherit pkgs; };
+          linux-config = import ./os/linux/config.nix {
+            inherit pkgs;
+            arch = linuxArch;
+          };
 
           # `nix build .#linux-deltas && cat result/report` — what each driver
           # in the `OS-025` (#342) matrix costs, measured on the built bzImage
@@ -1324,6 +1423,7 @@
           # which is the mistake `OS-026` (#343) found the hard way.
           linux-deltas = import ./os/linux/delta.nix {
             inherit pkgs;
+            arch = linuxArch;
             variants = {
               # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
               # for a modern Linux guest on ESXi and Workstation.
@@ -1359,6 +1459,7 @@
           craneLib = cranelibFor system;
           commonArgs = commonArgsFor system;
           cargoArtifacts = cargoArtifactsFor system;
+          linuxArch = linuxArchFor system;
         in
         {
           build = self.packages.${system}.default;
@@ -1476,33 +1577,46 @@
               ++ [ (pkgsFor system).cargo-hack ];
           });
         }
-        # x86_64 only, for the same reason the packages above are: these boot a
-        # kernel built with `pkgs.syslinux`, which nixpkgs marks unavailable off
-        # x86. Before this, `nix flake check` on aarch64 failed evaluating them
-        # rather than skipping them (`OS-017`, #333).
+        # Gated the same way the packages above are, and for the same reason:
+        # these boot the artifact this system builds, and a system that builds
+        # no bare-metal target has nothing here to check (`OS-031`, #375).
+        # Before the gate existed, `nix flake check` on aarch64 failed
+        # evaluating them rather than skipping them (`OS-017`, #333).
         #
         # `nixpkgs.lib` rather than `pkgs.lib`: `pkgs` is bound inside this
         # check set's `let`, and this splice is outside it.
-        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+        // nixpkgs.lib.optionalAttrs (linuxArch != null) {
           # `OS-017` (#333): boots and serves on the topology Hermit cannot,
           # from BIOS and UEFI, with no `--args`.
-          linux-boot = linuxBootCheckFor system;
+          linux-boot = linuxBootCheckFor {
+            inherit system;
+            arch = linuxArch;
+          };
 
           # `OS-025` (#342): one boot per supported NIC model, each asserting
           # that the machine *serves* — plus the machine with no NIC at all,
           # which must say so rather than reporting `listening` and going quiet.
-          linux-nics = nicBootCheckFor system;
+          linux-nics = nicBootCheckFor {
+            inherit system;
+            arch = linuxArch;
+          };
 
           # `SEC-005` (#197): the Windows binaries are built with Control Flow
           # Guard, read off the PE header rather than off the recipe.
           windows-mitigations = windowsMitigationsCheckFor system;
 
           # `PKG-016` (#366): two builds of the ISO are the same bytes.
-          reproducible-iso = reproducibleIsoCheckFor system;
+          reproducible-iso = reproducibleIsoCheckFor {
+            inherit system;
+            arch = linuxArch;
+          };
 
           # `OS-030` (#348): the kernel is in the ISO exactly once, counted,
           # and it boots as a raw disk on both firmwares.
-          linux-iso-layout = isoLayoutCheckFor system;
+          linux-iso-layout = isoLayoutCheckFor {
+            inherit system;
+            arch = linuxArch;
+          };
         });
 
       devShells = eachSystem (system:

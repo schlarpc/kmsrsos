@@ -29,9 +29,18 @@
 #     nix build .#linux-deltas && cp result/baseline/bzImage /tmp/before
 #     # …edit config.nix, regenerate kernel.config…
 #     nix build .#linux-deltas && stat -Lc %s /tmp/before result/baseline/bzImage
+#
+# `bzImage` there is x86's name for the file. It is `arch.image` since
+# `OS-031` (#375), and the report prints whichever one it measured.
 { pkgs
+  # The target architecture (`OS-031`, #375). It names the kernel's `ARCH=`,
+  # the console device the fixed command line uses, and — through
+  # `arch.config` — which checked-in allowlist is the baseline. A delta
+  # measured against the wrong architecture's config is a number that looks
+  # like an answer.
+, arch
   # The checked-in allowlist, as the thing every variant is measured against.
-, base ? ./kernel.config
+, base ? arch.config
   # `{ name = [ "SYMBOL" … ]; }` to enable symbols on top of `base`, or
   # `{ name = { enable = [ … ]; disable = [ … ]; }; }` when the question is what
   # something *costs to keep* rather than what it costs to add — which is the
@@ -51,7 +60,7 @@ let
 
   # The command line is fixed too, and short: it is inside the image, so a
   # longer one is a bigger image.
-  cmdline = "console=ttyS0,115200 panic=-1";
+  cmdline = "console=${arch.console} panic=-1";
 
   # Both spellings, so a list stays the common case.
   normalise = spec:
@@ -59,7 +68,7 @@ let
     then { enable = spec; disable = [ ]; }
     else { enable = spec.enable or [ ]; disable = spec.disable or [ ]; };
 
-  configFor = name: spec: pkgs.runCommand "kmsrsos-delta-${name}-config"
+  configFor = name: spec: pkgs.runCommand "kmsrsos-delta-${arch.name}-${name}-config"
     {
       nativeBuildInputs = with pkgs; [
         bison flex bc perl gnumake gcc pkg-config ncurses openssl elfutils
@@ -82,7 +91,7 @@ let
 
     # The same `olddefconfig` the real build runs, so a symbol that drags a
     # subsystem in is measured with the subsystem.
-    make ARCH=x86_64 olddefconfig
+    make ARCH=${arch.kernelArch} olddefconfig
 
     sed -e '/^CONFIG_INITRAMFS_SOURCE/d' -e '/^CONFIG_CMDLINE/d' \
         -e '/^# CONFIG_CMDLINE/d' .config > stripped
@@ -101,7 +110,7 @@ let
 
   buildFor = name: spec: pkgs.linuxKernel.manualConfig {
     inherit (kernel) version src;
-    pname = "kmsrsos-delta-${name}";
+    pname = "kmsrsos-delta-${arch.name}-${name}";
     configfile = configFor name spec;
     allowImportFromDerivation = true;
   };
@@ -111,21 +120,21 @@ let
 
   names = builtins.attrNames built;
 in
-pkgs.runCommand "kmsrsos-kernel-deltas" { } ''
+pkgs.runCommand "kmsrsos-kernel-deltas-${arch.name}" { } ''
   mkdir -p $out
   ${builtins.concatStringsSep "\n" (map
     (name: "ln -s ${built.${name}} $out/${name}")
     names)}
 
-  baseline=$(stat -Lc %s ${built.baseline}/bzImage)
+  baseline=$(stat -Lc %s ${built.baseline}/${arch.image})
   {
-    echo "bzImage sizes, initramfs held constant (OS-025, #342)"
+    echo "${arch.image} sizes, initramfs held constant (OS-025, #342)"
     echo
     printf '%-24s %10s %10s\n' variant bytes delta
     printf '%-24s %10s %10s\n' ------- ----- -----
     ${builtins.concatStringsSep "\n" (map
       (name: ''
-        size=$(stat -Lc %s ${built.${name}}/bzImage)
+        size=$(stat -Lc %s ${built.${name}}/${arch.image})
         printf '%-24s %10s %+10s\n' ${name} "$size" "$((size - baseline))"
       '')
       names)}
