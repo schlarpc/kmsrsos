@@ -130,9 +130,60 @@
         let craneLib = cranelibFor system;
         in craneLib.buildDepsOnly (commonArgsFor system);
 
-      # --- Windows cross-compilation (x86_64-pc-windows-msvc) ---
-      windowsTarget = "x86_64-pc-windows-msvc";
+      # --- Windows cross-compilation (`PKG-020`, #379) ---
+      #
+      # **Two targets, and neither is "the" Windows build.** The client
+      # population that needs this is going Arm: Snapdragon X and Windows Dev
+      # Kit machines run Windows 11 on Arm natively, and on Apple Silicon it is
+      # the only Windows there is. Before this, such a user could run
+      # `kmsrs-server` on Windows only under the x86 emulation layer — which is
+      # worse than it sounds for this program in particular, because `SEC-019`
+      # (#356) verifies its mitigations **on a live process**, and under
+      # emulation what that verifies is a property of the emulator's process.
+      #
+      # Every field below was a literal before this issue. The two that are not
+      # obvious:
+      #
+      #   * `xwin` is what `xwin splat` calls the architecture, and therefore
+      #     the directory the import libraries land in. It happens to agree
+      #     with `name` for both of these and is a separate field because
+      #     nothing guarantees that — `xwin` also knows `x86` and `aarch`.
+      #   * `machine` is `IMAGE_FILE_MACHINE_*` from the PE header, which is
+      #     the only architecture statement that is a property of the
+      #     *artifact* rather than of the recipe. `windows-mitigations` reads
+      #     it, so that a check cannot pass by having read the binary it
+      #     already knew about (`PKG-018`).
+      windowsArches = {
+        x86_64 = {
+          name = "x86_64";
+          target = "x86_64-pc-windows-msvc";
+          xwin = "x86_64";
+          machine = 34404; # 0x8664, IMAGE_FILE_MACHINE_AMD64
+        };
+        aarch64 = {
+          name = "aarch64";
+          target = "aarch64-pc-windows-msvc";
+          xwin = "aarch64";
+          machine = 43620; # 0xAA64, IMAGE_FILE_MACHINE_ARM64
+        };
+      };
 
+      # Cargo and `cc` spell one triple two different ways, and getting either
+      # wrong fails **silently**: an unrecognised `CARGO_TARGET_…` variable is
+      # ignored rather than rejected, so the linker would quietly revert to the
+      # default and the flag it was carrying would vanish. Derived from the
+      # triple rather than written twice.
+      cargoTargetVar = arch:
+        nixpkgs.lib.toUpper (builtins.replaceStrings [ "-" ] [ "_" ] arch.target);
+      ccTargetVar = arch: builtins.replaceStrings [ "-" ] [ "_" ] arch.target;
+
+      # One fixed-output derivation, both architectures (`PKG-020`, #379).
+      #
+      # Not one per architecture, and that is the point of the issue's "bumping
+      # it stays a one-place change": two FODs would be two hashes to update
+      # and two chances to update one of them. `xwin` fetches the same manifest
+      # either way; only the import libraries differ, and they land in
+      # per-architecture directories.
       xwinSdkFor = system:
         let pkgs = pkgsFor system;
         in pkgs.stdenvNoCC.mkDerivation {
@@ -151,34 +202,38 @@
               --manifest-version 17 \
               --crt-version 14.44.17.14 \
               --sdk-version 10.0.26100 \
-              --arch x86_64 \
+              ${builtins.concatStringsSep " "
+                (map (arch: "--arch ${arch.xwin}")
+                  (builtins.attrValues windowsArches))} \
               splat --copy --output "$out"
           '';
 
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "sha256-UFQjsFVBwcF/9e9tVFoG0Z1JySxyTnFqoaRwr/tUWzA=";
+          outputHash = "sha256-22dqk0tKSbC4bnfsnhhsG0aEJfUHb3JJNL3TnZGFVa0=";
         };
 
-      windowsArgsFor = system:
+      windowsArgsFor = { system, arch }:
         let
           pkgs = pkgsFor system;
           xwinSdk = xwinSdkFor system;
           commonArgs = commonArgsFor system;
+          cargoVar = cargoTargetVar arch;
+          ccVar = ccTargetVar arch;
         in
         commonArgs // {
-          pnameSuffix = "-windows";
+          pnameSuffix = "-windows-${arch.name}";
 
           nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
             pkgs.llvmPackages.lld
           ];
 
-          CARGO_BUILD_TARGET = windowsTarget;
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = "lld-link";
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = builtins.concatStringsSep " " [
-            "-Lnative=${xwinSdk}/crt/lib/x86_64"
-            "-Lnative=${xwinSdk}/sdk/lib/um/x86_64"
-            "-Lnative=${xwinSdk}/sdk/lib/ucrt/x86_64"
+          CARGO_BUILD_TARGET = arch.target;
+          "CARGO_TARGET_${cargoVar}_LINKER" = "lld-link";
+          "CARGO_TARGET_${cargoVar}_RUSTFLAGS" = builtins.concatStringsSep " " [
+            "-Lnative=${xwinSdk}/crt/lib/${arch.xwin}"
+            "-Lnative=${xwinSdk}/sdk/lib/um/${arch.xwin}"
+            "-Lnative=${xwinSdk}/sdk/lib/ucrt/${arch.xwin}"
 
             # `SEC-005` (#197) added `-C control-flow-guard` here and
             # `PKG-018` removed it, because **the binary it produced did not
@@ -196,14 +251,25 @@
             # front of it and it failed in the first thirty seconds.
             #
             # The five `SetProcessMitigationPolicy` policies do apply and are
-            # verified in force on a live process — see `crate::sandbox`.
+            # verified in force on a live process — see `crate::sandbox`. On
+            # **x86_64**: nobody has run the ARM64 binary on an ARM64 Windows
+            # machine, and `PKG-020` (#379) says so rather than assuming the
+            # kernel answers the same way. See `docs/decisions.md`.
             # Restoring CFG is `PKG-018`; the likely requirement is a `std`
             # rebuilt with it, since the precompiled one is not.
           ];
 
-          CC_x86_64_pc_windows_msvc = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang-cl";
-          AR_x86_64_pc_windows_msvc = "${pkgs.llvmPackages.llvm}/bin/llvm-lib";
-          CFLAGS_x86_64_pc_windows_msvc = builtins.concatStringsSep " " [
+          "CC_${ccVar}" = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang-cl";
+          "AR_${ccVar}" = "${pkgs.llvmPackages.llvm}/bin/llvm-lib";
+          "CFLAGS_${ccVar}" = builtins.concatStringsSep " " [
+            # Stated rather than inferred (`PKG-020`, #379). `clang-cl` takes
+            # its default triple from the *build host*, so on an aarch64 Linux
+            # runner it would compile for ARM64 Windows whichever target cargo
+            # was asked for. Nothing in this workspace compiles C today, so
+            # this changes no byte of either artifact; it is here so that the
+            # day something does, it is not a bug that depends on which runner
+            # picked up the job.
+            "--target=${arch.target}"
             "-imsvc${xwinSdk}/crt/include"
             "-imsvc${xwinSdk}/sdk/include/ucrt"
             "-imsvc${xwinSdk}/sdk/include/um"
@@ -215,9 +281,11 @@
           cargoExtraArgs = "--package kmsrs-server --package kmsrs-client";
         };
 
-      windowsCargoArtifactsFor = system:
+      windowsCargoArtifactsFor = { system, arch }:
         let craneLib = cranelibFor system;
-        in craneLib.buildDepsOnly (windowsArgsFor system);
+        in craneLib.buildDepsOnly ((windowsArgsFor { inherit system arch; }) // {
+          pname = "kmsrsos-windows-${arch.name}";
+        });
 
       defaultSettings = {
         # Minutes. Microsoft's documented defaults, and the one genuine
@@ -1764,13 +1832,24 @@
       windowsMitigationsCheckFor = system:
         let
           pkgs = pkgsFor system;
-          windows = self.packages.${system}.windows;
+
+          # `(directory, expected IMAGE_FILE_MACHINE)` per architecture. The
+          # second half is `PKG-020` (#379): a check that reads only the
+          # artifact it already knew about passes for the whole time the other
+          # one is unbuilt or wrong, which is the same failure `PKG-018` was
+          # created by in a different place.
+          targets = map
+            (arch: {
+              inherit (arch) name machine;
+              path = self.packages.${system}."windows-${arch.name}";
+            })
+            (builtins.attrValues windowsArches);
         in
         pkgs.runCommand "windows-mitigations"
           { nativeBuildInputs = [ pkgs.python3 ]; } ''
           mkdir -p $out
           python3 - <<'PYTHON' | tee $out/report
-          import pathlib, struct, sys
+          import pathlib, struct
 
           # Bit 0x4000 of DllCharacteristics: IMAGE_DLLCHARACTERISTICS_GUARD_CF.
           GUARD_CF = 0x4000
@@ -1779,25 +1858,53 @@
           # differs in size comes after it.
           DLL_CHARACTERISTICS = 70
 
-          binaries = sorted(pathlib.Path("${windows}/bin").glob("*.exe"))
-          assert binaries, "the Windows build produced no .exe, so this checks nothing"
+          # `(architecture, directory, expected IMAGE_FILE_MACHINE)`.
+          TARGETS = [
+          ${builtins.concatStringsSep "\n          " (map
+            (t: "    (\"${t.name}\", \"${t.path}/bin\", ${toString t.machine}),")
+            targets)}
+          ]
+          assert TARGETS, "no Windows artifact is checked, so this asserts nothing"
 
-          for path in binaries:
-              data = path.read_bytes()
-              pe = struct.unpack_from("<I", data, 0x3C)[0]
-              assert data[pe:pe + 4] == b"PE\0\0", f"{path.name} is not a PE file"
-              flags = struct.unpack_from("<H", data, pe + 24 + DLL_CHARACTERISTICS)[0]
-              guarded = bool(flags & GUARD_CF)
-              print(f"{path.name:20} DllCharacteristics=0x{flags:04x} GUARD_CF={guarded}")
-              assert not guarded, (
-                  f"{path.name} was built with Control Flow Guard. On this "
-                  "toolchain that produces a binary that dies at startup with "
-                  "0xC0000409 / FAST_FAIL_GUARD_ICALL_CHECK_FAILURE before it "
-                  "logs anything, which is strictly worse than the mitigation "
-                  "is worth (PKG-018). If this is being re-enabled, run the "
-                  "artifact on a Windows guest first - harness/windows/ exists "
-                  "for that and is how this was found"
+          for arch, directory, machine in TARGETS:
+              binaries = sorted(pathlib.Path(directory).glob("*.exe"))
+              assert binaries, (
+                  f"the {arch} Windows build produced no .exe, so this checks "
+                  "nothing about it (PKG-020, #379)"
               )
+
+              for path in binaries:
+                  data = path.read_bytes()
+                  pe = struct.unpack_from("<I", data, 0x3C)[0]
+                  assert data[pe:pe + 4] == b"PE\0\0", f"{path.name} is not a PE file"
+
+                  # Read *before* anything else, because it is what makes every
+                  # statement below a statement about the right file. The
+                  # machine type is two bytes after the signature.
+                  found = struct.unpack_from("<H", data, pe + 4)[0]
+                  assert found == machine, (
+                      f"{arch}/{path.name} reports machine 0x{found:04x} and "
+                      f"should report 0x{machine:04x}. Every other assertion "
+                      "here would still have passed, about the wrong binary "
+                      "(PKG-020, #379)"
+                  )
+
+                  flags = struct.unpack_from("<H", data, pe + 24 + DLL_CHARACTERISTICS)[0]
+                  guarded = bool(flags & GUARD_CF)
+                  print(
+                      f"{arch:8} {path.name:20} machine=0x{found:04x} "
+                      f"DllCharacteristics=0x{flags:04x} GUARD_CF={guarded}"
+                  )
+                  assert not guarded, (
+                      f"{arch}/{path.name} was built with Control Flow Guard. "
+                      "On this toolchain that produces a binary that dies at "
+                      "startup with 0xC0000409 / "
+                      "FAST_FAIL_GUARD_ICALL_CHECK_FAILURE before it logs "
+                      "anything, which is strictly worse than the mitigation "
+                      "is worth (PKG-018). If this is being re-enabled, run the "
+                      "artifact on a Windows guest first - harness/windows/ "
+                      "exists for that and is how this was found"
+                  )
           PYTHON
         '';
 
@@ -1936,14 +2043,25 @@
           # context (`PKG-004`, #241; `PKG-005`, #242).
           container = configured.container;
 
-          # Cross-compiled Windows binaries: `nix build .#windows`
-          windows = craneLib.buildPackage ((windowsArgsFor system) // stampEnv // {
-            cargoArtifacts = windowsCargoArtifactsFor system;
-          });
-
-
-
-
+          # Cross-compiled Windows binaries, one attribute per architecture:
+          # `nix build .#windows-x86_64`, `nix build .#windows-aarch64`.
+          #
+          # There is deliberately **no bare `.#windows`** (`PKG-020`, #379). It
+          # used to mean "the x86_64 one", which is the kind of default that is
+          # right until the day it is silently wrong — and a release artifact
+          # named after a default is one nobody can tell apart from the other.
+          # Both are named; neither is the Windows build.
+        }
+        // builtins.listToAttrs (map
+          (arch: {
+            name = "windows-${arch.name}";
+            value = craneLib.buildPackage
+              ((windowsArgsFor { inherit system arch; }) // stampEnv // {
+                cargoArtifacts = windowsCargoArtifactsFor { inherit system arch; };
+              });
+          })
+          (builtins.attrValues windowsArches))
+        // {
           # --- OS packages (PKG-009, #246) ---
           #
           # `.deb` and `.rpm` as artifacts, not a repository. A repository is
@@ -2229,6 +2347,18 @@
             nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ])
               ++ [ (pkgsFor system).cargo-hack ];
           });
+
+          # `PKG-018`: Control Flow Guard is **absent** from the shipped
+          # Windows binaries, and each artifact is the architecture it claims
+          # to be (`PKG-020`, #379).
+          #
+          # Not in the x86-only group below, and it was there by accident
+          # rather than by argument: it was grouped with the checks that boot a
+          # kernel built with `pkgs.syslinux`, and it has nothing to do with
+          # either. The Windows binaries cross-compile from any Linux, so this
+          # runs wherever the flake does — which is also the only way the
+          # aarch64 leg of CI checks the artifact it builds.
+          windows-mitigations = windowsMitigationsCheckFor system;
         }
         # Gated the same way the packages above are, and for the same reason:
         # these boot the artifact this system builds, and a system that builds
@@ -2269,9 +2399,6 @@
               arch = linuxArch;
             };
 
-          # `SEC-005` (#197): the Windows binaries are built with Control Flow
-          # Guard, read off the PE header rather than off the recipe.
-          windows-mitigations = windowsMitigationsCheckFor system;
           # `PKG-016` (#366): two builds of the ISO are the same bytes.
           reproducible-iso = reproducibleIsoCheckFor {
             inherit system;

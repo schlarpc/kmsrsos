@@ -79,6 +79,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
 | 45 | A second architecture is supported | aarch64, because Proxmox VE for arm64 shipped and KVM is same-architecture — and because on Apple Silicon the whole lab is Arm, [see below](#a-second-architecture-is-supported-os-032-376-pkg-019-378) (#376, #378) |
 | 46 | The arm image has no bootloader | `OS-030`'s GRUB solves two firmwares sharing one kernel; aarch64 has one firmware, so the kernel goes in the ESP and nothing loads it, [see below](#the-arm-image-has-no-bootloader-os-033-377) (#377) |
+| 47 | Windows on Arm is built and shipped | `aarch64-pc-windows-msvc`, and **neither Windows target is the default** — both are named. Its mitigations are unverified and the artifact says so, [see below](#windows-on-arm-ships-untested-and-says-so-pkg-020-379) (#379) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -576,6 +577,44 @@ The alternative was option 4 in #356: declare the asymmetry permanent. That was 
 `DisallowWin32kSystemCalls` is worth more than the grep property, and because the grep property was
 only ever a proxy for "the unsafe in this tree is auditable" — which one call site with a safety
 comment satisfies directly.
+
+### Windows on Arm ships untested, and says so (`PKG-020`, #379)
+
+The Windows build was x86_64 and nothing else, and the client population that needs it is going Arm:
+Snapdragon X and Windows Dev Kit machines run Windows 11 on Arm natively, and on Apple Silicon it is
+the only Windows there is — Parallels and Fusion run Arm guests only. Such a user could run
+`kmsrs-server` on Windows only under the x86 emulation layer.
+
+**That is worse for this program than for most**, and the reason is the decision immediately above:
+`SEC-019` verifies its mitigations *on a live process*. Under emulation, what that verifies is a
+property of the emulator's process.
+
+So there is an `aarch64-pc-windows-msvc` build, through the same `cargo xwin` path, from the same
+fixed-output MSVC SDK — which now carries both architectures, so bumping the pinned CRT and SDK is
+still one hash in one place. `.#windows` is gone: it meant "the x86_64 one", and a release artifact
+named after a default is one nobody can tell apart from the other. Both are named.
+
+**It has never been executed, and the artifact does not pretend otherwise.** There is no ARM64
+Windows to run it on — no hosted GitHub runner, no Windows on Graviton, and emulating ARM64 Windows
+to test a *process mitigation* would answer a question about the emulator, which is the objection
+that made the status quo unacceptable in the first place. `PKG-022` (#385) is where that is done.
+
+What makes shipping it defensible is that the failure mode is **visible rather than silent**, which
+is precisely what `PKG-018` below found to be missing:
+
+- `refused()` attributes a declined policy to a policy *by name*, and `apply()` reports `Failed`
+  rather than aborting — because "this kernel declined a mitigation" already happens on older
+  Windows builds and is not a reason to stop serving. A host that gets fewer mitigations than it
+  asked for says so on its console at start-up.
+- The `windows-mitigations` check now reads `IMAGE_FILE_MACHINE` off each artifact **before** it
+  asserts anything else about it. Without that, a check reading only the binary it knew about would
+  pass for the whole time the other was unbuilt or wrong — the same shape of hole `PKG-018` was
+  created by, in a different place.
+
+The `SetProcessMitigationPolicy` surface is architecture-independent — every structure involved is a
+flag word rather than anything with a register layout, and the width assertion below compiles for
+whichever target it is built for. That is a reason to expect it to work; it is not a test, and the
+distinction is the whole of `PKG-018`.
 
 ### Control Flow Guard produced a binary that did not start (`PKG-018`)
 

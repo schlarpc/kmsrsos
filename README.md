@@ -93,7 +93,8 @@ $ cargo fmt                  # format
 
 ```shell
 $ nix build          # build the package
-$ nix build .#windows # cross-compile for Windows (x86_64-pc-windows-msvc)
+$ nix build .#windows-x86_64  # cross-compile for Windows (x86_64-pc-windows-msvc)
+$ nix build .#windows-aarch64 # and for Windows on Arm (PKG-020, #379)
 $ nix build .#linux-kernel # the bare-metal kernel on its own
 $ nix build .#linuxIso     # a bootable ISO: BIOS or UEFI, 14 MiB
 $ nix flake check    # run all checks (build, clippy, fmt, test, coverage)
@@ -104,6 +105,7 @@ Windows cross-compilation also works from the dev shell without Nix sandboxing:
 
 ```shell
 $ cargo xwin build --release --target x86_64-pc-windows-msvc
+$ cargo xwin build --release --target aarch64-pc-windows-msvc
 ```
 
 The Rust toolchain is pinned in `rust-toolchain.toml` (single source of truth); Nix reads it

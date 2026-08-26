@@ -340,13 +340,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          nix build .#linuxIso --print-build-logs --out-link result-iso
-          nix build .#windows  --print-build-logs --out-link result-windows
+          nix build .#linuxIso        --print-build-logs --out-link result-iso
+          nix build .#windows-x86_64  --print-build-logs --out-link result-win-x86_64
+          nix build .#windows-aarch64 --print-build-logs --out-link result-win-aarch64
 
           # The same names the release uses, so an operator who has downloaded
           # both is not comparing `kmsrsos-x86_64.iso` against something else.
           cp result-iso out/kmsrsos-x86_64.iso
-          cp result-windows/bin/*.exe out/
+          for arch in x86_64 aarch64; do
+            cp "result-win-$arch/bin/kmsrs-server.exe" \
+               "out/kmsrs-server-windows-$arch.exe"
+            cp "result-win-$arch/bin/kmsrs-client.exe" \
+               "out/kmsrs-client-windows-$arch.exe"
+          done
 
       # Produced here, on the machine that built the artifacts, rather than in
       # the job that publishes them — the same reasoning as `release.yml`
@@ -447,7 +453,8 @@ jobs:
           | | |
           |---|---|
           | `kmsrsos-x86_64.iso` | the bootable image; upload it, attach it, boot it |
-          | `kmsrs-server.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+          | `kmsrs-server-windows-{x86_64,aarch64}.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+          | `kmsrs-client-windows-{x86_64,aarch64}.exe` | the diagnostic client, same build |
           | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksums |
 
           Verifying it is the same procedure as a release, with one difference —

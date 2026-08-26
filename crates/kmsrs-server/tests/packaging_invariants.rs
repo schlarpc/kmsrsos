@@ -209,10 +209,11 @@ fn the_snapshot_is_built_by_the_flake() {
     let root = workspace_root();
     let workflow = read(&root, ".github/workflows/test.yml");
 
-    for output in [".#linuxIso", ".#windows"] {
+    for output in [".#linuxIso", ".#windows-x86_64", ".#windows-aarch64"] {
         assert!(
             workflow.contains(output),
-            "the snapshot does not build {output} (PKG-015, #364)"
+            "the snapshot does not build {output} (PKG-015, #364; PKG-020, \
+             #379)"
         );
     }
     for bypass in [
@@ -636,7 +637,16 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         ".#deb",
         ".#rpm",
         ".#container",
-        ".#windows",
+        // The Windows targets (`PKG-020`, #379). There is no bare `.#windows`
+        // any more: it meant the x86_64 one, and a release artifact named
+        // after a default is one nobody can tell apart from the other. The
+        // client population that needs the second is going Arm — Snapdragon X
+        // and Windows Dev Kit natively, Apple Silicon by way of every
+        // hypervisor on it.
+        //
+        // Which architectures that expands to is asserted below, on the
+        // matrix, because the attribute here is parametrised.
+        ".#windows-${{ matrix.arch }}",
         // The bootable bare-metal ISO (`OS-017`, #333), on **both**
         // architectures since `PKG-019` (#378) — one attribute, built on each
         // leg, because a system's `linuxIso` is the image for that system.
@@ -702,6 +712,30 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         "the release still gates something on being the x86_64 leg. Since \
          `OS-033` (#377) there is an image for each architecture and the flake \
          decides which systems have one (PKG-019, #378)"
+    );
+
+    // `PKG-020` (#379): both Windows artifacts ship, named by architecture.
+    //
+    // Asserted on the names for the same reason the ISO's is: `.#windows-…`
+    // above proves a build, and a name proves what an operator downloads. The
+    // artifact used to be a bare `kmsrs-server.exe` from the x86_64 build, and
+    // a name that does not say which architecture it is is one nobody can act
+    // on the day there are two.
+    for name in [
+        "kmsrs-server-windows-${{ matrix.arch }}.exe",
+        "kmsrs-client-windows-${{ matrix.arch }}.exe",
+    ] {
+        assert!(
+            workflow.contains(name),
+            "the release does not attach {name}, so a Windows binary ships \
+             under a name that does not say which machine it runs on \
+             (PKG-020, #379)"
+        );
+    }
+    assert!(
+        workflow.contains("arch: [x86_64, aarch64]"),
+        "the Windows job is not matrixed over both architectures, so only one \
+         of them is built (PKG-020, #379)"
     );
 
     // And nothing bypasses the flake. A `cargo build` here would be a second
