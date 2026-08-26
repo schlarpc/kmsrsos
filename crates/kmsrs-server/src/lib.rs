@@ -35,6 +35,7 @@ pub mod net;
 pub mod platform;
 pub mod sandbox;
 pub mod server;
+pub mod service;
 pub mod web;
 
 pub use clock::WallClock;

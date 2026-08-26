@@ -873,3 +873,48 @@ fn the_rebuild_path_is_a_function_over_the_build_time_settings() {
         );
     }
 }
+
+/// `PKG-008` (#245): the binary's entry point goes through the service router.
+///
+/// Windows service support is invisible from Linux: it compiles, it is never
+/// exercised, and nothing about a Linux test run would notice if `main` went
+/// back to calling `entry::serve` directly. That change would leave the service
+/// module present, tested and unreachable — the process would start under the
+/// SCM, never call `StartServiceCtrlDispatcher`, and be killed after 30 seconds
+/// for failing to report `Running`.
+///
+/// So the wiring is asserted as text, which is the only thing a host-side test
+/// can see. `service::run` is `entry::serve` on every non-Windows target, so
+/// this costs those targets nothing.
+#[test]
+fn the_binary_starts_through_the_service_router() {
+    let root = workspace_root();
+    let main = read(&root, "crates/kmsrs-server/src/main.rs");
+
+    assert!(
+        main.contains("service::run()"),
+        "main must call `service::run()`, not `entry::serve()` directly \
+         (PKG-008, #245). Without it a Windows service start-up hangs and is \
+         killed by the SCM, and no Linux test would fail."
+    );
+
+    let service = read(&root, "crates/kmsrs-server/src/service.rs");
+    assert!(
+        service.contains("ERROR_FAILED_SERVICE_CONTROLLER_CONNECT") && service.contains("1063"),
+        "console-vs-service detection must stay keyed on \
+         ERROR_FAILED_SERVICE_CONTROLLER_CONNECT (PKG-008, #245): asking the \
+         operating system is the only way that cannot disagree with reality."
+    );
+
+    // `PKG-008` is explicit that there is no installer, because an installer is
+    // what produced both of vlmcsd's service bugs.
+    for forbidden in ["CreateServiceW", "CreateServiceA", "DeleteService"] {
+        assert!(
+            !service.contains(forbidden),
+            "{forbidden} means an install verb crept in. Installation is one \
+             documented `sc.exe create` line; an in-binary installer \
+             reintroduces the ImagePath password leak and the strcat overflow \
+             (PKG-008, #245)."
+        );
+    }
+}

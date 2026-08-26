@@ -100,6 +100,17 @@ landlock = "=0.4.7"
 # because the latter brings a COM runtime this program has no use for.
 windows-sys = "=0.61.2"
 
+# `PKG-008` (#245): the service control dispatcher, handler registration and
+# `SetServiceStatus` transitions.
+#
+# A dependency rather than more FFI, and deliberately. `SEC-019` (#356) reopened
+# the unsafe boundary for exactly one call and bounded it with a test that fails
+# if a second appears; service integration is four more `unsafe extern`
+# functions, and widening a boundary that was just argued down to one call —
+# for something a maintained safe wrapper already covers — is the wrong trade.
+# This is option 2 from #356, taken where it actually applies.
+windows-service = "=0.8.1"
+
 # `SEC-005` (#197): the syscall filter.
 #
 # `seccompiler` rather than `libseccomp`: pure Rust, no C library to link, and

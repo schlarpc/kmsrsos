@@ -14,8 +14,22 @@
 //! kept as documentation of a target nobody can build.
 //!
 //! Linux and Windows are what is left, and they differ in one thing this
+//! Linux and Windows are what is left, and they differ in one thing this
 //! program can observe: how the operating system asks it to stop. `ctrlc`
-//! handles both, so even that is not a branch here.
+//! handles both, so even that is not a branch here — and a Windows service,
+//! which is asked through the SCM rather than a console event, reaches the same
+//! handler through [`request_shutdown`] (`PKG-008`, #245).
+
+/// The installed handler, kept so a second caller can trigger it.
+///
+/// `PKG-008` (#245): a Windows service is not asked to stop by a console
+/// control event — it is asked through its service control handler, on a thread
+/// the SCM owns. That is the same event as `SIGTERM` as far as this program is
+/// concerned, so it runs the same handler rather than a parallel shutdown path
+/// that could drift from it.
+static ASKED_TO_STOP: Mutex<Option<Box<dyn FnMut() + Send>>> = Mutex::new(None);
+
+use std::sync::Mutex;
 
 /// A signal handler that could not be installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +65,29 @@ pub fn install_shutdown_handler<F>(handler: F) -> Result<(), SignalError>
 where
     F: FnMut() + Send + 'static,
 {
-    ctrlc::set_handler(handler).map_err(|error| SignalError(error.to_string()))
+    match ASKED_TO_STOP.lock() {
+        Ok(mut slot) => *slot = Some(Box::new(handler)),
+        Err(_) => {
+            return Err(SignalError(String::from(
+                "shutdown handler slot is poisoned",
+            )));
+        }
+    }
+    ctrlc::set_handler(request_shutdown).map_err(|error| SignalError(error.to_string()))
+}
+
+/// Run the installed shutdown handler, if there is one (`PKG-008`, #245).
+///
+/// Called by the console control handler on both targets, and by the Windows
+/// service control handler when the SCM sends `STOP` or `SHUTDOWN`. Doing
+/// nothing when no handler is installed is deliberate: the only window in which
+/// that happens is before the listeners exist, and there is nothing to drain.
+pub fn request_shutdown() {
+    if let Ok(mut slot) = ASKED_TO_STOP.lock()
+        && let Some(handler) = slot.as_mut()
+    {
+        handler();
+    }
 }
 
 #[cfg(test)]

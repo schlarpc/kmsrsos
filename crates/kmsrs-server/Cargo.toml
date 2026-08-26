@@ -58,6 +58,7 @@ socket2.workspace = true
 # the `[lints.rust]` note below.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
+windows-service.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true

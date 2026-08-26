@@ -111,6 +111,24 @@ where
     serve_inner(housekeeping, false)
 }
 
+/// Like [`serve`], but says when the listeners are up (`PKG-008`, #245).
+///
+/// `ready` is called at exactly the point [`serve_with`] describes — inside
+/// `block_on`, after the listeners are bound and before the driver accepts —
+/// which is the moment a Windows service must report `Running`. Reporting it
+/// when the process merely started would mean anything depending on this
+/// service starts before there is a listener to talk to.
+///
+/// Sandboxed, unlike [`serve_with`]: this is the hosted path, so it gives up
+/// what `SEC-005` (#197) and `SEC-019` (#356) say it should.
+#[must_use]
+pub fn serve_reporting_ready<F>(ready: F) -> ExitCode
+where
+    F: FnOnce(Housekeeping) + Send + 'static,
+{
+    serve_inner(ready, true)
+}
+
 /// The hosted entry point's body, with the sandbox decision made explicit.
 fn serve_inner<F>(housekeeping: F, sandboxed: bool) -> ExitCode
 where
