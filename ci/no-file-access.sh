@@ -10,11 +10,11 @@
 #
 # Linux only: it needs strace, and it reads /proc.
 #
-# Usage:  ci/no-file-access.sh <directory containing bin/kmsrsos and bin/kmsrs-client>
+# Usage:  ci/no-file-access.sh <directory containing bin/kmsrs-server and bin/kmsrs-client>
 set -euo pipefail
 
 package="${1:?usage: no-file-access.sh <nix build result directory>}"
-server="$package/bin/kmsrsos"
+server="$package/bin/kmsrs-server"
 client="$package/bin/kmsrs-client"
 log="${STRACE_LOG:-strace.log}"
 

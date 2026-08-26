@@ -286,15 +286,14 @@ fn the_server_executable_is_named_kmsrs_server() {
     // `kmsrsos` is still correct for the project, the container image, the ISO
     // and the metric namespace, and a test that banned the string outright
     // would be asserting something false.
-    for (file, relative) in [
-        ("flake.nix", "flake.nix"),
-        ("the unit", "deploy/systemd/kmsrs-server.service"),
-        ("the release workflow", ".github/workflows/release.yml"),
-        ("the test workflow", ".github/workflows/test.yml"),
-        ("deployment.md", "docs/deployment.md"),
-        ("releasing.md", "docs/releasing.md"),
-    ] {
-        let text = read(&root, relative);
+    //
+    // The list of files is **walked**, not enumerated. The first version of
+    // this test named six files and missed `ci/no-file-access.sh`, which runs
+    // the built binary under strace — so the rename it exists to police leaked
+    // straight past it and failed in CI. A test that has to be told where to
+    // look is a test that finds what somebody already thought of.
+    for (relative, text) in shipped_text_files(&root) {
+        let file = relative.as_str();
         for stale in [
             "bin/kmsrsos",
             "/usr/bin/kmsrsos",
@@ -310,6 +309,61 @@ fn the_server_executable_is_named_kmsrs_server() {
             );
         }
     }
+}
+
+/// Every text file in the tree that ships or describes what ships.
+///
+/// Walked rather than listed, and filtered by what is *not* interesting rather
+/// than by what is: `target/`, `.git/`, and the generated product data. A test
+/// that enumerates the files it checks can only catch the ones whoever wrote it
+/// remembered.
+fn shipped_text_files(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Hidden directories are caches and checkouts rather than the
+            // tree — `.direnv` holds whole copies of previous revisions of
+            // this repository, which match everything. `.github` is the one
+            // that is genuinely ours.
+            let skip = name.starts_with("result-")
+                || matches!(
+                    name.as_str(),
+                    "target" | "result" | "node_modules" | "vectors" | "seeds"
+                )
+                || (name.starts_with('.') && name != ".github");
+            if skip {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                // This file is the one naming the stale paths, so it would
+                // match every one of them.
+                if relative.ends_with("packaging_invariants.rs") {
+                    continue;
+                }
+                out.push((relative, text.replace("\r\n", "\n")));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    assert!(
+        out.len() > 50,
+        "only found {} text files, so this is not walking the tree",
+        out.len()
+    );
+    out
 }
 
 /// `PKG-005` (#242): the image is built from the local tree and nothing else.
