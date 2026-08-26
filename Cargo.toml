@@ -93,6 +93,13 @@ socket2 = { version = "=0.6.5" }
 # already proves nothing *opens* a file, and this makes the kernel enforce it.
 landlock = "=0.4.7"
 
+# `SEC-019` (#356): `SetProcessMitigationPolicy`, the only route to the five
+# self-applicable Windows mitigations. Pinned like everything else. It is
+# already in the lockfile via `socket2` and `tokio`, so this names a version
+# that is present rather than adding one — and `windows-sys` over `windows`
+# because the latter brings a COM runtime this program has no use for.
+windows-sys = "=0.61.2"
+
 # `SEC-005` (#197): the syscall filter.
 #
 # `seccompiler` rather than `libseccomp`: pure Rust, no C library to link, and

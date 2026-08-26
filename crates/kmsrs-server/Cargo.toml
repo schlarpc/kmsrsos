@@ -51,6 +51,14 @@ socket2.workspace = true
 # these two calls compiles on every target, and `SANDBOX_IS_AVAILABLE` is an
 # ordinary `const bool` whose branches are both compiled and tested everywhere.
 # The `cfg` reaches two functions, not a module.
+# `SEC-019` (#356): the five self-applicable process mitigations. Already in
+# the lockfile transitively, so naming it directly costs no new dependency —
+# only the `Threading` feature, which is where `SetProcessMitigationPolicy`
+# lives. This is the crate that makes the one unsafe boundary necessary; see
+# the `[lints.rust]` note below.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
 seccompiler.workspace = true
@@ -80,5 +88,46 @@ toml.workspace = true
 kmsrs-vectors.workspace = true
 kmsrs-client = { path = "../kmsrs-client" }
 
-[lints]
-workspace = true
+# This is the ONE manifest in the tree that does not say `[lints] workspace =
+# true`, and the reason is the single documented unsafe boundary (`SEC-019`,
+# #356). The workspace table forbids `unsafe_code`, and `forbid` cannot be
+# lifted by an inner `expect` — which is the property that makes it worth
+# setting there. Here it is `deny` instead, so the boundary must name itself
+# with an explicit `#[expect(unsafe_code)]` carrying a safety comment, and every
+# other line in the crate is still rejected.
+#
+# The duplication this forces is the obvious objection, and it is answered by a
+# test rather than by discipline: `server_lints_match_the_workspace` fails if
+# these tables drift from `[workspace.lints]` in any way other than that one
+# line.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+cast_precision_loss = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+mem_forget = "deny"
+integer_division = "deny"
+integer_division_remainder_used = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"

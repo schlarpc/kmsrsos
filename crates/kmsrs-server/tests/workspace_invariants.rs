@@ -183,8 +183,18 @@ fn dbgen_is_unreachable_from_every_shipped_binary() {
 /// `ARCH-008` (#8) and `SEC-001` (#193): a crate that forgets `[lints] workspace
 /// = true` opts silently out of the deny list *and* out of `forbid(unsafe_code)`
 /// — and nothing else in the build would notice.
+///
+/// `kmsrs-server` is the single exception (`SEC-019`, #356): it needs
+/// `unsafe_code` at `deny` so the one boundary can name itself, and `forbid`
+/// cannot be lifted by an inner `expect`. It does not get to skip the rest of
+/// the table for that — `server_lints_match_the_workspace` checks every other
+/// lint agrees, in both directions.
 #[test]
 fn every_crate_inherits_the_workspace_lint_table() {
+    /// The one crate permitted its own table, and only because of the
+    /// documented unsafe boundary (`SEC-019`, #356).
+    const BOUNDARY_CRATE: &str = "kmsrs-server";
+
     let root = workspace_root();
 
     let workspace = read_toml(&root.join("Cargo.toml"));
@@ -195,19 +205,38 @@ fn every_crate_inherits_the_workspace_lint_table() {
          than `deny` is deliberate: it cannot be lifted by an inner `allow`."
     );
 
+    let mut saw_exception = false;
     for (name, manifest_path) in crate_manifests(&root) {
         let manifest = read_toml(&manifest_path);
         let lints = manifest
             .get("lints")
             .unwrap_or_else(|| panic!("{name} has no [lints] table (ARCH-008, #8)"));
 
+        if name == BOUNDARY_CRATE {
+            saw_exception = true;
+            assert_eq!(
+                lints.get("workspace").and_then(toml::Value::as_bool),
+                None,
+                "{BOUNDARY_CRATE} defines its own lint table on purpose \
+                 (SEC-019, #356); if the boundary has gone, delete the table \
+                 and say `[lints] workspace = true` again."
+            );
+            continue;
+        }
+
         assert_eq!(
             lints.get("workspace").and_then(toml::Value::as_bool),
             Some(true),
-            "{name} must say `[lints] workspace = true`. No crate defines its own \
-             table any more (SEC-001, #193; OS-018, #334)."
+            "{name} must say `[lints] workspace = true`. {BOUNDARY_CRATE} is \
+             the only crate that defines its own (SEC-001, #193; SEC-019, #356)."
         );
     }
+
+    assert!(
+        saw_exception,
+        "{BOUNDARY_CRATE} was not among the workspace's crates, so this test is \
+         not looking at the right tree"
+    );
 }
 
 /// `ARCH-002` (#2) and axiom A7: the sans-io crates must stay `no_std`.
@@ -405,10 +434,9 @@ fn only_the_operational_config_can_be_deserialised() {
     );
 }
 
-/// `OS-013` (#264): the unsafe boundary is empty, and there is exactly one
-/// place it could ever be.
+/// `SEC-019` (#356): the unsafe boundary is one call, in one file.
 ///
-/// `SEC-001` (#193), `OS-013` (#264): no `unsafe` anywhere, at all.
+/// `SEC-001` (#193), `OS-013` (#264): no `unsafe` anywhere else.
 ///
 /// The workspace lint table sets `unsafe_code = "forbid"`, and `forbid` cannot
 /// be lifted by an inner `allow` — which is the property that makes it worth
@@ -416,16 +444,21 @@ fn only_the_operational_config_can_be_deserialised() {
 /// it with the weaker `deny`, so that the documented boundary would have to
 /// name itself with an explicit `#[expect(unsafe_code)]` and a safety comment.
 ///
-/// It never contained any. `OS-018` (#334) removed that crate along with
-/// Hermit, so the exception is gone and the statement is now the simple one:
-/// no shipped crate contains the word, not even in a comment. The over-reach is
-/// deliberate — a reader grepping this tree for `unsafe` should find nothing
-/// and never have to decide which hits are real.
+/// It never contained any, and `OS-018` (#334) removed it along with Hermit.
+/// The statement was then the simple one — no shipped crate contains the word
+/// at all — until `SEC-019` (#356) reopened it deliberately, in review, for the
+/// only thing that has ever needed it: `SetProcessMitigationPolicy`, which is
+/// an `unsafe extern` function in every binding that exists and has no safe
+/// wrapper on any crate. The alternative was leaving a Windows host
+/// unnecessarily unconfined, and `DisallowWin32kSystemCalls` alone was judged
+/// to be worth more than the grep property.
 ///
-/// The `OS-021` (#337) pid-1 work is where this would come under pressure,
-/// since `mount(2)` and `waitpid(2)` are syscalls. `rustix` is the answer and
-/// the reason it was chosen: safe bindings mean the boundary stays empty rather
-/// than reopening.
+/// So the rule is no longer "nowhere" but "exactly here, and nowhere else",
+/// which is why this test now counts rather than merely forbidding. A reader
+/// grepping this tree for `unsafe` finds one call site with a safety comment.
+///
+/// The `OS-021` (#337) pid-1 work does *not* use it: `mount(2)` and
+/// `waitpid(2)` go through `rustix`, and that is the reason it was chosen.
 #[test]
 fn no_shipped_crate_contains_unsafe() {
     let root = workspace_root();
@@ -457,13 +490,97 @@ fn no_shipped_crate_contains_unsafe() {
         }
     }
 
+    // The one boundary, named exactly. `SEC-019` (#356).
+    let boundary = Path::new("crates")
+        .join("kmsrs-server")
+        .join("src")
+        .join("sandbox.rs");
+    let (inside, outside): (Vec<_>, Vec<_>) = found
+        .iter()
+        .partition(|hit| hit.contains(&boundary.display().to_string()));
+
     assert!(
-        found.is_empty(),
-        "no crate in this workspace may contain `unsafe` (SEC-001, #193; \
-         OS-013, #264). If a boundary is genuinely needed, reopening it is a \
+        outside.is_empty(),
+        "`unsafe` appears outside the one documented boundary in \
+         {} (SEC-001, #193; OS-013, #264; SEC-019, #356). Widening it is a \
          decision for a review and this test is what should be updated in the \
-         same commit: {found:#?}"
+         same commit: {outside:#?}",
+        boundary.display()
     );
+    assert_eq!(
+        inside.len(),
+        1,
+        "the boundary is one call to SetProcessMitigationPolicy and nothing \
+         else (SEC-019, #356). If it has grown, say why in review rather than \
+         letting the count drift: {inside:#?}"
+    );
+}
+
+/// `SEC-019` (#356): `kmsrs-server`'s lint tables match the workspace's.
+///
+/// That crate is the one manifest that cannot say `[lints] workspace = true`,
+/// because the boundary above needs `unsafe_code` at `deny` rather than
+/// `forbid` — `forbid` cannot be lifted by an inner `expect`, which is the
+/// property that makes it worth setting at the root.
+///
+/// Duplicating a table is how it silently drifts, so the duplication is checked
+/// rather than trusted: every other lint must agree with `[workspace.lints]`,
+/// in both directions, so neither adding a lint at the root nor quietly
+/// relaxing one here can pass.
+#[test]
+fn server_lints_match_the_workspace() {
+    let root = workspace_root();
+    let workspace = read_toml(&root.join("Cargo.toml"));
+    let server = read_toml(&root.join("crates").join("kmsrs-server").join("Cargo.toml"));
+
+    let table = |manifest: &toml::Table, outer: &str, inner: &str| -> toml::Table {
+        manifest
+            .get(outer)
+            .and_then(toml::Value::as_table)
+            .and_then(|lints| lints.get(inner))
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    for group in ["rust", "clippy"] {
+        let mut expected = table(&workspace, "workspace.lints", group);
+        if expected.is_empty() {
+            expected = table(
+                workspace
+                    .get("workspace")
+                    .and_then(toml::Value::as_table)
+                    .unwrap_or(&toml::Table::new()),
+                "lints",
+                group,
+            );
+        }
+        let mut actual = table(&server, "lints", group);
+
+        // The one difference the exception exists for.
+        if group == "rust" {
+            assert_eq!(
+                expected.remove("unsafe_code"),
+                Some(toml::Value::String(String::from("forbid"))),
+                "the workspace no longer forbids `unsafe_code`, which is the \
+                 root of this whole arrangement (SEC-001, #193)"
+            );
+            assert_eq!(
+                actual.remove("unsafe_code"),
+                Some(toml::Value::String(String::from("deny"))),
+                "kmsrs-server must set `unsafe_code = \"deny\"` so the one \
+                 boundary names itself with `#[expect(unsafe_code)]` \
+                 (SEC-019, #356)"
+            );
+        }
+
+        assert_eq!(
+            actual, expected,
+            "kmsrs-server's [lints.{group}] has drifted from \
+             [workspace.lints.{group}]. The duplication exists only for \
+             `unsafe_code`; everything else must agree (SEC-019, #356)"
+        );
+    }
 }
 
 /// `ARCH-005` (#5): one driver, and no `[patch.crates-io]` anywhere.
