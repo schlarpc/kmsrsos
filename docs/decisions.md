@@ -75,6 +75,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
 | 41 | SRV weighting | RFC 2782's running-sum selection, **not** the `isqrt` formula `DISC-001` quoted from vlmcsd, [see below](#the-srv-weighting-is-the-specifications-not-vlmcsds-disc-001-143) (#143) |
 | 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
+| 43 | `TCP_NODELAY` | Left at the OS default, having been **measured** rather than assumed: Nagle cannot engage in this protocol, so the option is unobservable, [see below](#tcp_nodelay-is-unobservable-so-it-is-not-set-net-015-164) (#164) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -393,6 +394,45 @@ The weight-zero case is also the specification's rather than the common shortcut
 zero-weight record "a small chance of being selected", which the running-sum method produces for
 free; implementations that sort zero-weight records last never try them first, and since the
 recommended zone has *every* record at weight zero, that difference is the whole ordering.
+
+### `TCP_NODELAY` is unobservable, so it is not set (`NET-015`, #164)
+
+`NET-015` guessed that "Nagle likely never engages and the setting is probably unobservable", and
+declined to act on the guess. It is now measured, against Windows 11 Enterprise 25H2 through the
+harness in `harness/windows/`, and the guess was right for a reason worth writing down.
+
+**Nagle needs a second small write with the first still unacknowledged.** This protocol never
+produces one. The driver does exactly one `write_all` per request it has read (`NET-006`, #156), and
+a client's next request always carries the ACK for the previous response — so at the moment the
+server writes, there is never unacknowledged data outstanding.
+
+The obvious objection is pipelining, where two requests arrive in one segment and the driver answers
+with two writes back to back. That was tested directly, by replaying two complete request PDUs in a
+single write from the guest:
+
+| | server response segments | turnaround |
+|---|---|---|
+| OS default (Nagle on) | `[108, 56, 600]` | 0.135 / 0.089 / 0.224 ms |
+| `TCP_NODELAY` set | `[108, 56, 600]` | 0.143 / 0.095 / 0.227 ms |
+
+Identical segmentation, and turnarounds separated by microseconds of noise. The two 300-byte
+responses leave as **one 600-byte segment either way**, because both writes complete within the same
+event-loop turn and the socket buffer coalesces them before anything is transmitted. Nagle does the
+coalescing it exists to do and costs nothing, because there was never a round trip to wait for.
+
+So the option is not "off because we prefer it off". It is *not set*, because setting it would be a
+syscall per connection and a line of code claiming to prevent a stall that cannot occur — and a
+reader would reasonably infer from its presence that one could.
+
+This also settles the anti-fingerprinting half, which is the part `FP-027` (#265) cares about:
+whatever a genuine Microsoft host does with `TCP_NODELAY` is equally unobservable, so parity is
+automatic rather than something to maintain. The measurable TCP-layer differences are the ones
+`FP-027` already names — they are properties of the host OS stack, not of this program.
+
+One limit on the above: it was measured over QEMU user-mode networking, where the round trip is
+sub-millisecond. That does not weaken it, because the argument is structural — the write pattern is
+fixed by the protocol and does not change with latency — but a capture across a real network has not
+been taken.
 
 ### The sandbox is what could be verified (`SEC-005`, #197)
 
@@ -795,3 +835,22 @@ The check runs on every PR and is self-validating: a second build with `--featur
 must **fail** the audit, because a check that has never been observed failing is not a check. Both
 builds need nightly for `-Zbuild-std`, which is confined to `nix develop .#fuzz` and is the same
 nightly the fuzzers use; nothing that ships is built with it.
+
+<a id="d43"></a>**D43 — An mDNS responder for `_vlmcs._tcp.local` (`DISC-005`, #147).** Declined on
+measurement, not on taste. `DISC-003` (#145) asked whether SPP's SRV lookup goes through the generic
+Windows DNS Client path, which handles `.local` via mDNS. It does — and **that path has no code for
+SRV.** Using plain `Resolve-DnsName` on Windows 11 25H2, with no licensing involved, `A` and `AAAA`
+for a `.local` name go to unicast *and* to `224.0.0.251`/`ff02::fb`; `SRV` and `PTR` for one never
+leave unicast. The DNS Client's mDNS support is an address-record resolver, and DNS-SD on Windows
+lives in a separate WinRT stack (`Windows.Networking.ServiceDiscovery.Dnssd`) that SPP does not
+call.
+
+A responder would therefore answer a question Windows never asks, and no configuration on either
+side changes that. This is the sibling of **D32**: LLMNR cannot carry SRV at all, and mDNS can but
+will not be asked. Evidence and captures: `docs/discovery-findings.md`, scenarios `H-dhcp15-local`
+and `W-why-mdns`.
+
+What survives is the *hostname* half, which does work: `slmgr /skms kmsrsos.local` resolves by mDNS,
+giving a name that survives DHCP address changes with no DNS server and no hosts file. Shipping a
+hostname-only mDNS responder for that is a different proposition from this one and is not declined
+here — it simply has no issue yet.

@@ -88,3 +88,23 @@ python3 analyze.py captures/foo.pcap   # what was asked, on which channel
   practice. Irrelevant unless the build refuses skewed requests.
 - `analyze.py` reports questions only. Responses are in the pcap and are not
   summarised.
+
+## The pipelining probe (`NET-015`, #164)
+
+`pipeline-probe.ps1` replays a captured bind / alter_context / request sequence
+and then sends **two complete request PDUs in one write**, which is the only
+shape in this protocol that gives Nagle a second small write to hold. Copy it in
+and run it:
+
+```sh
+scp -i "$KMSRSOS_VM_DIR/id_vm" -P 2222 pipeline-probe.ps1 kms@127.0.0.1:C:/probe.ps1
+./win.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\probe.ps1'
+```
+
+Wrap it in a `filter-dump` the way `scenario.sh` does; the client-side read
+timings it prints are far less trustworthy than the capture, because PowerShell
+adds tens of milliseconds of its own between steps. The finding is in
+`docs/decisions.md` under decision 43.
+
+The PDUs are hard-coded from a real client capture rather than generated,
+because the point is to replay exactly what Windows sent.
