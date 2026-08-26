@@ -393,6 +393,48 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         "OS-019: kmsrs-os speaks DHCP itself",
     ),
     ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    // `OS-035` (#383): the 8250 driver's variants, every one of which was
+    // `default SERIAL_8250` and arrived with the console rather than being
+    // asked for. Two PCIe card families, the PnP bus, and two Intel SoC
+    // UARTs; no hypervisor in the matrix emulates any of them.
+    //
+    // `SERIAL_8250_CONSOLE` is untouched and is asserted present below, which
+    // is the pair that matters: this machine keeps the driver that finds a
+    // PC's serial port at 0x3F8 and a Graviton's over PCI, and loses the five
+    // that find hardware no guest has.
+    (
+        "SERIAL_8250_EXAR",
+        Absence::TurnedOff,
+        "Exar and Commtech multiport PCIe cards",
+    ),
+    (
+        "SERIAL_8250_PERICOM",
+        Absence::TurnedOff,
+        "Pericom and Acces I/O PCIe UARTs",
+    ),
+    (
+        "SERIAL_8250_PNP",
+        Absence::TurnedOff,
+        "OS-035: ttyS0 comes from SERIAL_PORT_DFNS here, not the PnP bus",
+    ),
+    (
+        "SERIAL_8250_LPSS",
+        Absence::TurnedOff,
+        "Intel Baytrail, Braswell and Quark SoC UARTs",
+    ),
+    (
+        "SERIAL_8250_MID",
+        Absence::TurnedOff,
+        "Intel Medfield SoC UARTs",
+    ),
+    // Unreachable rather than off, and that is the interesting half: it has no
+    // prompt of its own and exists only to be `select`ed by the two above, so
+    // disabling them removes it from the configuration entirely.
+    (
+        "SERIAL_8250_DWLIB",
+        Absence::Unreachable,
+        "selected by LPSS and MID, both of which are off",
+    ),
     // Power management this machine has no use for, and which would let a
     // hypervisor suspend a host that is meant to answer.
     (
@@ -549,6 +591,39 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         "OS-019: kmsrs-os speaks DHCP itself",
     ),
     ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    // `OS-035` (#383). The same three as x86, disabled on the same shared
+    // list, because both architectures had answered `y` unasked and neither
+    // had said so.
+    (
+        "SERIAL_8250_EXAR",
+        Absence::TurnedOff,
+        "Exar and Commtech multiport PCIe cards",
+    ),
+    (
+        "SERIAL_8250_PERICOM",
+        Absence::TurnedOff,
+        "Pericom and Acces I/O PCIe UARTs",
+    ),
+    // The one that needed an argument rather than a reading. There is no
+    // `arch/arm64/include/asm/serial.h`, so the ISA table x86 gets its ttyS0
+    // from is empty here and every port arrives over PCI, ACPI or DT. On the
+    // one machine in the matrix whose console is a 16550A — an EC2 Graviton
+    // instance — the kernel says `pci 0000:00:01.0: [1d0f:8250]` and then
+    // `ttyS0 at MMIO 0x80000000 … is a 16550A`. A PCI device, bound by
+    // `SERIAL_8250_PCI`, which stays.
+    (
+        "SERIAL_8250_PNP",
+        Absence::TurnedOff,
+        "OS-035: Graviton's 16550A is a PCI device, not a PnP one",
+    ),
+    // Unreachable here rather than merely off, and for a different reason than
+    // on x86: the two symbols that `select` it are `depends on X86`, so this
+    // architecture never had it to turn off.
+    (
+        "SERIAL_8250_DWLIB",
+        Absence::Unreachable,
+        "selected only by the x86-only LPSS and MID drivers",
+    ),
     (
         "SUSPEND",
         Absence::TurnedOff,
@@ -581,6 +656,9 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-032: perf_event_open(2) has no user in a one-program image",
     ),
+    // Deliberately *not* paired with an entry on the x86 list, which would be
+    // an assertion that cannot hold — see
+    // [`perf_events_is_absent_on_one_target_and_forced_on_the_other`].
     (
         "THERMAL_OF",
         Absence::TurnedOff,
@@ -864,6 +942,50 @@ fn every_driver_the_platform_matrix_needs_is_in() {
             target.arch
         );
     }
+}
+
+/// **`OS-035` (#383): the one asymmetry between the two kernels, stated.**
+///
+/// `perf_event_open(2)` exists on the x86_64 machine and not on the aarch64
+/// one. #383 filed that as a gap to close, on the reasonable grounds that a
+/// large syscall with a JIT-adjacent history has no user in an image
+/// containing one program, and that nobody had *chosen* the difference —
+/// each architecture's `tinyconfig` had simply answered differently.
+///
+/// It cannot be closed. `arch/x86/Kconfig` gives `config X86` an unconditional
+/// `select PERF_EVENTS`, so there is no x86 kernel without it at any Kconfig
+/// setting; disabling it and running `olddefconfig` produces a byte-identical
+/// configuration. Naming it on the shared disable list would therefore have
+/// been an entry that cannot be honoured — precisely the thing `OS-034` (#382)
+/// had just finished removing three of.
+///
+/// So what is asserted is the *fact*, per target, rather than a wish. This is
+/// the only place in this file where a symbol's presence is asserted for a
+/// reason that is not "a platform needs it", which is why it is a test of its
+/// own rather than a row in [`X86_64_MUST_BE_PRESENT`]: nothing needs perf
+/// here, and the day x86 stops forcing it — or aarch64 starts acquiring it as
+/// somebody's dependency — this fails and the statement gets revisited instead
+/// of quietly going stale.
+#[test]
+fn perf_events_is_absent_on_one_target_and_forced_on_the_other() {
+    let of = |arch: &str| -> String {
+        let target = TARGETS
+            .iter()
+            .find(|target| target.arch == arch)
+            .unwrap_or_else(|| panic!("no {arch} target"));
+        built_config(target)
+    };
+
+    assert!(
+        enabled(&of("x86_64"), "PERF_EVENTS"),
+        "CONFIG_PERF_EVENTS is off in the x86_64 kernel. That is a better          answer than the one `OS-035` (#383) had to settle for — but it means          `config X86` no longer carries an unconditional `select PERF_EVENTS`,          so the reasoning written into `os/linux/config.nix` is now wrong.          Put it on the shared disable list and delete this half of the test"
+    );
+
+    let arm = of("aarch64");
+    assert!(
+        mentioned(&arm, "PERF_EVENTS") && !enabled(&arm, "PERF_EVENTS"),
+        "CONFIG_PERF_EVENTS is on in the aarch64 kernel, so both targets now          have `perf_event_open(2)` and the one architecture that could refuse          it has stopped (`OS-032`, #376; `OS-035`, #383)"
+    );
 }
 
 /// Nothing is a module, because `CONFIG_MODULES` is off.

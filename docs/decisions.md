@@ -1109,3 +1109,41 @@ media whose arm audience has no firmware that can run them. The arm image's clai
 
 Two images, named by architecture. If this is ever revisited it should be as its own issue with the
 sizes measured, and this paragraph is the reason it was not done in #377.
+
+<a id="d45"></a>**D45 — Naming the idle ethernet vendor menus on the disable list (`OS-035`,
+#383).** Both kernels carry about seventy `CONFIG_NET_VENDOR_*=y` entries with no driver enabled
+under any of them. They read like seventy decisions nobody took, and #383 raised them as "how a
+driver arrives later without anybody asking".
+
+Measured before being argued about, which is the point: `.#linux-deltas` has a `no-vendor-menus`
+variant that turns off every one of them, and the delta is **0 bytes on both architectures**. A
+`NET_VENDOR_X` is a `bool … default y` whose only effect is that `drivers/net/ethernet/Makefile`
+descends into that vendor's directory, where every object is gated by a driver symbol of its own —
+all of which are off. Nothing is compiled either way.
+
+So the choice is seventy lines of allowlist against zero bytes and no behaviour change, and seventy
+lines that change nothing make the file *harder* to read as a statement — which is what it is for.
+The guard against a driver arriving unasked is not this list: it is that `kernel.config` is checked
+in, so a new `=y` line appears in a diff somebody reviews. That is the same mechanism that caught
+every finding in `OS-023` (#339), `OS-026` (#343) and `OS-034` (#382).
+
+The variant stays, so the number can be taken again rather than trusted from this paragraph. What
+`OS-035` *did* remove from the same file is worth 8 KiB on each architecture — five 8250 driver
+variants for hardware no hypervisor emulates — which is the shape of pare-back this list is for.
+
+<a id="d46"></a>**D46 — `PERF_EVENTS` off on x86_64 (`OS-035`, #383).** Not declined on a judgement:
+it cannot be done. `arch/x86/Kconfig` gives `config X86` an unconditional `select PERF_EVENTS`, so
+there is no x86 kernel without `perf_event_open(2)` at any Kconfig setting — disabling it and
+running `olddefconfig` produces a byte-identical configuration.
+
+#383 filed it as a real gap, and it was: aarch64 disables it and x86 does not, so the two kernels
+this project ships differ on whether a large syscall with a JIT-adjacent history exists, and nobody
+chose that. Naming it on the shared disable list would have produced an entry that cannot be
+honoured — the exact thing `OS-034` (#382) had just removed three of, and had just built a test
+against.
+
+What is done instead is that the fact is asserted per target:
+`perf_events_is_absent_on_one_target_and_forced_on_the_other` in `kernel_tcb.rs`. If x86 ever stops
+forcing it, that test fails and this paragraph gets revisited rather than quietly going stale. On
+aarch64, where the question can be asked, keeping it out is worth **56 KiB** — `perf-events` in
+`.#linux-deltas`.

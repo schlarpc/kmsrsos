@@ -626,6 +626,45 @@
         };
       };
 
+      # Every ethernet vendor menu that gates nothing either image enables
+      # (`OS-035`, #383).
+      #
+      # These are menus, not drivers: `NET_VENDOR_X` is a `bool … default y`
+      # whose only effect is that `drivers/net/ethernet/Makefile` descends into
+      # that vendor's directory, where every object is gated by a driver symbol
+      # of its own — all of which are off. So the expected delta is zero, and
+      # this variant exists to say that with a number rather than an argument,
+      # because "harmless" is the word every inert entry in `config.nix` was
+      # described with before somebody measured it.
+      #
+      # The four the aarch64 list adds are the vendors whose drivers are x86
+      # rows of the `OS-025` (#342) matrix — Realtek, AMD, DEC — plus HiSilicon,
+      # which only exists on arm.
+      idleVendorMenus = [
+        "NET_VENDOR_3COM" "NET_VENDOR_8390" "NET_VENDOR_ADAPTEC"
+        "NET_VENDOR_AGERE" "NET_VENDOR_ALACRITECH" "NET_VENDOR_ALTEON"
+        "NET_VENDOR_AQUANTIA" "NET_VENDOR_ARC" "NET_VENDOR_ASIX"
+        "NET_VENDOR_ATHEROS" "NET_VENDOR_BROADCOM" "NET_VENDOR_BROCADE"
+        "NET_VENDOR_CADENCE" "NET_VENDOR_CAVIUM" "NET_VENDOR_CHELSIO"
+        "NET_VENDOR_CISCO" "NET_VENDOR_CORTINA" "NET_VENDOR_DAVICOM"
+        "NET_VENDOR_DLINK" "NET_VENDOR_EMULEX" "NET_VENDOR_ENGLEDER"
+        "NET_VENDOR_EZCHIP" "NET_VENDOR_FUNGIBLE" "NET_VENDOR_GOOGLE"
+        "NET_VENDOR_HUAWEI" "NET_VENDOR_I825XX" "NET_VENDOR_LITEX"
+        "NET_VENDOR_MARVELL" "NET_VENDOR_MELLANOX" "NET_VENDOR_META"
+        "NET_VENDOR_MICREL" "NET_VENDOR_MICROCHIP" "NET_VENDOR_MICROSEMI"
+        "NET_VENDOR_MICROSOFT" "NET_VENDOR_MYRI" "NET_VENDOR_NATSEMI"
+        "NET_VENDOR_NETERION" "NET_VENDOR_NETRONOME" "NET_VENDOR_NI"
+        "NET_VENDOR_NVIDIA" "NET_VENDOR_OKI" "NET_VENDOR_PACKET_ENGINES"
+        "NET_VENDOR_PENSANDO" "NET_VENDOR_QLOGIC" "NET_VENDOR_QUALCOMM"
+        "NET_VENDOR_RDC" "NET_VENDOR_RENESAS" "NET_VENDOR_ROCKER"
+        "NET_VENDOR_SAMSUNG" "NET_VENDOR_SEEQ" "NET_VENDOR_SILAN"
+        "NET_VENDOR_SIS" "NET_VENDOR_SMSC" "NET_VENDOR_SOCIONEXT"
+        "NET_VENDOR_SOLARFLARE" "NET_VENDOR_STMICRO" "NET_VENDOR_SUN"
+        "NET_VENDOR_SYNOPSYS" "NET_VENDOR_TEHUTI" "NET_VENDOR_TI"
+        "NET_VENDOR_VERTEXCOM" "NET_VENDOR_VIA" "NET_VENDOR_WANGXUN"
+        "NET_VENDOR_WIZNET" "NET_VENDOR_XILINX"
+      ];
+
       # What `.#linux-deltas` measures, per architecture.
       #
       # Two lists rather than one, because a delta is only meaningful against a
@@ -664,6 +703,33 @@
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
 
+          # `OS-035` (#383): the 8250 variants this kernel no longer builds —
+          # the two PCIe card families and the PnP bus named in `common`, plus
+          # the two Intel SoC UARTs that are x86-only symbols.
+          #
+          # Asked in the *enable* direction, and that is not a style choice.
+          # They are off in the checked-in configuration, so a `disable`
+          # variant would turn off what is already off and report a delta of
+          # exactly zero — the `no-smp` trap below, and the trap `OS-035` found
+          # six x86 variants already sitting in: a driver that is in the
+          # baseline cannot be priced by adding it. What this measures is what
+          # they would cost to put back, which is the same number in the other
+          # sign.
+          serial-8250-variants = [
+            "SERIAL_8250_EXAR" "SERIAL_8250_PERICOM" "SERIAL_8250_PNP"
+            "SERIAL_8250_LPSS" "SERIAL_8250_MID"
+          ];
+
+          # There is no `no-perf-events` here, and its absence is a finding
+          # rather than an omission (`OS-035`, #383). `config X86` carries an
+          # unconditional `select PERF_EVENTS`, so the variant would produce a
+          # configuration identical to the baseline and a delta of exactly
+          # zero — a number that reads as "perf is free" and means "the
+          # question could not be asked". Same shape as `no-smp` on aarch64
+          # below. `os/linux/config.nix` is where the reason is written down.
+
+          # What the idle vendor menus cost to keep, all sixty-five of them.
+          no-vendor-menus = { disable = idleVendorMenus; };
         };
 
         aarch64 = {
@@ -708,6 +774,26 @@
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
 
+          # `OS-035` (#383). Two of the three questions #383 asks have a number
+          # on this architecture and one of them has a number *only* here.
+          #
+          # `perf-events` is asked in the opposite direction from everything
+          # else in this list: it is off in the baseline, so this is what
+          # `perf_event_open(2)` would cost to *add*. x86 has no counterpart,
+          # because there the symbol cannot be turned off at all.
+          perf-events = [ "PERF_EVENTS" ];
+          # Three here rather than five: `SERIAL_8250_LPSS` and
+          # `SERIAL_8250_MID` are `depends on X86`. In the enable direction for
+          # the reason the x86 list gives.
+          serial-8250-variants = [
+            "SERIAL_8250_EXAR" "SERIAL_8250_PERICOM" "SERIAL_8250_PNP"
+          ];
+          no-vendor-menus = {
+            disable = idleVendorMenus ++ [
+              "NET_VENDOR_AMD" "NET_VENDOR_DEC" "NET_VENDOR_HISILICON"
+              "NET_VENDOR_REALTEK"
+            ];
+          };
         };
       };
 
