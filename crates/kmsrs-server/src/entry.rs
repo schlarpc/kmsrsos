@@ -476,21 +476,34 @@ fn record_panics() {
 /// not, and the whole point of `Applied::Failed` being distinct from
 /// `Applied::NotOnThisTarget` is that the two are different facts.
 fn report_sandbox(logger: Logger, report: crate::sandbox::Report) {
-    for (measure, applied) in report.each() {
+    for (severity, detail) in describe_sandbox(report) {
+        logger.message(severity, "sandbox", &detail);
+    }
+}
+
+/// One line per measure, without emitting any of them (`SEC-020`, #392).
+///
+/// Split out of [`report_sandbox`] for the reason [`Logger::format_message`]
+/// is split out of [`Logger::message`]: what a refusal *says* is the part with
+/// a defect in it, and asserting on it should not need a subprocess and a
+/// captured pipe. `sandbox::Report` is `Copy`, so a synthetic one costs a test
+/// a struct literal.
+fn describe_sandbox(report: crate::sandbox::Report) -> [(Severity, String); 4] {
+    report.each().map(|(measure, applied)| {
         let severity = match applied {
             // Not fatal, and not a warning either on a target that never had
             // the feature — that is a fact about the platform, not a problem.
             crate::sandbox::Applied::Yes | crate::sandbox::Applied::NotOnThisTarget => {
                 Severity::Debug
             }
-            crate::sandbox::Applied::Failed => Severity::Warn,
+            crate::sandbox::Applied::Failed | crate::sandbox::Applied::FailedInPart(_) => {
+                Severity::Warn
+            }
         };
-        logger.message(
-            severity,
-            "sandbox",
-            &format!("{measure}: {}", applied.as_text()),
-        );
-    }
+        // `Display` rather than `as_text`, which is the whole of `SEC-020`
+        // (#392): a partially refused measure names the components it lost.
+        (severity, format!("{measure}: {applied}"))
+    })
 }
 
 /// Read the clock once, draw the identity, and assemble the server.
@@ -552,4 +565,110 @@ fn today() -> Option<(kmsrs_db::Date, kmsrs_proto::time::FileTime)> {
     let days = i32::try_from(seconds.checked_div(SECONDS_PER_DAY)?).ok()?;
     let wall = kmsrs_proto::time::FileTime::from_unix_seconds(i64::try_from(seconds).ok()?)?;
     Some((kmsrs_db::Date::from_days_since_epoch(days), wall))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "test code: a failed expectation should abort loudly"
+    )]
+
+    use super::describe_sandbox;
+    use crate::config::operational::{LogFormat, LogLevel};
+    use crate::log::{Logger, Severity};
+    use crate::sandbox::{Applied, Refusals, Report};
+
+    /// The five Windows process mitigation policies, in the order they are
+    /// applied.
+    ///
+    /// Written out here rather than reached for across the `cfg(windows)`
+    /// module boundary, so this test runs on every platform. What is under
+    /// test is the *reporting* path, which is platform-independent by
+    /// construction (`SEC-020`, #392) — and a defect that only a Windows
+    /// runner could catch is one this project would find in production.
+    const POLICIES: [&str; 5] = [
+        "win32k",
+        "dynamic-code",
+        "extension-points",
+        "image-load",
+        "strict-handles",
+    ];
+
+    /// `SEC-020` (#392): a partial refusal names what was refused.
+    ///
+    /// The regression this exists for is the one the issue describes: the
+    /// report said `process-mitigations: refused by the kernel` and an
+    /// operator could not tell whether the win32k policy — by a wide margin
+    /// the most valuable of the five — was among them. So this asserts on the
+    /// names in the line, not on the severity: a test that checked only that
+    /// the severity became `Warn` passed throughout the defect.
+    #[test]
+    fn a_partial_refusal_names_the_policies_in_the_log_line() {
+        // win32k and image-load refused; the other three accepted.
+        let report = Report {
+            process_mitigations: Applied::FailedInPart(Refusals::new(&POLICIES, 0b0000_1001)),
+            ..Report::NOTHING
+        };
+
+        let (severity, detail) = describe_sandbox(report)
+            .into_iter()
+            .find(|(_, detail)| detail.starts_with("process-mitigations:"))
+            .expect("the report has a process-mitigations line");
+
+        assert_eq!(severity, Severity::Warn);
+        assert!(detail.contains("win32k"), "{detail}");
+        assert!(detail.contains("image-load"), "{detail}");
+        assert!(
+            !detail.contains("dynamic-code"),
+            "an accepted policy is named as refused: {detail}"
+        );
+        assert!(
+            !detail.contains("strict-handles"),
+            "an accepted policy is named as refused: {detail}"
+        );
+
+        // And it survives the formatter, because the line an operator reads is
+        // the emitted one and `harness/windows/arm64-smoke.ps1` parses exactly
+        // this shape out of the JSON.
+        let line = Logger::with(LogLevel::Debug, LogFormat::Json, false)
+            .format_message(severity, "sandbox", &detail)
+            .expect("a warning is emitted at debug level");
+        assert!(
+            line.contains(
+                r#""detail":"process-mitigations: refused by the kernel (win32k, image-load)""#
+            ),
+            "{line}"
+        );
+    }
+
+    /// A measure refused whole still reports, with no empty parenthesis.
+    ///
+    /// Linux's Landlock is one thing rather than five, so it has no components
+    /// to name and must not grow a `()` suggesting the names went missing.
+    #[test]
+    fn a_whole_measure_refused_reads_as_before() {
+        let report = Report {
+            filesystem: Applied::Failed,
+            ..Report::NOTHING
+        };
+        let (severity, detail) = describe_sandbox(report)
+            .into_iter()
+            .find(|(_, detail)| detail.starts_with("filesystem:"))
+            .expect("the report has a filesystem line");
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(detail, "filesystem: refused by the kernel");
+    }
+
+    /// Every measure gets a line, and an applied one is not a warning.
+    #[test]
+    fn nothing_refused_is_four_debug_lines() {
+        let described = describe_sandbox(Report::NOTHING);
+        assert_eq!(described.len(), 4);
+        for (severity, detail) in described {
+            assert_eq!(severity, Severity::Debug, "{detail}");
+        }
+    }
 }

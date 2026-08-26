@@ -116,6 +116,17 @@ pub enum Applied {
     ///
     /// [D35]: https://github.com/schlarpc/kmsrsos/blob/main/docs/decisions.md
     Failed,
+    /// Attempted, and refused in part: these named components did not take.
+    ///
+    /// The composite case of [`Applied::Failed`], for a measure that is
+    /// several independently-applicable pieces rather than one — Windows'
+    /// five process mitigation policies are the only such measure today. The
+    /// distinction is the same one [`Applied::NotOnThisTarget`] draws one
+    /// level up: "some of this measure was refused" is not a fact until it
+    /// says *which*, because `ProcessSystemCallDisablePolicy` being refused
+    /// and `ProcessStrictHandleCheckPolicy` being refused are materially
+    /// different security postures (`SEC-020`, #392).
+    FailedInPart(Refusals),
 }
 
 impl Applied {
@@ -125,8 +136,100 @@ impl Applied {
         match self {
             Self::Yes => "applied",
             Self::NotOnThisTarget => "not available on this target",
-            Self::Failed => "refused by the kernel",
+            Self::Failed | Self::FailedInPart(_) => "refused by the kernel",
         }
+    }
+}
+
+/// How this reads in a log line, refusals named (`SEC-020`, #392).
+///
+/// [`Applied::as_text`] is the verdict alone and stays `&'static str` because
+/// most callers want only that. This is the verdict plus, for
+/// [`Applied::FailedInPart`], the components that were refused — which is what
+/// the start-up report prints, because an operator who learns only that a
+/// mitigation was refused has learnt almost nothing.
+impl core::fmt::Display for Applied {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.as_text())?;
+        if let Self::FailedInPart(refusals) = self {
+            write!(formatter, " ({refusals})")?;
+        }
+        Ok(())
+    }
+}
+
+/// Which components of a composite measure the kernel refused (`SEC-020`,
+/// #392).
+///
+/// A fixed name table and a bitmask over it, which is what lets [`Report`]
+/// carry an attributed refusal and stay `Copy` and platform-independent: no
+/// allocation, no lifetime, and nothing Windows-shaped for the Linux and
+/// bare-metal reports to leave empty. The table is a `const` in the platform
+/// module that owns the measure, so the names in the log line are the same
+/// names the code applies, in the same order.
+///
+/// Bits above `names.len()` are ignored rather than being a way to name a
+/// component that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refusals {
+    /// Every component of the measure, in the order it is applied.
+    names: &'static [&'static str],
+    /// Bit *n* set means `names[n]` was refused.
+    mask: u32,
+}
+
+impl Refusals {
+    /// The most components a measure may have.
+    ///
+    /// The width of the mask. Asserted at the point of construction rather
+    /// than left to truncate silently, because a sixth policy added to a
+    /// 32-entry table is a thing that would work and a thirty-third is not.
+    pub const MAX_COMPONENTS: usize = u32::BITS as usize;
+
+    /// Attribute a refusal to components of `names`.
+    ///
+    /// # Panics
+    ///
+    /// If `names` is longer than [`Refusals::MAX_COMPONENTS`]. That is a
+    /// programming error in the platform module's table, not a runtime
+    /// condition, and every caller's table is a `const`.
+    #[must_use]
+    pub const fn new(names: &'static [&'static str], mask: u32) -> Self {
+        assert!(
+            names.len() <= Self::MAX_COMPONENTS,
+            "a measure has more components than the refusal mask has bits"
+        );
+        Self { names, mask }
+    }
+
+    /// Nothing refused.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.mask == 0
+    }
+
+    /// The refused components, in the order they are applied.
+    pub fn iter(self) -> impl Iterator<Item = &'static str> {
+        self.names
+            .iter()
+            .enumerate()
+            .filter(move |&(index, _)| {
+                u32::try_from(index).is_ok_and(|bit| self.mask & (1 << bit) != 0)
+            })
+            .map(|(_, name)| *name)
+    }
+}
+
+/// The refused components, comma-separated, for the start-up report.
+impl core::fmt::Display for Refusals {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (position, name) in self.iter().enumerate() {
+            if position > 0 {
+                formatter.write_str(", ")?;
+            }
+            formatter.write_str(name)?;
+        }
+        Ok(())
     }
 }
 
@@ -383,13 +486,14 @@ mod platform {
     //! it to work and is not a test. Control Flow Guard produced an artifact
     //! whose header made an honest claim and which died before logging a line.
     //!
-    //! A refusal remains non-fatal: [`apply`] reports `Failed` rather than
-    //! aborting, because "this kernel declined a mitigation" happens on older
-    //! builds and is not a reason to stop serving. What it does not yet do is
-    //! say *which* — [`refused`] knows and `apply` discards it, which is
-    //! `SEC-020` (#392).
+    //! A refusal remains non-fatal: [`apply`] reports
+    //! [`Applied::FailedInPart`] rather than aborting, because "this kernel
+    //! declined a mitigation" happens on older builds and is not a reason to
+    //! stop serving. It names the policies it names, because five policies
+    //! reported as one line saying "refused" is a report an operator cannot
+    //! act on — `SEC-020` (#392).
 
-    use super::{Applied, Report};
+    use super::{Applied, Refusals, Report};
     use windows_sys::Win32::System::Threading::{
         PROCESS_MITIGATION_POLICY, ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy,
         ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy, ProcessSystemCallDisablePolicy,
@@ -451,27 +555,57 @@ mod platform {
         accepted != 0
     }
 
+    /// The policy names alone, in [`POLICIES`] order.
+    ///
+    /// Derived from the one table rather than written a second time: a name
+    /// list that could drift from the list of what is applied would put a
+    /// wrong policy name in a security report, which is worse than no name.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "a const block: an index past the table is a compile error, not a panic"
+    )]
+    const POLICY_NAMES: [&str; POLICIES.len()] = {
+        let mut names = [""; POLICIES.len()];
+        let mut index = 0;
+        while index < POLICIES.len() {
+            names[index] = POLICIES[index].0;
+            index += 1;
+        }
+        names
+    };
+
     /// Which policies this process failed to apply, in [`POLICIES`] order.
     ///
     /// Separate from [`apply`] so a refusal can be attributed to a policy
-    /// rather than reported as a bare "something failed".
-    fn refused() -> Vec<&'static str> {
-        POLICIES
-            .into_iter()
-            .filter(|&(_, policy, flags)| !set(policy, flags))
-            .map(|(name, _, _)| name)
-            .collect()
+    /// rather than reported as a bare "something failed" — and returning
+    /// [`Refusals`] rather than a `Vec` so that attribution survives into
+    /// [`Report`], which is `Copy` and has no allocation in it (`SEC-020`,
+    /// #392).
+    fn refused() -> Refusals {
+        let mut mask = 0_u32;
+        for (index, &(_, policy, flags)) in POLICIES.iter().enumerate() {
+            if !set(policy, flags) {
+                // `index` is bounded by `POLICIES.len()`, which is five; the
+                // `Refusals::new` assertion below is what keeps that true if
+                // the table ever grows.
+                if let Ok(bit) = u32::try_from(index) {
+                    mask |= 1_u32 << bit;
+                }
+            }
+        }
+        Refusals::new(&POLICY_NAMES, mask)
     }
 
     pub(super) fn apply() -> Report {
+        let refused = refused();
         Report {
             filesystem: Applied::NotOnThisTarget,
             no_new_privileges: Applied::NotOnThisTarget,
             syscalls: Applied::NotOnThisTarget,
-            process_mitigations: if refused().is_empty() {
+            process_mitigations: if refused.is_empty() {
                 Applied::Yes
             } else {
-                Applied::Failed
+                Applied::FailedInPart(refused)
             },
         }
     }
@@ -540,8 +674,12 @@ mod tests {
     )]
 
     use super::{
-        Applied, FILESYSTEM_CAN_BE_DENIED, Report, SANDBOX_IS_AVAILABLE, SYSCALLS_CAN_BE_RESTRICTED,
+        Applied, FILESYSTEM_CAN_BE_DENIED, Refusals, Report, SANDBOX_IS_AVAILABLE,
+        SYSCALLS_CAN_BE_RESTRICTED,
     };
+
+    /// A stand-in for a platform module's policy table.
+    const COMPONENTS: [&str; 4] = ["first", "second", "third", "fourth"];
 
     /// The capability constants agree with each other.
     ///
@@ -613,5 +751,58 @@ mod tests {
             assert_ne!(previous, current);
             current
         });
+    }
+
+    /// `SEC-020` (#392): a refusal reads back the components it was given, in
+    /// the order they are applied.
+    #[test]
+    fn a_refusal_names_its_components_in_order() {
+        let refusals = Refusals::new(&COMPONENTS, 0b1010);
+        assert_eq!(refusals.to_string(), "second, fourth");
+        assert_eq!(
+            refusals.iter().collect::<Vec<_>>(),
+            vec!["second", "fourth"]
+        );
+        assert!(!refusals.is_empty());
+    }
+
+    /// A mask bit above the table names nothing, rather than panicking or
+    /// naming the wrong component.
+    #[test]
+    fn a_bit_past_the_table_names_nothing() {
+        let refusals = Refusals::new(&COMPONENTS, 0b1_0000);
+        assert_eq!(refusals.to_string(), "");
+        assert_eq!(refusals.iter().count(), 0);
+    }
+
+    /// An empty mask is the "everything took" case, which is what
+    /// `platform::apply` keys `Applied::Yes` on.
+    #[test]
+    fn nothing_refused_is_empty() {
+        assert!(Refusals::new(&COMPONENTS, 0).is_empty());
+    }
+
+    /// A partial refusal is a failure of the whole report, the same as a
+    /// wholesale one — it is only the *line* that differs.
+    #[test]
+    fn a_partial_refusal_is_still_incomplete() {
+        let report = Report {
+            process_mitigations: Applied::FailedInPart(Refusals::new(&COMPONENTS, 0b1)),
+            ..Report::NOTHING
+        };
+        assert!(!report.complete());
+        assert!(!report.anything_applied());
+    }
+
+    /// The verdict word is the same for both refusal shapes; only the detail
+    /// differs. `Applied::as_text` is what a caller wanting the bare verdict
+    /// gets, and `Display` is what the start-up report prints.
+    #[test]
+    fn a_partial_refusal_still_reads_as_a_refusal() {
+        let partial = Applied::FailedInPart(Refusals::new(&COMPONENTS, 0b11));
+        assert_eq!(partial.as_text(), Applied::Failed.as_text());
+        assert_eq!(partial.to_string(), "refused by the kernel (first, second)");
+        assert_eq!(Applied::Failed.to_string(), "refused by the kernel");
+        assert_eq!(Applied::Yes.to_string(), "applied");
     }
 }
