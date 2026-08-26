@@ -53,3 +53,8 @@ crates/kmsrs-dbgen/artifacts/
 fuzz/corpus/
 fuzz/artifacts/
 fuzz/coverage/
+
+# `ci/no-file-access.sh` writes this where it is run (`SEC-006`, #198). CI
+# uploads it as an artifact on failure, because it is the evidence; a copy in
+# the tree is just the last local run.
+strace.log
