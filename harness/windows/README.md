@@ -108,3 +108,41 @@ adds tens of milliseconds of its own between steps. The finding is in
 
 The PDUs are hard-coded from a real client capture rather than generated,
 because the point is to replay exactly what Windows sent.
+
+## Answering the queries (`srv-responder`)
+
+`srv-responder/` is a small DNS server that answers `_vlmcs._tcp` and forwards
+everything else upstream, so the guest's other name resolution keeps working.
+
+It runs **on the guest**, not the host, for two reasons that are not obvious:
+binding port 53 on the host needs privilege this harness will not ask for, and
+QEMU user-mode networking forwards no UDP from guest to host. The loopback
+constraint (`NET-014`, #163) is no obstacle — that is about the KMS *host*, and
+the records handed back point at a non-loopback address.
+
+```sh
+cd srv-responder && cargo xwin build --release --target x86_64-pc-windows-msvc
+scp -i "$KMSRSOS_VM_DIR/id_vm" -P 2222 \
+    target/x86_64-pc-windows-msvc/release/srv-responder.exe kms@127.0.0.1:C:/srv.exe
+```
+
+In the guest, as administrator:
+
+```powershell
+$idx = (Get-NetAdapter | Where-Object Status -eq Up | Select-Object -First 1).InterfaceIndex
+# BOTH families. With no IPv6 resolver set, Windows sends the SRV query to
+# fec0:0:0:ffff::3 — a remote address — and an IPv4-only responder never sees it.
+Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses ("127.0.0.1","::1")
+Start-Process C:\srv.exe -ArgumentList "10.0.2.3","10.0.2.2" -NoNewWindow
+```
+
+One record at priority 0 by default. To test RFC 2782 ordering, pass
+`priority,weight,port,target` specs — a dead one first and a live one second is
+how the fallback in `docs/discovery-findings.md` was measured:
+
+```powershell
+Start-Process C:\srv.exe -ArgumentList "10.0.2.3","10.0.2.2","0,100,1699,dead","10,100,1688,live" -NoNewWindow
+```
+
+It is outside the cargo workspace on purpose: it runs on the guest, ships
+nothing, and should not appear in the workspace's lockfile or lint policy.

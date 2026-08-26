@@ -167,6 +167,63 @@ counterpart of `FP-008`. That second observation was incidental to how the
 scenario was ordered, so it is recorded here as observed, not as established;
 a deliberate test belongs with `FP-008`.
 
+## The other half: SPP does follow the answer
+
+The scenarios above measure what the client asks. Answering needed a resolver
+under our control, and the obvious place — the host — cannot have one, because
+binding port 53 needs privilege the harness does not ask for and QEMU's
+user-mode networking forwards no UDP from guest to host.
+
+So the resolver runs **inside the guest**
+([`harness/windows/srv-responder/`](../harness/windows/srv-responder/)),
+answering `_vlmcs._tcp` and forwarding everything else so the guest's other
+name resolution keeps working. The loopback constraint (`NET-014`, #163) does
+not apply: it is about the KMS *host*, and the records this hands back point at
+a non-loopback address.
+
+One detail cost a run and is worth recording. With no IPv6 resolver configured,
+Windows sends the SRV query to `fec0:0:0:ffff::3` — a well-known *remote*
+address, not a local one — so an IPv4-only responder never sees it and the
+lookup fails for reasons that look like the client refusing to ask. Point the
+guest at `::1` as well as `127.0.0.1`.
+
+### Discovery to activation, with no `/skms` at all
+
+`J-dns-to-activation`. Primary DNS suffix `lab.example`, resolver pointed at the
+in-guest responder, no KMS host configured anywhere:
+
+```
+SRV  _VLMCS._TCP.lab.example  -> answering 1 record(s)
+A    kms.lab.example          -> 10.0.2.2
+```
+
+`slmgr /ato` → *Product activated successfully*, and `slmgr /dlv` →
+`License Status: Licensed`. The whole path works: suffix, SRV, A, connect,
+activate.
+
+### RFC 2782 priority is honoured, and fallback works
+
+`K-srv-priority`. Two records — priority 0 pointing at a port nothing listens
+on, priority 10 at the real host:
+
+| | |
+|---|---|
+| +0.000 s | SYN → `10.0.2.2:1699` (priority 0) |
+| +0.513 s | SYN → `10.0.2.2:1699` |
+| +1.016 s | SYN → `10.0.2.2:1699` |
+| +1.522 s | SYN → `10.0.2.2:1699` |
+| +2.027 s | SYN → `10.0.2.2:1699` |
+| **+2.072 s** | **SYN → `10.0.2.2:1688` (priority 10)** |
+
+then *Product activated successfully*. So SPP tries the lowest priority first,
+retries it through the normal TCP connect backoff, and falls back to the next
+priority — about two seconds later. This matters for `DISC-001`'s selection
+rule: a client that ignored priority would have hit the working host
+immediately, and one that gave up after the first would never have activated.
+
+**Weight is not tested.** Distribution among equal-priority records needs many
+trials to say anything, and one run says nothing.
+
 ## Caveats, so these are not read for more than they say
 
 - **The `/ato` error codes vary for reasons outside Windows.** `B` and `C`
@@ -175,10 +232,9 @@ a deliberate test belongs with `FP-008`.
   so this is NODATA versus NXDOMAIN from the real upstream resolver, not a
   difference in SPP. An earlier `H` run returned `0xC004F074` instead. None of
   these codes is load-bearing for anything above — the queries are.
-- **Nothing answered the SRV queries.** Every scenario except the two `/skms`
-  ones measures the question, not the round trip. Whether SPP correctly follows
-  RFC 2782 priority and weight across multiple SRV records is untested and needs
-  a responder.
+- **Weight, as distinct from priority, is untested.** Priority ordering is
+  measured above; distribution across equal-priority records is not, and a
+  single run could not show it.
 - **Domain-joined is not covered.** Every scenario above is workgroup. The
   `_ldap._tcp.dc._msdcs.WORKGROUP.<domain>` probe seen in `B` and `D` is what a
   *non*-joined machine does, and a joined one may well differ.
