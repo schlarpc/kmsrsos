@@ -351,18 +351,34 @@ let
         # Xen HVM's RTL8139) or does not offer that adapter there (VMware Fusion
         # on Apple Silicon has no vmxnet3). `ena` went the other way, into
         # `common`, because Graviton is Nitro.
-        "NET_VENDOR_VMWARE" "VMXNET3"
+        #
+        # No `NET_VENDOR_VMWARE` beside `VMXNET3`, and its absence is a
+        # correction rather than an oversight (`OS-034`, #382). Every other
+        # driver here sits under a vendor menu; this one does not. `VMXNET3` is
+        # declared straight in `drivers/net/Kconfig` and the code lives in
+        # `drivers/net/vmxnet3/` rather than under `drivers/net/ethernet/`, so
+        # there is no gate to open and the entry that named one was inert.
+        "VMXNET3"
         "NET_VENDOR_REALTEK" "8139CP" "8139TOO"
         "NET_VENDOR_AMD" "PCNET32"
         "NET_VENDOR_DEC" "NET_TULIP" "TULIP"
 
-        # These two name nothing Kconfig has heard of in 6.12 and therefore do
-        # nothing: `random.trust_cpu` and `random.trust_bootloader` are boot
-        # parameters now, both defaulting to true. Kept here rather than deleted
-        # so that removing them is one change with its own justification —
-        # `OS-034` (#382). They are deliberately **not** copied into the aarch64
-        # list below.
-        "RANDOM_TRUST_CPU" "RANDOM_TRUST_BOOTLOADER"
+        # --- entropy, which is not a setting here ---
+        #
+        # `RANDOM_TRUST_CPU` and `RANDOM_TRUST_BOOTLOADER` were named here and
+        # are gone (`OS-034`, #382). Not because the behaviour they asked for
+        # was declined — it is what this kernel does — but because neither is a
+        # Kconfig symbol any more. `drivers/char/random.c` carries
+        # `static bool trust_cpu __initdata = true;` and a `random.trust_cpu=`
+        # boot parameter, and the bootloader seed is `random.trust_bootloader=`
+        # the same way.
+        #
+        # So the guarantee is a **default**, and the only way to change it is a
+        # command line this image does not pass. There is nothing to enable, and
+        # an entry that enables nothing reads as a decision while being a no-op.
+        # `kernel_tcb.rs` now fails on one rather than letting the next person
+        # find it while looking at something else, so re-adding either of these
+        # is a test failure rather than a line that quietly does nothing.
       ];
 
       disable = [
@@ -370,6 +386,7 @@ let
         # ME, and nothing here would talk to one if it did. x86 only, since the
         # symbol does not exist elsewhere.
         "INTEL_MEI" "INTEL_MEI_ME"
+
       ];
     };
 

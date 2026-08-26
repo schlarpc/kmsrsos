@@ -637,7 +637,10 @@
         x86_64 = {
           # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
           # for a modern Linux guest on ESXi and Workstation.
-          vmxnet3 = [ "NET_VENDOR_VMWARE" "VMXNET3" ];
+          # One symbol, not two: there is no `NET_VENDOR_VMWARE` gate to open
+          # (`OS-034`, #382). The measurement is unchanged, which is what
+          # proves the entry that named one was inert.
+          vmxnet3 = [ "VMXNET3" ];
           # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
           rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
           # VirtualBox's older adapter choices.
@@ -660,6 +663,7 @@
           no-seccomp = { disable = [ "SECCOMP" ]; };
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
+
         };
 
         aarch64 = {
@@ -703,6 +707,7 @@
           no-seccomp = { disable = [ "SECCOMP" ]; };
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
+
         };
       };
 
