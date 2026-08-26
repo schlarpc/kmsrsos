@@ -221,8 +221,44 @@ priority — about two seconds later. This matters for `DISC-001`'s selection
 rule: a client that ignored priority would have hit the working host
 immediately, and one that gave up after the first would never have activated.
 
-**Weight is not tested.** Distribution among equal-priority records needs many
-trials to say anything, and one run says nothing.
+### Weight is honoured too, and selection is randomised
+
+`DISC-009` (#381). Three configurations, differing only in which record carries
+the heavy weight and where it sits in the answer, with nothing listening on any
+of the ports so every trial makes a fresh choice. The responder withholds the
+inline A records (`KMSRSOS_NO_INLINE_A=1`), so the client must look up the
+target it picked — and that lookup names the pick.
+
+| Config | weights a / b / c | heavy listed | trials | first choice |
+|---|---|---|---:|---|
+| A | 1 / 1 / **98** | last | 20 | **19 × c**, 1 × b |
+| B | **98** / 1 / 1 | first | 20 | **20 × a** |
+| C | 25 / **50** / 25 | middle | 30 | 9 × a, **12 × b**, 9 × c |
+
+Three things follow, and only three.
+
+**Weight decides, not position.** A and B are the same answer shape with the
+weights reversed, and the outcome reverses with them. Uniform selection would
+have given about seven of twenty to the heavy record in each; it got nineteen
+and twenty.
+
+**Selection is randomised, not deterministic.** Under "always take the highest
+weight", config C would have returned thirty `b`. It returned twelve.
+
+**Proportionality is consistent but not proven.** C's 9/12/9 against an expected
+7.5/15/7.5 fits (χ² = 1.2, 2 df) — but it also fits uniform (χ² = 0.6), because
+25/50/25 and 33/33/33 are too close to separate at n = 30. Distinguishing those
+two specifically would need a few hundred trials at roughly seven seconds each.
+So: weight is honoured and dominates; whether the distribution is exactly RFC
+2782's running-sum rather than some other monotonic weighting is not settled by
+this.
+
+That is enough for `DISC-001` (#143) and decision 41, which are about emitting
+records a client will honour — it does.
+
+The remaining A lookups in each trial arrive in fall-back order, and the
+equal-weight ones among them are shuffled between trials, which is the same
+behaviour RFC 2782 asks for on the rest of the set.
 
 ## Caveats, so these are not read for more than they say
 

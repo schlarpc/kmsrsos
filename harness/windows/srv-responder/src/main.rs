@@ -225,11 +225,18 @@ fn encode_name(name: &str) -> Vec<u8> {
 /// The A records ride along in the answer section rather than in additional,
 /// because a client that ignores additional would otherwise need a second round
 /// trip and the timing of that would show up in the measurement.
+///
+/// `KMSRSOS_NO_INLINE_A=1` withholds them, which is how `DISC-009` (#381)
+/// observes selection: with no address in the answer the client must look up
+/// the target it chose, and that lookup names the choice in this log. It costs
+/// a round trip, so it is off unless asked for.
 fn srv_reply(query: &[u8], name: &str, records: &[Srv]) -> Vec<u8> {
+    let inline_a = std::env::var("KMSRSOS_NO_INLINE_A").as_deref() != Ok("1");
     // `_vlmcs._tcp.example.com` -> `example.com`, the zone targets live in.
     let zone = name.splitn(3, '.').nth(2).unwrap_or_default().to_string();
 
-    let count = u16::try_from(records.len() * 2).unwrap_or(u16::MAX);
+    let per_record = if inline_a { 2 } else { 1 };
+    let count = u16::try_from(records.len() * per_record).unwrap_or(u16::MAX);
     let mut out = reply_head(query, count);
     for record in records {
         let target = if zone.is_empty() {
@@ -250,7 +257,7 @@ fn srv_reply(query: &[u8], name: &str, records: &[Srv]) -> Vec<u8> {
         out.extend_from_slice(&record.port.to_be_bytes());
         out.extend_from_slice(&encoded);
     }
-    for record in records {
+    for record in records.iter().filter(|_| inline_a) {
         let target = if zone.is_empty() {
             record.target.clone()
         } else {

@@ -146,3 +146,36 @@ Start-Process C:\srv.exe -ArgumentList "10.0.2.3","10.0.2.2","0,100,1699,dead","
 
 It is outside the cargo workspace on purpose: it runs on the guest, ships
 nothing, and should not appear in the workspace's lockfile or lint policy.
+
+### Measuring SRV weight (`DISC-009`, #381)
+
+`KMSRSOS_NO_INLINE_A=1` makes the responder withhold the A records it would
+otherwise put in the SRV answer. The client must then look up whichever target
+it selected, and that lookup names the selection in the responder's log — which
+is how the weight distribution was measured without parsing a pcap per trial.
+
+Point every record at a port nothing listens on, so each trial makes a fresh
+choice and falls through:
+
+```powershell
+$env:KMSRSOS_NO_INLINE_A = "1"
+Start-Process C:\srv.exe -ArgumentList "10.0.2.3","10.0.2.2","0,1,1701,a","0,1,1702,b","0,98,1703,c" -NoNewWindow
+for ($i = 1; $i -le 20; $i++) {
+  cscript //nologo C:\Windows\System32\slmgr.vbs /ckms | Out-Null
+  Restart-Service sppsvc -Force            # SPP caches the host it found
+  ipconfig /flushdns | Out-Null            # and the resolver caches the answer
+  cscript //nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
+}
+```
+
+Both resets matter: without `/ckms` and the `sppsvc` restart the client reuses
+its previous choice and every trial after the first measures nothing. About
+seven seconds per trial.
+
+Tally the first A lookup after each SRV:
+
+```sh
+awk '/^SRV/{e=1;next} /^A /{if(e){split($2,p,".");print p[1];e=0}}' wA.log | sort | uniq -c
+```
+
+The committed runs are `captures/DISC-009-w{A,B,C}.log`.
