@@ -55,6 +55,20 @@ jobs:
             runner: ubuntu-24.04-arm
           - name: windows-x86_64
             runner: windows-latest
+          # `PKG-022` (#385). GitHub had no ARM64 Windows runner when #379
+          # shipped the build, which is why the artifact went out never having
+          # been executed; `windows-11-arm` is one, and it is free on public
+          # repositories like this one.
+          #
+          # This leg is the *test suite* on ARM64 Windows — the service router
+          # of `PKG-017` (#368), the Event Log source registration, and
+          # `the_policy_structures_are_still_flag_words` compiled for this
+          # target. Whether the **shipped**, cross-compiled binary starts and
+          # serves is a different question, asked by `windows-aarch64-smoke`
+          # below, because a binary rebuilt here is not the binary anybody
+          # downloads.
+          - name: windows-aarch64
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -417,6 +431,55 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  # The ARM64 binary, started on ARM64 Windows (`PKG-022`, #385).
+  #
+  # `PKG-020` (#379) shipped an `aarch64-pc-windows-msvc` build that had never
+  # been executed. It was checked the way the x86_64 one is checked at build
+  # time — the PE machine type read off the artifact, Control Flow Guard
+  # asserted absent — and `PKG-018` (#374) is the standing precedent for why
+  # that is not enough: CFG produced an artifact whose `DllCharacteristics` bit
+  # was honestly set and which died at start-up before logging a line. Every
+  # check passed, and nothing caught it until somebody ran it.
+  #
+  # What this answers that nothing else does is the second half of `SEC-019`
+  # (#356): five `SetProcessMitigationPolicy` policies are applied and verified
+  # in force on a live process, and that verification had run on x86_64 and
+  # nowhere else. `ProcessSystemCallDisablePolicy` is the one to watch, because
+  # `win32k` on ARM64 is a different build of a driver with its own history of
+  # what is filterable.
+  #
+  # It runs the artifact from `snapshot-windows` rather than building here. The
+  # binary an operator downloads is the one that has to start.
+  windows-aarch64-smoke:
+    needs: snapshot-windows
+    runs-on: windows-11-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: snapshot-windows
+          path: out
+
+      - name: Start it and serve an activation
+        shell: pwsh
+        run: |
+          ./harness/windows/arm64-smoke.ps1 `
+            -Server out/kmsrs-server-windows-aarch64.exe `
+            -Client out/kmsrs-client-windows-aarch64.exe
+
+      # The captured start-up report, which is the artefact #385 asks for: which
+      # of the five policies this kernel accepted, from a machine that ran them.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-aarch64-report
+          path: |
+            arm64-smoke-report.txt
+            arm64-smoke-server.log
+          if-no-files-found: warn
+
   # --- The `latest` pointer, moved only when everything is green ----------
   #
   # `PKG-015` (#364): a rolling prerelease at the tag `latest`, so there is one
@@ -456,6 +519,7 @@ jobs:
       - fuzz
       - snapshot
       - snapshot-windows
+      - windows-aarch64-smoke
     # Never from a pull request: a fork's branch must not be able to move a
     # pointer people download from.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

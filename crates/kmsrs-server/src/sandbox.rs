@@ -354,34 +354,40 @@ mod platform {
     //! must name itself, and `unsafe_is_confined_to_the_one_boundary` fails if
     //! it ever appears anywhere else.
     //!
-    //! # On which Windows this has been observed (`PKG-020`, #379)
+    //! # On which Windows this has been observed (`PKG-022`, #385)
     //!
-    //! **Windows 11 26200 on x86_64, and nowhere else.** There is an ARM64
-    //! build since `PKG-020`, and nobody has run it on an ARM64 Windows
-    //! machine: none of GitHub's hosted runners is one, EC2 offers no Windows
-    //! on Graviton, and emulating ARM64 Windows to test a *process mitigation*
-    //! would answer a question about the emulator.
+    //! **Windows 11 build 26200, on x86_64 and on ARM64.** Both architectures,
+    //! and on ARM64 all five policies are accepted —
+    //! `ProcessSystemCallDisablePolicy` included, which was the one in doubt:
+    //! it removes the `win32k.sys` surface, and `win32k` on ARM64 is a
+    //! different build of a driver with its own history of what is and is not
+    //! filterable.
     //!
-    //! Two things are true and neither is the same as having tested it. The
-    //! API is architecture-independent — every structure here is a flag word
-    //! rather than anything with a register layout, and
+    //! For two issues that was not so. `PKG-020` (#379) shipped the ARM64
+    //! build having never executed it, because there was nowhere to: no ARM64
+    //! Windows hosted runner, no Windows on Graviton, and emulating one to
+    //! test a *process mitigation* would answer a question about the emulator.
+    //! The first of those stopped being true — `windows-11-arm` is a standard
+    //! GitHub-hosted runner — so `harness/windows/arm64-smoke.ps1` now starts
+    //! the **cross-compiled artifact**, the one an operator downloads rather
+    //! than one rebuilt on the test machine, serves an activation through it,
+    //! and asserts on the line this module produces. It runs on every pull
+    //! request, which is a stronger thing than having run once.
+    //!
+    //! It is worth saying what was *not* the argument for shipping it before
+    //! that, because it is the standing lesson of `PKG-018` (#374): the API
+    //! being architecture-independent — every structure here is a flag word
+    //! rather than anything with a register layout, which
     //! [`the_policy_structures_are_still_flag_words`](tests::the_policy_structures_are_still_flag_words)
-    //! asserts that on whichever target it compiles for. And a refusal is
-    //! already handled: [`refused`] attributes it to a policy by name, and
-    //! [`apply`] reports `Failed` rather than aborting, precisely because
-    //! "this kernel declined a mitigation" is a thing that happens on older
-    //! builds and is not a reason to stop serving.
+    //! asserts on whichever target it compiles for — is a reason to *expect*
+    //! it to work and is not a test. Control Flow Guard produced an artifact
+    //! whose header made an honest claim and which died before logging a line.
     //!
-    //! What is *not* established is whether the ARM64 kernel accepts the same
-    //! five. `ProcessSystemCallDisablePolicy` is the interesting one: it
-    //! removes the `win32k.sys` surface, and `win32k` on ARM64 is a different
-    //! build of a driver with its own history of what is and is not
-    //! filterable. If it is refused, this program says so on the console at
-    //! start-up rather than claiming a mitigation it does not have — which is
-    //! the property that makes shipping the untested binary defensible.
-    //!
-    //! Running it is `PKG-022` (#385). `harness/windows/` is the shape that
-    //! would do it and it has no ARM64 image to drive.
+    //! A refusal remains non-fatal: [`apply`] reports `Failed` rather than
+    //! aborting, because "this kernel declined a mitigation" happens on older
+    //! builds and is not a reason to stop serving. What it does not yet do is
+    //! say *which* — [`refused`] knows and `apply` discards it, which is
+    //! `SEC-020` (#392).
 
     use super::{Applied, Report};
     use windows_sys::Win32::System::Threading::{
