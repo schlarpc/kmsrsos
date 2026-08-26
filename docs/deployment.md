@@ -168,7 +168,7 @@ The flake's own outputs, without configuring anything:
 | `server` | the server binary, statically linked against musl on Linux |
 | `client` | the diagnostic and detection-resistance client |
 | `container` | the container image, as a `tar.gz` ready for `docker load` |
-| `windows` | `kmsrsos.exe` and `kmsrs-client.exe`, cross-compiled |
+| `windows` | `kmsrs-server.exe` and `kmsrs-client.exe`, cross-compiled |
 
 `nix flake check` runs the whole gate: build, clippy, fmt, tests, coverage with a floor under the
 sans-io crates, the data-integrity check, the feature powerset, a configured build through
@@ -192,14 +192,14 @@ build date — which is what makes two builds of one revision identical, and is 
 ## systemd
 
 ```sh
-sudo install -m 0755 result/bin/kmsrsos /usr/local/bin/
-sudo install -m 0644 deploy/systemd/kmsrsos.service /etc/systemd/system/
-sudo systemctl enable --now kmsrsos
-journalctl -u kmsrsos -f
+sudo install -m 0755 result/bin/kmsrs-server /usr/local/bin/
+sudo install -m 0644 deploy/systemd/kmsrs-server.service /etc/systemd/system/
+sudo systemctl enable --now kmsrs-server
+journalctl -u kmsrs-server -f
 ```
 
 Both audited projects have only a documentation snippet for this, and py-kms's is `User=root` with no
-hardening whatever. `deploy/systemd/kmsrsos.service` is a real unit (`PKG-007`, #244), and almost
+hardening whatever. `deploy/systemd/kmsrs-server.service` is a real unit (`PKG-007`, #244), and almost
 every line of its hardening is **free** rather than aspirational — it forbids things the program
 genuinely does not do:
 
@@ -232,7 +232,7 @@ So the binary **refuses to start** if `LISTEN_FDS` is set, rather than binding i
 alongside a manager's:
 
 ```
-kmsrsos: started with LISTEN_FDS=1, but this build does not adopt inherited sockets.
+kmsrs-server: started with LISTEN_FDS=1, but this build does not adopt inherited sockets.
 ```
 
 That is not fussiness. Ignoring it under `Accept=yes` would mean one process per connection, which
@@ -749,7 +749,7 @@ anything else that sends an ACPI power-button event. What happens is:
 
 ```
 {"level":"info","event":"power","detail":"acpi power button: draining"}
-{"level":"info","event":"stopped","detail":"kmsrsos"}
+{"level":"info","event":"stopped","detail":"kmsrs-server"}
 {"level":"info","event":"power","detail":"serve returned: powering off"}
 ```
 

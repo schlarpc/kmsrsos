@@ -8,8 +8,16 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# `PKG-017` (#368): the executable is `kmsrs-server`, not `kmsrsos`.
+#
+# `kmsrsos` is the project, and the bare-metal image it produces. Giving the
+# server executable the project's name made three different things share one
+# word — the image, the repository, and this binary — and the one it fitted
+# worst was this one, which is a plain Linux/Windows service that has nothing to
+# do with an OS. `kmsrs-os` is pid 1 on the bare-metal target and `kmsrs-client`
+# is the client; this is the only one that did not say what it was.
 [[bin]]
-name = "kmsrsos"
+name = "kmsrs-server"
 path = "src/main.rs"
 
 [dependencies]

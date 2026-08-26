@@ -387,10 +387,10 @@
         mkdir -p payload/usr/lib/systemd/system
         mkdir -p payload/usr/share/doc/kmsrsos
 
-        install -m 0755 ${server}/bin/kmsrsos payload/usr/bin/kmsrsos
+        install -m 0755 ${server}/bin/kmsrs-server payload/usr/bin/kmsrs-server
         install -m 0755 ${client}/bin/kmsrs-client payload/usr/bin/kmsrs-client
-        install -m 0644 ${./deploy/systemd/kmsrsos.service} \
-          payload/usr/lib/systemd/system/kmsrsos.service
+        install -m 0644 ${./deploy/systemd/kmsrs-server.service} \
+          payload/usr/lib/systemd/system/kmsrs-server.service
         install -m 0644 ${./docs/deployment.md} \
           payload/usr/share/doc/kmsrsos/deployment.md
         install -m 0644 ${./LICENSE} payload/usr/share/doc/kmsrsos/LICENSE
@@ -1088,7 +1088,7 @@
           contents = [ server client ];
 
           config = {
-            Entrypoint = [ "/bin/kmsrsos" ];
+            Entrypoint = [ "/bin/kmsrs-server" ];
 
             # `SEC-008` (#200): non-root, and numeric so it needs no
             # `/etc/passwd` — which is one more file that would have to exist in
@@ -1240,9 +1240,9 @@
               built.
 
               %files
-              /usr/bin/kmsrsos
+              /usr/bin/kmsrs-server
               /usr/bin/kmsrs-client
-              /usr/lib/systemd/system/kmsrsos.service
+              /usr/lib/systemd/system/kmsrs-server.service
               /usr/share/doc/kmsrsos/deployment.md
               /usr/share/doc/kmsrsos/LICENSE
               SPEC

@@ -1,13 +1,13 @@
-# kmsrsos as a systemd service (PKG-007, #244).
+# The kmsrsos KMS host as a systemd service (PKG-007, #244).
 #
 # Both audited projects have only a documentation snippet for this, and py-kms's
 # is `User=root` with no hardening whatever. This is a real unit, and almost
 # every line of it is free rather than aspirational — the hardening below costs
 # nothing because the program genuinely does none of the things it forbids.
 #
-#   sudo cp kmsrsos /usr/local/bin/
-#   sudo cp kmsrsos.service /etc/systemd/system/
-#   sudo systemctl enable --now kmsrsos
+#   sudo cp kmsrs-server /usr/local/bin/
+#   sudo cp kmsrs-server.service /etc/systemd/system/
+#   sudo systemctl enable --now kmsrs-server
 #
 # There is deliberately **no `.socket` unit**. See declined item D40: the payoff
 # socket activation was wanted for — systemd binding the port so the service
@@ -20,14 +20,14 @@
 # binding its own socket alongside a systemd-held one.
 
 [Unit]
-Description=kmsrsos — a KMS host emulator in pure safe Rust
+Description=kmsrs-server — a KMS host emulator in pure safe Rust
 Documentation=https://github.com/schlarpc/kmsrsos
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/kmsrsos
+ExecStart=/usr/local/bin/kmsrs-server
 
 # No configuration file, no command line, no per-knob variable (declined item
 # D5). The single runtime setting is a TOML document in one variable, and it may
@@ -40,8 +40,8 @@ ExecStart=/usr/local/bin/kmsrsos
 # the journal. That is why there is no syslog support and no log file: the gap
 # does not exist on Linux (declined item D7), and axiom A5 forbids the file.
 #
-#   journalctl -u kmsrsos -f
-#   journalctl -u kmsrsos -o cat | jq 'select(.event == "activation")'
+#   journalctl -u kmsrs-server -f
+#   journalctl -u kmsrs-server -o cat | jq 'select(.event == "activation")'
 StandardOutput=journal
 StandardError=journal
 

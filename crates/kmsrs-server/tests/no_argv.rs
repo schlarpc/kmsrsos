@@ -104,7 +104,7 @@ fn start(args: &[&str], config: Option<&str>) -> Started {
 
 /// The same, with extra environment variables.
 fn start_with(args: &[&str], config: Option<&str>, environment: &[(&str, &str)]) -> Started {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_kmsrsos"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kmsrs-server"));
     command.args(args);
     // Never inherit an activation manager's variables from whatever ran the
     // tests, so each case says what it means.

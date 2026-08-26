@@ -60,7 +60,7 @@ jobs:
           nix build .#rpm       --print-build-logs --out-link result-rpm
           nix build .#container --print-build-logs --out-link result-container
 
-          cp result-server/bin/kmsrsos     "out/kmsrsos-${{ matrix.name }}"
+          cp result-server/bin/kmsrs-server "out/kmsrs-server-${{ matrix.name }}"
           cp result-client/bin/kmsrs-client "out/kmsrs-client-${{ matrix.name }}"
           cp result-deb/*.deb out/
           cp result-rpm/*.rpm out/
@@ -99,10 +99,10 @@ jobs:
           # are attached, named after the binary rather than after the crate so
           # that a reader can match them to what they downloaded.
           cp crates/kmsrs-server/kmsrs-server.cdx.json \
-             "out/sbom-kmsrsos-${{ matrix.name }}.cdx.json"
+             "out/sbom-kmsrs-server-${{ matrix.name }}.cdx.json"
           cp crates/kmsrs-client/kmsrs-client.cdx.json \
              "out/sbom-kmsrs-client-${{ matrix.name }}.cdx.json"
-          test -s "out/sbom-kmsrsos-${{ matrix.name }}.cdx.json"
+          test -s "out/sbom-kmsrs-server-${{ matrix.name }}.cdx.json"
 
       # Two builds of one revision are the same bytes. Checked on every pull
       # request too (SEC-010, #202; CFG-008, #173), and again here because a

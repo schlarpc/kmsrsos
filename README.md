@@ -77,7 +77,7 @@ $ nix develop
 $ cargo run                                      # debug build + run
 $ cargo build --release                          # optimized build
 $ nix run                                        # build and run via Nix
-$ ./result/bin/kmsrsos   # the nix-built binary
+$ ./result/bin/kmsrs-server   # the nix-built binary
 ```
 
 ### Testing, linting, and formatting

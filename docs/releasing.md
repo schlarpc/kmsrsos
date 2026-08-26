@@ -10,12 +10,12 @@ was tested is a release nobody tested.
 
 | Artifact | Notes |
 |---|---|
-| `kmsrsos-{x86_64,aarch64}-linux` | statically linked against musl; no runtime dependencies |
+| `kmsrs-server-{x86_64,aarch64}-linux` | statically linked against musl; no runtime dependencies |
 | `kmsrs-client-{x86_64,aarch64}-linux` | the diagnostic and detection-resistance client |
 | `kmsrsos_X.Y.Z_{amd64,arm64}.deb` | with the hardened systemd unit (`PKG-007`, #244) |
 | `kmsrsos-X.Y.Z-1.{x86_64,aarch64}.rpm` | the same payload |
 | `ghcr.io/schlarpc/kmsrsos:X.Y.Z` | multi-arch; two static binaries and nothing else |
-| `kmsrsos.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+| `kmsrs-server.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
 | `kmsrsos-x86_64.iso` | the bootable bare-metal image (`OS-017`, #333); x86_64 only, uncompressed |
 | `sbom-*.cdx.json` | CycloneDX, derived from the lockfile |
 | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksum file |
