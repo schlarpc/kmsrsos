@@ -637,10 +637,16 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         ".#rpm",
         ".#container",
         ".#windows",
-        // The bootable bare-metal ISO (`OS-017`, #333). x86_64 only — the
-        // flake gates it by system, because `pkgs.syslinux` is unavailable
-        // elsewhere — and built on the leg that is already x86_64 rather than
-        // in a job of its own.
+        // The bootable bare-metal ISO (`OS-017`, #333), on **both**
+        // architectures since `PKG-019` (#378) — one attribute, built on each
+        // leg, because a system's `linuxIso` is the image for that system.
+        //
+        // This comment used to say "x86_64 only — the flake gates it by
+        // system, because `pkgs.syslinux` is unavailable elsewhere". That was
+        // true and is now irrelevant: the arm image has no BIOS path, so it
+        // never reaches syslinux (`OS-033`, #377). The gate is "this system
+        // builds a bare-metal target" (`OS-031`, #375), and `linuxArches` in
+        // the flake is where that is decided.
         //
         // This said `.#osImage` and `.#osIso` until `OS-029` (#347). Those
         // were the Hermit artifacts, removed by `OS-018` (#334); the workflow
@@ -655,6 +661,48 @@ fn the_release_workflow_builds_what_the_gate_checks() {
             "the release does not build {output} (PKG-003, #240)"
         );
     }
+
+    // `PKG-019` (#378): **both** ISOs are attached, named by architecture.
+    //
+    // Asserted on the artifact names rather than on the build command, and the
+    // difference is the whole point of this test: `.#linuxIso` above proves a
+    // build happens, and these prove the result is *shipped* under a name an
+    // operator can tell apart. The x86 ISO was built and copied inside an
+    // `if [ "$matrix.name" = "x86_64-linux" ]` for two issues, and nothing here
+    // would have noticed the day that condition stopped being what was meant.
+    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    assert!(
+        workflow.contains(iso),
+        "the release does not attach the ISO as {iso}, so either it ships \
+         under one name for two architectures or it does not ship \
+         (PKG-019, #378)"
+    );
+    for arch in ["x86_64", "aarch64"] {
+        assert!(
+            workflow.contains(&format!("arch: {arch}")),
+            "the release matrix has no {arch} leg, so no ISO is built for it. \
+             Each image is built natively on its own runner (PKG-019, #378)"
+        );
+    }
+
+    // And the ISO is proved reproducible the way the binary is (`PKG-016`,
+    // #366). `reproducible-iso` runs in the gate; this is the same claim about
+    // the file somebody downloads.
+    assert!(
+        workflow.contains(".#linuxIso --rebuild"),
+        "the release does not prove the ISO it ships is reproducible \
+         (PKG-016, #366; PKG-019, #378)"
+    );
+
+    // The old gate must be gone rather than merely bypassed. A leftover
+    // `if [ "$matrix.name" = "x86_64-linux" ]` would silently ship one ISO
+    // while every assertion above still passed.
+    assert!(
+        !workflow.contains("= \"x86_64-linux\" ]"),
+        "the release still gates something on being the x86_64 leg. Since \
+         `OS-033` (#377) there is an image for each architecture and the flake \
+         decides which systems have one (PKG-019, #378)"
+    );
 
     // And nothing bypasses the flake. A `cargo build` here would be a second
     // build path, which is the whole thing this test is about.

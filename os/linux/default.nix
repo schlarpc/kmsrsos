@@ -4,7 +4,8 @@
 # `kmsrs-server` as pid 1 and no other userland at all. No init system, no
 # shell, no libc on disk — the initramfs is the binary and one device node.
 #
-# The artefact is a single `bzImage`, and it is deliberately *self-contained*:
+# The artefact is a single kernel image — `arch.image`, which is `bzImage` on
+# x86 — and it is deliberately *self-contained*:
 #
 #   - `CONFIG_INITRAMFS_SOURCE` puts the initramfs inside it, so there is no
 #     separate initrd to load or lose.
@@ -15,10 +16,19 @@
 #
 # `CONFIG_EFI_STUB` makes that file simultaneously a PE/COFF executable and a
 # Linux boot image — `MZ` at 0 and `HdrS` at 0x202 — so the *same bytes* are
-# both `\EFI\BOOT\BOOTX64.EFI` for firmware and an isolinux `KERNEL` line for
-# BIOS. That is why the ISO boots on a Proxmox VM with nothing changed from the
-# defaults, which the Hermit image cannot do (`OS-004`, #255).
+# both the removable-media EFI path for firmware and an isolinux `KERNEL` line
+# for BIOS. That is why the ISO boots on a Proxmox VM with nothing changed from
+# the defaults, which the Hermit image cannot do (`OS-004`, #255).
 { pkgs
+  # The target architecture (`OS-031`, #375), as `linuxArches` in `flake.nix`
+  # describes it. Every architecture literal this file used to hold — the
+  # kernel's `ARCH=`, the image filename, the EFI boot filename, the console
+  # device, and which `kernel.config` is the right one — is a field on it.
+  #
+  # No default. A default would be the thing this issue exists to remove: one
+  # architecture that is "the" architecture, silently correct for the caller
+  # who forgot to say and silently wrong for the one who meant the other.
+, arch
   # `kmsrs-os` (`OS-021`, #337), not `kmsrs-server`: pid 1 mounts devtmpfs,
   # `/proc` and `/sys` and installs a reaper before handing over to the same
   # `serve` the Linux and Windows builds run.
@@ -50,7 +60,15 @@
   # its operator has; and it is the ordering that would silence the serial log
   # without the tee, which is what makes the boot check in `nix flake check` a
   # real regression test rather than a formality.
-, cmdline ? "console=ttyS0,115200 console=tty0 panic=-1 loglevel=6"
+  #
+  # Which devices those consoles *are* is the architecture's (`OS-031`, #375;
+  # `OS-032`, #376). `ttyS0` is an 8250 at a legacy I/O port, which is a fact
+  # about x86 and not about Linux — and aarch64 needs two serial entries, not
+  # one, because QEMU's `virt` has a PL011 and EC2's Graviton has a 16550A.
+  # `tty0` is last on every architecture, for the `OS-028` (#345) reason.
+, cmdline ? builtins.concatStringsSep " "
+    ((map (device: "console=${device}") arch.consoles)
+      ++ [ "panic=-1" "loglevel=6" ])
 , base ? pkgs.linux_6_12
   # `PKG-016` (#366): what every timestamp in the ISO is set to.
   #
@@ -98,8 +116,8 @@ let
     file /init ${init}/bin/kmsrs-os 0755 0 0
   '';
 
-  configfile = pkgs.runCommand "kmsrsos-linux-config" { } ''
-    cp ${./kernel.config} $out
+  configfile = pkgs.runCommand "kmsrsos-linux-${arch.name}-config" { } ''
+    cp ${arch.config} $out
     chmod +w $out
     cat >> $out <<EOF
     CONFIG_INITRAMFS_SOURCE="${manifest}"
@@ -113,14 +131,20 @@ let
     sed -i 's/^ *//' $out
   '';
 
+  # `target` is what `make` is asked for and what lands in `$out`. nixpkgs
+  # picks it from the host platform — `bzImage` on x86, `Image` on aarch64 —
+  # and that default is wrong for a target using `CONFIG_EFI_ZBOOT`, which
+  # produces `vmlinuz.efi` and leaves `Image` where it was (`OS-032`, #376).
+  # The descriptor already names the file, so it names it here too.
   kernel = pkgs.linuxKernel.manualConfig {
     inherit (base) version src;
-    pname = "kmsrsos-linux";
+    pname = "kmsrsos-linux-${arch.name}";
     inherit configfile;
     allowImportFromDerivation = true;
+    target = arch.image;
   };
 
-  # The UEFI bootloader (`OS-030`, #348).
+  # The UEFI bootloader (`OS-030`, #348) — on the architecture that needs one.
   #
   # # Why there is one at all, when there was none
   #
@@ -200,7 +224,7 @@ let
   # passed here would be ignored.
   grubCfg = pkgs.writeText "kmsrsos-grub.cfg" ''
     search --no-floppy --set=root --label KMSRSOS
-    linux /bzImage
+    linux /${arch.image}
     boot
     halt
   '';
@@ -210,46 +234,74 @@ let
   # run time; leaving it empty means there is nowhere for it to look, so the
   # only modules that can ever be loaded are the ones linked in here and the
   # only configuration is the one embedded by `--config`.
-  grub = pkgs.runCommand "kmsrsos-grubx64.efi"
+  grub = pkgs.runCommand "kmsrsos-grub-${arch.name}.efi"
     { nativeBuildInputs = [ pkgs.grub2_efi ]; } ''
     grub-mkimage \
-      --format=x86_64-efi \
+      --format=${arch.grubFormat} \
       --output=$out \
       --config=${grubCfg} \
       --prefix="" \
       ${pkgs.lib.concatStringsSep " " grubModules}
   '';
 
-  # UEFI reads only FAT, so the firmware path needs its loader in an ESP.
+  # What firmware loads from `\EFI\BOOT\<efiFile>`, and the whole difference
+  # between the two images (`OS-033`, #377).
   #
-  # Sized from the loader plus a measured margin, not a round number
+  # On an architecture with a BIOS this is the GRUB above, and the kernel stays
+  # in ISO9660 where isolinux can also read it. On one without, **it is the
+  # kernel** — `CONFIG_EFI_STUB` makes the image its own EFI executable, so
+  # firmware runs it directly and there is nothing for a bootloader to do.
+  #
+  # The whole of `OS-030` (#348)'s argument for GRUB was that isolinux reads
+  # ISO9660 and UEFI reads FAT, so without a loader in the ESP that can read
+  # ISO9660 the kernel has to exist twice. Arm64 guests have no BIOS: Proxmox
+  # VE for arm64 boots every VM through AAVMF and SeaBIOS is not available for
+  # them. One reader, no sharing problem, no bootloader.
+  espPayload = if arch.bios then grub else "${kernel}/${arch.image}";
+
+  # UEFI reads only FAT, so the firmware path needs its payload in an ESP.
+  #
+  # Sized from that payload plus a measured margin, not a round number
   # (`OS-029`, #347): round up to a megabyte having first added 256 KiB, which
   # is eight times the 31 KiB `mkfs.vfat` was measured to need and leaves the
   # result monotonic in the file size.
   #
-  # Since `OS-030` (#348) what goes in is a ~1 MiB `grubx64.efi` rather than a
-  # 3.4 MiB kernel, so this is 2 MiB rather than 4 MiB — and the kernel is no
-  # longer in here at all.
+  # The two architectures land in different places, and this is the cost side
+  # of `OS-033` (#377)'s trade:
   #
-  # The filesystem is FAT12 either way, which is what the UEFI specification
-  # asks for on removable media and what this image has been since `OS-017`
-  # (#333). `mkfs.vfat` picks FAT12 for everything up to 8 MiB, so shrinking
-  # does not cross a boundary and changes no compatibility variable.
-  esp = pkgs.runCommand "kmsrsos-linux-esp"
+  #   x86_64    ~278 KiB of GRUB      -> 2 MiB   (since `OS-030`, #348)
+  #   aarch64   3 760 640 B of kernel -> 4 MiB
+  #
+  # So the arm image pays 2 MiB more of ESP and saves a bootloader from its
+  # TCB. `CONFIG_EFI_ZBOOT` is what keeps that number at 2 MiB rather than
+  # 6 MiB (`OS-032`, #376): the uncompressed `Image` is 7 660 032 bytes and
+  # would have needed an 8 MiB ESP.
+  #
+  # The filesystem is FAT12 in both cases, which is what the UEFI
+  # specification asks for on removable media and what this image has been
+  # since `OS-017` (#333). `mkfs.vfat` picks FAT12 for everything up to 8 MiB,
+  # so neither size crosses a boundary and neither changes a compatibility
+  # variable — the 8 MiB an uncompressed `Image` would have needed is exactly
+  # where that stops being true.
+  esp = pkgs.runCommand "kmsrsos-linux-${arch.name}-esp"
     { nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ]; } ''
-    bytes=$(stat -Lc %s ${grub})
+    bytes=$(stat -Lc %s ${espPayload})
     sz=$(( (bytes + 262144 + 1048575) / 1048576 ))
     truncate -s "''${sz}M" esp.img
     mkfs.vfat -n ESP esp.img
     mmd -i esp.img ::/EFI ::/EFI/BOOT
-    mcopy -i esp.img ${grub} ::/EFI/BOOT/BOOTX64.EFI
+    mcopy -i esp.img ${espPayload} ::/EFI/BOOT/${arch.efiFile}
     cp esp.img $out
   '';
 
-  # The bzImage appears **once** (`OS-030`, #348).
+  # The image for an architecture that has a BIOS (`OS-030`, #348).
   #
-  # `/bzImage` in ISO9660 is the only copy, and all four boot combinations reach
-  # it there:
+  # Everything below is about **two firmwares sharing one kernel**, which is a
+  # problem only where there are two. `OS-033` (#377) is the other recipe, for
+  # the architecture where there is one.
+  #
+  # The kernel appears **once**. `/bzImage` in ISO9660 is the only copy, and all
+  # four boot combinations reach it there:
   #
   #   | | BIOS | UEFI |
   #   |---|---|---|
@@ -278,11 +330,12 @@ let
   #
   # `linux-iso-layout` counts the copies in the bytes rather than reading them
   # off this recipe, which is the only form of the claim that cannot drift —
-  # the comment here said "twice" for the whole time it was three.
-  iso = pkgs.runCommand "kmsrsos-linux.iso"
+  # the comment here said "twice" for the whole time it was three. Its arm twin
+  # counts the same way and finds the one copy at a different offset.
+  hybridIso = pkgs.runCommand "kmsrsos-linux-${arch.name}.iso"
     { nativeBuildInputs = [ pkgs.xorriso pkgs.syslinux ]; } ''
     mkdir -p iso/isolinux
-    cp ${kernel}/bzImage iso/bzImage
+    cp ${kernel}/${arch.image} iso/${arch.image}
     cp ${pkgs.syslinux}/share/syslinux/isolinux.bin iso/isolinux/
     cp ${pkgs.syslinux}/share/syslinux/ldlinux.c32 iso/isolinux/
     chmod +w iso/isolinux/isolinux.bin
@@ -294,7 +347,7 @@ let
     PROMPT 0
     TIMEOUT 1
     LABEL kmsrsos
-      KERNEL /bzImage
+      KERNEL /${arch.image}
     EOF
     sed -i 's/^ *//' iso/isolinux/isolinux.cfg
 
@@ -353,5 +406,78 @@ let
       -append_partition 2 0xef ${esp} \
       -o $out iso/
   '';
+
+  # The image with no bootloader in it (`OS-033`, #377).
+  #
+  # # Why this one is simpler than the other
+  #
+  # `OS-030` (#348) put a GRUB in the x86 ESP for exactly one reason: isolinux
+  # reads ISO9660 and UEFI reads FAT, so without something in the ESP that can
+  # read ISO9660 the kernel has to exist twice. It was a close decision — GRUB
+  # was declined once, in `OS-023` (#339) — and the whole of it is an argument
+  # about **two firmwares sharing one kernel**.
+  #
+  # Arm64 guests have no BIOS. Proxmox VE for arm64 boots every VM through
+  # AAVMF; SeaBIOS is not available for them, and there is no legacy firmware
+  # on any other Arm hypervisor. So there is no second reader, no sharing
+  # problem, and nothing for a bootloader to solve. The kernel goes in the ESP
+  # as `\EFI\BOOT\BOOTAA64.EFI` and firmware runs it through the EFI stub —
+  # which is what the x86 image did before `OS-030`, and which that issue
+  # described as "the cleanest thing this image ever did".
+  #
+  #   | | BIOS | UEFI |
+  #   |---|---|---|
+  #   | **CD-ROM** | *no such firmware* | EFI stub, El Torito pointed at the appended ESP |
+  #   | **raw disk** | *no such firmware* | EFI stub, from the GPT EFI System Partition |
+  #
+  # # What this deletes
+  #
+  # isolinux, `ldlinux.c32`, `isolinux.cfg`, `isohdpfx.bin`, `-isohybrid-mbr`,
+  # `-isohybrid-gpt-basdat`, `grub-mkimage`, the six-module list and the
+  # embedded `grub.cfg`. The arm image is **strictly simpler** than the x86 one
+  # it is derived from, and its TCB statement is shorter by a bootloader.
+  #
+  # It is also why `pkgs.syslinux` never comes near this recipe, which used to
+  # be the reason the whole target was gated to x86_64 (`PKG-019`, #378).
+  #
+  # # The invariant survives
+  #
+  # **The kernel appears exactly once.** In the ESP rather than in ISO9660, so
+  # the count `linux-iso-layout` takes is unchanged and only the offset it
+  # finds it at moves. The ISO9660 tree is *empty*: there is nothing a
+  # filesystem this machine cannot read could usefully hold, and a second copy
+  # there is precisely the bug `OS-029` (#347) removed.
+  #
+  # `-append_partition` + `-appended_part_as_gpt` are `OS-027` (#344)'s
+  # raw-disk path and are kept exactly as they are on x86; what goes with the
+  # BIOS is only the isohybrid MBR, which is x86 boot code that no firmware
+  # here could execute.
+  efiOnlyIso = pkgs.runCommand "kmsrsos-linux-${arch.name}.iso"
+    { nativeBuildInputs = [ pkgs.xorriso ]; } ''
+    mkdir -p iso
+
+    # `PKG-016` (#366): the directory's own mtime, since xorriso reads it into
+    # the root directory record even with nothing in it.
+    find iso -exec touch -h -d "@${sourceDateEpoch}" {} +
+
+    stamp=$(date -u -d "@${sourceDateEpoch}" +%Y%m%d%H%M%S00)
+
+    # One El Torito entry, and it is the EFI one — so no `-eltorito-alt-boot`,
+    # which exists to start a *second* entry after a BIOS first one.
+    xorriso -as mkisofs -V KMSRSOS \
+      --modification-date="$stamp" \
+      -e --interval:appended_partition_2:all:: -no-emul-boot \
+      -appended_part_as_gpt \
+      -append_partition 2 0xef ${esp} \
+      -o $out iso/
+  '';
+
+  iso = if arch.bios then hybridIso else efiOnlyIso;
+
 in
-{ inherit kernel esp iso configfile grub; }
+{ inherit kernel esp iso configfile; }
+# `grub` only exists where there is a BIOS to share a kernel with (`OS-033`,
+# #377). Absent rather than unused, so that a caller reaching for it on the
+# other architecture gets an error naming the attribute instead of a
+# bootloader nothing loads.
+// pkgs.lib.optionalAttrs arch.bios { inherit grub; }

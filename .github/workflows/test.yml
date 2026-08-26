@@ -113,14 +113,38 @@ jobs:
   # checks boot real VMs and take twenty minutes, and this says "the artifact
   # does not even build" in two.
   #
-  # x86_64 only. `pkgs.syslinux` is unavailable elsewhere, which is why the
-  # flake now gates these outputs by system rather than letting an aarch64
-  # `nix flake check` fail inside them.
+  # One leg per architecture since `PKG-019` (#378). Each builds its own image
+  # on its own runner: `linuxIso` on a system is the image *for* that system,
+  # and the flake decides which systems have one (`OS-031`, #375).
+  #
+  # This was x86_64 only, on the grounds that `pkgs.syslinux` is unavailable
+  # elsewhere. True, and now beside the point — the arm image has no BIOS path
+  # and never reaches syslinux (`OS-033`, #377).
   bare-metal:
-    runs-on: ubuntu-latest
+    name: bare-metal-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       id-token: write
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            # `bzImage` is self-decompressing and is also a Linux boot image;
+            # `HdrS` at 0x202 is what isolinux and GRUB's `linux` command look
+            # for.
+            image: bzImage
+            boot-protocol: "true"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            # `CONFIG_EFI_ZBOOT` (`OS-032`, #376): a compressed PE, and *only*
+            # a PE. There is no arm64 boot protocol header to check for,
+            # because there is no firmware on this architecture that would read
+            # one.
+            image: vmlinuz.efi
+            boot-protocol: "false"
     steps:
       - uses: actions/checkout@v7.0.0
       - uses: DeterminateSystems/nix-installer-action@v22
@@ -132,22 +156,24 @@ jobs:
       - name: Build the bootable ISO
         run: nix build .#linuxIso --print-build-logs --out-link result-iso
 
-      # `OS-017` (#333): one file that is both a PE/COFF executable for
-      # firmware and a Linux boot image for isolinux. A fixup phase that
-      # "helpfully" rewrote it would produce something that builds and never
-      # boots on UEFI.
+      # `OS-017` (#333): the kernel is a PE/COFF executable, which is what
+      # firmware loads from the ESP. A fixup phase that "helpfully" rewrote it
+      # would produce something that builds and never boots on UEFI.
       - name: The kernel is also an EFI executable
         run: |
           set -euo pipefail
-          kernel=$(nix build .#linux-kernel --no-link --print-out-paths)/bzImage
+          kernel=$(nix build .#linux-kernel --no-link --print-out-paths)/${{ matrix.image }}
           test "$(head -c 2 "$kernel")" = "MZ" || {
             echo "no MZ at offset 0: CONFIG_EFI_STUB is not doing its job" >&2
             exit 1
           }
-          test "$(dd if="$kernel" bs=1 skip=514 count=4 status=none)" = "HdrS" || {
-            echo "no HdrS at 0x202: this is not a Linux boot image" >&2
-            exit 1
-          }
+          if [ "${{ matrix.boot-protocol }}" = "true" ]; then
+            test "$(dd if="$kernel" bs=1 skip=514 count=4 status=none)" = "HdrS" || {
+              echo "no HdrS at 0x202: this is not a Linux boot image, so the \
+          BIOS path has nothing isolinux can load" >&2
+              exit 1
+            }
+          fi
 
   # Axiom A5, asserted against the binary rather than against the source
   # (SEC-006, #198).

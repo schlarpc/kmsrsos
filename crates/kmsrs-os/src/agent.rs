@@ -341,6 +341,13 @@ fn info_reply() -> String {
 /// use to an operator than one that says `Linux`, and claiming to be a
 /// distribution would be a lie with consequences — a management tool that
 /// believed it might try to run a package manager.
+///
+/// `machine` is [`std::env::consts::ARCH`] and not a literal (`OS-032`, #376).
+/// It said `x86_64` unconditionally for as long as there was only one
+/// bare-metal target, which is the shape of statement that stays true until
+/// the day it silently is not — and this one would then be a false claim a
+/// management tool believes, in the same field a package manager would key
+/// off. A compile-time constant cannot disagree with the binary it is in.
 fn osinfo_reply() -> String {
     let release = read_sysfs("/proc/sys/kernel/osrelease").unwrap_or_default();
     let release = escape(release.trim());
@@ -348,7 +355,8 @@ fn osinfo_reply() -> String {
         "{{\"return\": {{\"id\": \"kmsrsos\", \"name\": \"kmsrsos\", \
          \"pretty-name\": \"kmsrsos {VERSION}\", \"version\": \"{VERSION}\", \
          \"version-id\": \"{VERSION}\", \"kernel-release\": \"{release}\", \
-         \"machine\": \"x86_64\"}}}}\n"
+         \"machine\": \"{machine}\"}}}}\n",
+        machine = std::env::consts::ARCH
     )
 }
 

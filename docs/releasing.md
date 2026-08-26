@@ -16,9 +16,19 @@ was tested is a release nobody tested.
 | `kmsrsos-X.Y.Z-1.{x86_64,aarch64}.rpm` | the same payload |
 | `ghcr.io/schlarpc/kmsrsos:X.Y.Z` | multi-arch; two static binaries and nothing else |
 | `kmsrs-server.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
-| `kmsrsos-x86_64.iso` | the bootable bare-metal image (`OS-017`, #333); x86_64 only, uncompressed |
+| `kmsrsos-{x86_64,aarch64}.iso` | the bootable bare-metal image (`OS-017`, #333; `PKG-019`, #378); uncompressed, **and the two are not the same image** — see below |
 | `sbom-*.cdx.json` | CycloneDX, derived from the lockfile |
 | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksum file |
+
+**The two ISOs differ in structure, not only in instruction set** (`OS-033`, #377). The x86 image
+carries the kernel in ISO9660 with a small GRUB in its EFI System Partition, because isolinux reads
+ISO9660 and UEFI reads FAT and something has to bridge them. Arm64 guests have no BIOS, so the arm
+image has **no bootloader at all**: the kernel is the EFI executable, in the ESP, and firmware runs
+it. It is also the smaller of the two — 4.4 MiB against 5.3 MiB — which is a saving of the whole
+ISO9660 tree that the bootloader existed to read. `docs/decisions.md` has the numbers.
+
+Both are built on their own architecture's runner, and both get the same SBOM, checksum, signature
+and `--rebuild` treatment. There is no cross-compiled image and no release-only build path.
 
 There is no apt or yum repository and no Homebrew tap (decision 26): a repository is ongoing
 infrastructure with signing keys that have to be rotated, a downloadable package captures most of the
@@ -50,6 +60,9 @@ sha256sum -c SHA256SUMS
 There is a second channel, and it is deliberately a smaller one. Every push to `main` that passes the
 **whole** gate moves a rolling prerelease at the tag `latest`, carrying the bootable ISO, the two
 Windows binaries, and a signed checksum file.
+
+**The snapshot carries the x86_64 ISO only**, and that is a gap rather than a decision: a tag
+produces both images since `PKG-019` (#378) and this channel has not caught up. See #384.
 
 ```
 https://github.com/schlarpc/kmsrsos/releases/download/latest/kmsrsos-x86_64.iso

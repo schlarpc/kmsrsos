@@ -32,6 +32,21 @@
 //! unsupported one — which is exactly the failure #342 was filed about, since
 //! a missing NIC driver produces a machine that boots, reports `listening`, and
 //! serves nobody forever.
+//!
+//! # One target today, and the shape that survives a second
+//!
+//! `OS-031` (#375) turned this from a file that reads one path into a loop over
+//! [`TARGETS`]. That is not speculative generality: this file's whole subject is
+//! that a statement about a kernel has to be read off the kernel it is about,
+//! and a second architecture means a second generated file that the *same*
+//! assertions would happily read the first of. A test that reads the wrong file
+//! passes while asserting nothing, which is `OS-006` (#257) exactly.
+//!
+//! Each target carries **its own two lists**, not a shared one with exceptions.
+//! An architecture's TCB is not the other's plus a delta — the interrupt
+//! controller, the timer, the console and the power-off mechanism have no
+//! counterpart across the boundary — so a shared list with per-architecture
+//! overrides would be a statement neither target actually makes.
 
 #![allow(
     clippy::unwrap_used,
@@ -50,11 +65,52 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// One bare-metal target: what `linuxArches` in `flake.nix` calls it, the
+/// generated configuration it produced, and the two lists that are this file's
+/// statement about it.
+///
+/// Adding an architecture is an entry here plus its two lists (`OS-031`, #375).
+struct Target {
+    /// The architecture's name, as `flake.nix` and the artifact spell it. It
+    /// appears in every failure message, because "CONFIG_X is missing" is not
+    /// actionable when there is more than one file it could be missing from.
+    arch: &'static str,
+    /// The generated configuration, relative to the workspace root.
+    config: &'static str,
+    /// `(symbol, how it is absent, why it must be)`.
+    absent: &'static [(&'static str, Absence, &'static str)],
+    /// `(symbol, the platform that would stop working without it)`.
+    present: &'static [(&'static str, &'static str)],
+}
+
+/// Every bare-metal target, and the only place this file names one.
+const TARGETS: &[Target] = &[
+    Target {
+        arch: "x86_64",
+        config: "os/linux/kernel.config",
+        absent: X86_64_MUST_BE_ABSENT,
+        present: X86_64_MUST_BE_PRESENT,
+    },
+    Target {
+        arch: "aarch64",
+        config: "os/linux/kernel.config.aarch64",
+        absent: AARCH64_MUST_BE_ABSENT,
+        present: AARCH64_MUST_BE_PRESENT,
+    },
+];
+
 /// The generated configuration, as text.
-fn built_config() -> String {
-    let path = workspace_root().join("os/linux/kernel.config");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+fn built_config(target: &Target) -> String {
+    let path = workspace_root().join(target.config);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read {} for {}: {error}. A target whose configuration is \
+             missing is a target this file asserts nothing about (`OS-031`, \
+             #375)",
+            path.display(),
+            target.arch
+        )
+    });
 
     // A guard against the whole file being the wrong thing. `make
     // olddefconfig` writes this banner; the allowlist in `config.nix` does not,
@@ -67,6 +123,37 @@ fn built_config() -> String {
         path.display()
     );
     text
+}
+
+/// Every target is a distinct file, and there is at least one.
+///
+/// Both halves are the `OS-006` (#257) failure in the form this file could take
+/// it. An empty [`TARGETS`] makes every assertion below vacuous; two targets
+/// pointing at one file makes the second one's list an assertion about the
+/// first one's kernel, which passes and means nothing.
+#[test]
+fn every_target_has_a_configuration_of_its_own() {
+    assert!(
+        !TARGETS.is_empty(),
+        "no bare-metal target is listed, so every assertion in this file is \
+         vacuous (`OS-031`, #375)"
+    );
+
+    let mut seen: Vec<&str> = Vec::new();
+    for target in TARGETS {
+        assert!(
+            !seen.contains(&target.config),
+            "{} reads {}, which another target already claims. Its list would \
+             then be an assertion about a different architecture's kernel — \
+             which passes, and says nothing (`OS-031`, #375)",
+            target.arch,
+            target.config
+        );
+        seen.push(target.config);
+        // Read for its side effect: the banner check above is what proves the
+        // path is a *generated* config rather than the allowlist.
+        let _: String = built_config(target);
+    }
 }
 
 /// Whether a symbol is set to `y` in the built configuration.
@@ -118,329 +205,654 @@ enum Absence {
     Unreachable,
 }
 
-/// Axiom A5 and the small-TCB claim, read off the built kernel.
+/// Axiom A5 and the small-TCB claim on **x86_64**, read off the built kernel.
 ///
 /// Each entry names why it is out, because "we do not need it" is not a reason
 /// anybody can weigh against "this platform needs it" when `OS-023` (#339)
 /// comes to pare the file back.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the length is the table, and the table is the point: every entry \
-              names why it is out, so the list reads as a statement rather than \
-              a set of symbols"
-)]
+///
+/// The length is the table, and the table is the point: every entry names why
+/// it is out, so the list reads as a statement rather than a set of symbols.
+const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
+    // Axiom A5, structurally. Not "no block drivers" — no block *layer*,
+    // so disk I/O is a syscall with nothing behind it, and every one of
+    // these is `Unreachable` rather than merely off. That is the claim
+    // `docs/deployment.md` makes, checked.
+    (
+        "BLOCK",
+        Absence::TurnedOff,
+        "axiom A5: this machine has no storage",
+    ),
+    ("SCSI", Absence::Unreachable, "gated by BLOCK"),
+    ("ATA", Absence::Unreachable, "gated by BLOCK"),
+    ("NVME_CORE", Absence::Unreachable, "gated by BLOCK"),
+    ("VIRTIO_BLK", Absence::Unreachable, "gated by BLOCK"),
+    ("MD", Absence::Unreachable, "gated by BLOCK"),
+    ("EXT4_FS", Absence::Unreachable, "gated by BLOCK"),
+    ("VFAT_FS", Absence::Unreachable, "gated by BLOCK"),
+    // The interesting one: the machine boots from a CD-ROM and cannot read
+    // it. Firmware reads the ESP and the image runs from RAM thereafter.
+    ("ISO9660_FS", Absence::Unreachable, "gated by BLOCK"),
+    (
+        "NFS_FS",
+        Absence::Unreachable,
+        "gated by NETWORK_FILESYSTEMS",
+    ),
+    ("9P_FS", Absence::Unreachable, "gated by NET_9P"),
+    ("VIRTIO_FS", Absence::Unreachable, "gated by FUSE_FS"),
+    ("OVERLAY_FS", Absence::TurnedOff, "axiom A5"),
+    ("FUSE_FS", Absence::TurnedOff, "axiom A5"),
+    // A machine with one program in it does not load code at runtime.
+    (
+        "MODULES",
+        Absence::TurnedOff,
+        "nothing may be loaded at runtime",
+    ),
+    (
+        "KEXEC",
+        Absence::TurnedOff,
+        "nothing may replace this kernel",
+    ),
+    // Attack surface with no user here.
+    (
+        "NETFILTER",
+        Absence::TurnedOff,
+        "no firewall, and no configurator",
+    ),
+    (
+        "BPF_SYSCALL",
+        Absence::TurnedOff,
+        "a JIT reachable from userland",
+    ),
+    ("FTRACE", Absence::TurnedOff, "tracing nothing here reads"),
+    ("KPROBES", Absence::TurnedOff, "the same"),
+    // `CONFIG_DEBUG_KERNEL` is deliberately *not* on this list, and the
+    // reason is worth writing down because it looks like an omission.
+    //
+    // It is on in the built kernel and cannot be turned off: `tinyconfig`
+    // requires `CONFIG_EXPERT`, and `EXPERT` *selects* `DEBUG_KERNEL` — see
+    // `init/Kconfig`, whose comment reads "Unhide debug options, to make the
+    // on-by-default options visible". It is a menu gate, not code. Every
+    // option it unhides is off, `CONFIG_DEBUG_INFO_NONE=y`, and the kernel
+    // is not one byte larger for it.
+    //
+    // It sat on the disable list in `config.nix` for two issues doing
+    // nothing. What is asserted instead is what that gate unhides:
+    (
+        "DEBUG_MISC",
+        Absence::TurnedOff,
+        "debug code with no better home",
+    ),
+    ("DYNAMIC_DEBUG", Absence::TurnedOff, "a runtime log surface"),
+    (
+        "DEBUG_FS",
+        Absence::TurnedOff,
+        "a filesystem; A5 twice over",
+    ),
+    (
+        "KGDB",
+        Absence::TurnedOff,
+        "a debugger on a network service",
+    ),
+    ("KASAN", Absence::Unreachable, "gated by its own arch menu"),
+    (
+        "KCSAN",
+        Absence::TurnedOff,
+        "instrumentation in a shipped kernel",
+    ),
+    ("UBSAN", Absence::TurnedOff, "the same"),
+    ("DEBUG_KMEMLEAK", Absence::TurnedOff, "the same"),
+    ("GDB_SCRIPTS", Absence::Unreachable, "gated by DEBUG_INFO"),
+    (
+        "MAGIC_SYSRQ",
+        Absence::TurnedOff,
+        "a console that can panic the host",
+    ),
+    ("USB_SUPPORT", Absence::TurnedOff, "no USB is attached"),
+    ("SOUND", Absence::TurnedOff, "no"),
+    (
+        "WLAN",
+        Absence::TurnedOff,
+        "a hypervisor emulates no wireless",
+    ),
+    ("BT", Absence::TurnedOff, "the same"),
+    ("KVM", Absence::Unreachable, "gated by VIRTUALIZATION"),
+    ("VFIO", Absence::TurnedOff, "nothing is passed through"),
+    // One program, one user, no isolation to configure — and no daemon
+    // that would configure it.
+    ("NAMESPACES", Absence::TurnedOff, "there is one process"),
+    ("CGROUPS", Absence::TurnedOff, "there is one process"),
+    (
+        "SECURITY",
+        Absence::TurnedOff,
+        "no LSM is or could be configured",
+    ),
+    // `OS-026` (#343): the power button needs the event layer and nothing
+    // else. Every one of these was on, unasked, until that issue.
+    (
+        "INPUT_KEYBOARD",
+        Absence::TurnedOff,
+        "OS-026: not a keyboard",
+    ),
+    ("INPUT_MOUSE", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_MOUSEDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_JOYDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    (
+        "SERIO",
+        Absence::TurnedOff,
+        "OS-026: nothing sits on a PS/2 bus",
+    ),
+    // `OS-025` (#342): the Xen paravirt path, declined on the measurement
+    // — 148 KiB against RTL8139's 12 KiB, for throughput a host answering
+    // one request per client per few hours does not need.
+    ("XEN", Absence::TurnedOff, "OS-025: XCP-ng works on 8139cp"),
+    ("XEN_NETDEV_FRONTEND", Absence::Unreachable, "gated by XEN"),
+    // `OS-023` (#339): four drivers nobody asked for, present since
+    // `OS-017` (#333) and found by reading the built config.
+    (
+        "INTEL_MEI",
+        Absence::TurnedOff,
+        "a guest has no Management Engine",
+    ),
+    ("INTEL_MEI_ME", Absence::Unreachable, "gated by INTEL_MEI"),
+    // Unreachable rather than off, and only since `HID` above went: this
+    // test reported the change rather than passing through it, which is
+    // what the distinction is for.
+    ("I2C_HID", Absence::Unreachable, "gated by HID"),
+    // `CONFIG_THERMAL` is deliberately absent from this list. It is on,
+    // because `CONFIG_ACPI_PROCESSOR` selects it, and that one earns its
+    // place: ACPI idle states are what stop a host that is idle 99.99 % of
+    // the time from burning a core on the hypervisor. What *is* asserted is
+    // the ACPI thermal-zone driver, which a guest has no zones for.
+    (
+        "ACPI_THERMAL",
+        Absence::TurnedOff,
+        "a guest has no thermal zones",
+    ),
+    (
+        "HID",
+        Absence::TurnedOff,
+        "the button is ACPI, read through evdev",
+    ),
+    ("HID_GENERIC", Absence::Unreachable, "gated by HID"),
+    // `OS-019` (#335): one DHCP client, in the program.
+    (
+        "IP_PNP",
+        Absence::TurnedOff,
+        "OS-019: kmsrs-os speaks DHCP itself",
+    ),
+    ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    // Power management this machine has no use for, and which would let a
+    // hypervisor suspend a host that is meant to answer.
+    (
+        "SUSPEND",
+        Absence::TurnedOff,
+        "a host that suspends is a host down",
+    ),
+    (
+        "HIBERNATION",
+        Absence::Unreachable,
+        "gated by SWAP and BLOCK",
+    ),
+];
+
+/// Axiom A5 and the small-TCB claim on **aarch64** (`OS-032`, #376).
+///
+/// Not the x86 list with substitutions. Six entries at the end have no x86
+/// counterpart at all, and four x86 entries are missing because the symbols
+/// they name do not exist on this architecture — `INTEL_MEI` and
+/// `HYPERV_TIMER` among them. Copying the other list would have produced
+/// entries that read as assertions and check nothing, which is what
+/// [`Absence::Unreachable`] cannot distinguish from a misspelling.
+const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
+    // Axiom A5, structurally, exactly as on x86: no block *layer*.
+    (
+        "BLOCK",
+        Absence::TurnedOff,
+        "axiom A5: this machine has no storage",
+    ),
+    ("SCSI", Absence::Unreachable, "gated by BLOCK"),
+    ("ATA", Absence::Unreachable, "gated by BLOCK"),
+    ("NVME_CORE", Absence::Unreachable, "gated by BLOCK"),
+    ("VIRTIO_BLK", Absence::Unreachable, "gated by BLOCK"),
+    ("MD", Absence::Unreachable, "gated by BLOCK"),
+    ("EXT4_FS", Absence::Unreachable, "gated by BLOCK"),
+    ("VFAT_FS", Absence::Unreachable, "gated by BLOCK"),
+    // The machine's kernel lives in a FAT filesystem it cannot read, and
+    // boots from a CD-ROM it cannot read either. Firmware reads both.
+    ("ISO9660_FS", Absence::Unreachable, "gated by BLOCK"),
+    (
+        "NFS_FS",
+        Absence::Unreachable,
+        "gated by NETWORK_FILESYSTEMS",
+    ),
+    ("9P_FS", Absence::Unreachable, "gated by NET_9P"),
+    ("VIRTIO_FS", Absence::Unreachable, "gated by FUSE_FS"),
+    ("OVERLAY_FS", Absence::TurnedOff, "axiom A5"),
+    ("FUSE_FS", Absence::TurnedOff, "axiom A5"),
+    (
+        "MODULES",
+        Absence::TurnedOff,
+        "nothing may be loaded at runtime",
+    ),
+    (
+        "KEXEC",
+        Absence::Unreachable,
+        "nothing may replace this kernel",
+    ),
+    (
+        "NETFILTER",
+        Absence::TurnedOff,
+        "no firewall, and no configurator",
+    ),
+    (
+        "BPF_SYSCALL",
+        Absence::TurnedOff,
+        "a JIT reachable from userland",
+    ),
+    ("FTRACE", Absence::TurnedOff, "tracing nothing here reads"),
+    ("KPROBES", Absence::TurnedOff, "the same"),
+    (
+        "DEBUG_MISC",
+        Absence::TurnedOff,
+        "debug code with no better home",
+    ),
+    ("DYNAMIC_DEBUG", Absence::TurnedOff, "a runtime log surface"),
+    (
+        "DEBUG_FS",
+        Absence::TurnedOff,
+        "a filesystem; A5 twice over",
+    ),
+    (
+        "KGDB",
+        Absence::TurnedOff,
+        "a debugger on a network service",
+    ),
+    ("KASAN", Absence::Unreachable, "gated by its own arch menu"),
+    (
+        "KCSAN",
+        Absence::TurnedOff,
+        "instrumentation in a shipped kernel",
+    ),
+    ("UBSAN", Absence::TurnedOff, "the same"),
+    ("DEBUG_KMEMLEAK", Absence::TurnedOff, "the same"),
+    ("GDB_SCRIPTS", Absence::Unreachable, "gated by DEBUG_INFO"),
+    (
+        "MAGIC_SYSRQ",
+        Absence::TurnedOff,
+        "a console that can panic the host",
+    ),
+    ("USB_SUPPORT", Absence::TurnedOff, "no USB is attached"),
+    ("SOUND", Absence::TurnedOff, "no"),
+    (
+        "WLAN",
+        Absence::TurnedOff,
+        "a hypervisor emulates no wireless",
+    ),
+    ("BT", Absence::TurnedOff, "the same"),
+    ("KVM", Absence::Unreachable, "gated by VIRTUALIZATION"),
+    ("VFIO", Absence::TurnedOff, "nothing is passed through"),
+    ("NAMESPACES", Absence::TurnedOff, "there is one process"),
+    ("CGROUPS", Absence::TurnedOff, "there is one process"),
+    (
+        "SECURITY",
+        Absence::TurnedOff,
+        "no LSM is or could be configured",
+    ),
+    // `OS-026` (#343): the power button needs the event layer and nothing
+    // else, here as much as on x86.
+    (
+        "INPUT_KEYBOARD",
+        Absence::TurnedOff,
+        "OS-026: not a keyboard",
+    ),
+    ("INPUT_MOUSE", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_MOUSEDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    ("INPUT_JOYDEV", Absence::TurnedOff, "OS-026 (#343)"),
+    (
+        "SERIO",
+        Absence::TurnedOff,
+        "OS-026: nothing sits on a PS/2 bus",
+    ),
+    (
+        "HID",
+        Absence::TurnedOff,
+        "the button is ACPI, read through evdev",
+    ),
+    ("HID_GENERIC", Absence::Unreachable, "gated by HID"),
+    ("I2C_HID", Absence::Unreachable, "gated by HID"),
+    (
+        "ACPI_THERMAL",
+        Absence::TurnedOff,
+        "a guest has no thermal zones",
+    ),
+    (
+        "XEN",
+        Absence::TurnedOff,
+        "OS-025: declined on the measurement",
+    ),
+    ("XEN_NETDEV_FRONTEND", Absence::Unreachable, "gated by XEN"),
+    (
+        "IP_PNP",
+        Absence::TurnedOff,
+        "OS-019: kmsrs-os speaks DHCP itself",
+    ),
+    ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    (
+        "SUSPEND",
+        Absence::TurnedOff,
+        "a host that suspends is a host down",
+    ),
+    (
+        "HIBERNATION",
+        Absence::Unreachable,
+        "gated by SWAP and BLOCK",
+    ),
+    // --- from here down there is no x86 counterpart ---
+    //
+    // These are what makes this a list rather than a copy, and each one is a
+    // fact about this architecture that has no analogue on the other.
+    //
+    // The four NIC drivers are the interesting group: they are *absent by
+    // decision*, not by accident. `OS-025` (#342)'s matrix is a claim about
+    // products, and every product behind these four is x86-only — VirtualBox
+    // has no aarch64 guests, Hyper-V Generation 1 is x86, Xen HVM does not run
+    // aarch64 guests, and VMware's aarch64 products offer no vmxnet3. Asserting
+    // their absence is what stops the arm allowlist quietly growing into a copy
+    // of the x86 one.
+    (
+        "COMPAT",
+        Absence::TurnedOff,
+        "OS-032: a second syscall table for a userland of one aarch64 binary",
+    ),
+    (
+        "PERF_EVENTS",
+        Absence::TurnedOff,
+        "OS-032: perf_event_open(2) has no user in a one-program image",
+    ),
+    (
+        "THERMAL_OF",
+        Absence::TurnedOff,
+        "OS-032: the device-tree twin of ACPI_THERMAL; no zones either way",
+    ),
+    (
+        "ARM64_VA_BITS_52",
+        Absence::TurnedOff,
+        "OS-032: 48-bit, which is what every distribution ships",
+    ),
+    (
+        "ARM64_LPA2",
+        Absence::Unreachable,
+        "gated by the 52-bit choice above",
+    ),
+    (
+        "ARM64_64K_PAGES",
+        Absence::TurnedOff,
+        "OS-032: 4K, for the same reason as the VA size",
+    ),
+    (
+        "VMXNET3",
+        Absence::TurnedOff,
+        "OS-032: Fusion on Apple Silicon offers no vmxnet3",
+    ),
+    (
+        "PCNET32",
+        Absence::TurnedOff,
+        "OS-032: VirtualBox has no aarch64 guests",
+    ),
+    (
+        "8139CP",
+        Absence::TurnedOff,
+        "OS-032: Xen HVM does not run aarch64 guests",
+    ),
+    (
+        "TULIP",
+        Absence::Unreachable,
+        "OS-032: Hyper-V Generation 1 is x86; Arm Azure is Gen 2, so VMBus",
+    ),
+];
+
+/// `OS-025` (#342) on **aarch64**: every driver the arm matrix promises.
+///
+/// Half of this list has no x86 counterpart, and that half is the reason
+/// `OS-032` (#376) says the two files are not ports of each other. On x86 the
+/// interrupt controller, the timer, the PCI host bridge and the power-off
+/// mechanism are all implicit; here every one of them is a driver that can be
+/// left out, and leaving any of them out produces a machine that does not boot
+/// at all rather than one that boots and serves nobody.
+const AARCH64_MUST_BE_PRESENT: &[(&str, &str)] = &[
+    // --- the platform, none of which x86 has to name ---
+    (
+        "ARM_GIC_V3",
+        "every server-class Arm machine: QEMU virt, and Graviton",
+    ),
+    (
+        "ARM_GIC_V3_ITS",
+        "PCIe MSI, which is how a virtio NIC raises an interrupt at all",
+    ),
+    (
+        "ARM_ARCH_TIMER",
+        "the clock source; the counterpart of x86's kvmclock",
+    ),
+    (
+        "ARM_PSCI_FW",
+        "OS-026 (#343): SYSTEM_OFF, which is how this machine powers down",
+    ),
+    (
+        "PCI_HOST_GENERIC",
+        "the ECAM host bridge QEMU virt and the Arm SBSA describe",
+    ),
+    ("PCI_ECAM", "the same bridge's configuration space"),
+    (
+        "ARM64_4K_PAGES",
+        "what Amazon Linux, Debian and every other aarch64 distribution ship",
+    ),
+    (
+        "ARM64_VA_BITS_48",
+        "the same; 52-bit VA drags in LPA2, which nobody ships",
+    ),
+    // --- the console, which is two drivers here and one on x86 ---
+    (
+        "SERIAL_AMBA_PL011_CONSOLE",
+        "QEMU virt and Proxmox VE for arm64, whose UART is a PL011",
+    ),
+    (
+        "SERIAL_8250_CONSOLE",
+        "EC2 Graviton, whose UART is a 16550A — observed, not assumed",
+    ),
+    ("FRAMEBUFFER_CONSOLE", "Proxmox's noVNC window"),
+    ("VT_CONSOLE", "the same"),
+    // Boot.
+    (
+        "EFI_STUB",
+        "every aarch64 platform, since every one of them is UEFI",
+    ),
+    ("BLK_DEV_INITRD", "the initramfs is the whole userland"),
+    (
+        "RANDOMIZE_BASE",
+        "OS-032 (#376): KASLR, which x86 had and this silently did not",
+    ),
+    // Networking.
+    (
+        "VIRTIO_NET",
+        "Proxmox VE for arm64, and every other KVM-derived hypervisor",
+    ),
+    (
+        "E1000",
+        "Proxmox's E1000 entry, whose model list is one list for all arches",
+    ),
+    ("E1000E", "Parallels and VMware Fusion on Apple Silicon"),
+    (
+        "ENA_ETHERNET",
+        "EC2 Graviton, which is Nitro and therefore ENA",
+    ),
+    (
+        "HYPERV",
+        "Azure's Cobalt 100 instances, which are Hyper-V Generation 2",
+    ),
+    ("HYPERV_NET", "the same — this *is* the NIC there"),
+    // `OS-026` (#343): the polite stop, which arrives through the ACPI
+    // Generic Event Device here rather than a fixed-hardware button.
+    (
+        "INPUT_EVDEV",
+        "OS-026 (#343): reading the power key the GED raises",
+    ),
+    (
+        "ACPI_BUTTON",
+        "OS-026 (#343): the device the GED raises it on",
+    ),
+    // `OS-022` (#338).
+    ("VIRTIO_CONSOLE", "OS-022 (#338): the guest-agent channel"),
+    ("VIRTIO_BALLOON", "OS-022 (#338): memory statistics"),
+    // Entropy, of which this machine has two sources and x86 has one.
+    ("HW_RANDOM_VIRTIO", "OS-023 (#339): worth ~2.3 s of boot"),
+    (
+        "HW_RANDOM_ARM_SMCCC_TRNG",
+        "OS-032 (#376): the architected firmware TRNG, which needs no device",
+    ),
+    // What pid 1 needs to exist at all.
+    ("DEVTMPFS", "OS-021 (#337): /dev has one node without it"),
+    ("PROC_FS", "OS-028 (#345): /proc/consoles"),
+    ("SYSFS", "OS-026 (#343) and OS-022 (#338) both read it"),
+];
+
+/// Every target's must-stay-out list, against that target's own kernel.
 #[test]
 fn the_subsystems_that_must_stay_out_are_out() {
-    /// `(symbol, how it is absent, why it must be)`.
-    const MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
-        // Axiom A5, structurally. Not "no block drivers" — no block *layer*,
-        // so disk I/O is a syscall with nothing behind it, and every one of
-        // these is `Unreachable` rather than merely off. That is the claim
-        // `docs/deployment.md` makes, checked.
-        (
-            "BLOCK",
-            Absence::TurnedOff,
-            "axiom A5: this machine has no storage",
-        ),
-        ("SCSI", Absence::Unreachable, "gated by BLOCK"),
-        ("ATA", Absence::Unreachable, "gated by BLOCK"),
-        ("NVME_CORE", Absence::Unreachable, "gated by BLOCK"),
-        ("VIRTIO_BLK", Absence::Unreachable, "gated by BLOCK"),
-        ("MD", Absence::Unreachable, "gated by BLOCK"),
-        ("EXT4_FS", Absence::Unreachable, "gated by BLOCK"),
-        ("VFAT_FS", Absence::Unreachable, "gated by BLOCK"),
-        // The interesting one: the machine boots from a CD-ROM and cannot read
-        // it. Firmware reads the ESP and the image runs from RAM thereafter.
-        ("ISO9660_FS", Absence::Unreachable, "gated by BLOCK"),
-        (
-            "NFS_FS",
-            Absence::Unreachable,
-            "gated by NETWORK_FILESYSTEMS",
-        ),
-        ("9P_FS", Absence::Unreachable, "gated by NET_9P"),
-        ("VIRTIO_FS", Absence::Unreachable, "gated by FUSE_FS"),
-        ("OVERLAY_FS", Absence::TurnedOff, "axiom A5"),
-        ("FUSE_FS", Absence::TurnedOff, "axiom A5"),
-        // A machine with one program in it does not load code at runtime.
-        (
-            "MODULES",
-            Absence::TurnedOff,
-            "nothing may be loaded at runtime",
-        ),
-        (
-            "KEXEC",
-            Absence::TurnedOff,
-            "nothing may replace this kernel",
-        ),
-        // Attack surface with no user here.
-        (
-            "NETFILTER",
-            Absence::TurnedOff,
-            "no firewall, and no configurator",
-        ),
-        (
-            "BPF_SYSCALL",
-            Absence::TurnedOff,
-            "a JIT reachable from userland",
-        ),
-        ("FTRACE", Absence::TurnedOff, "tracing nothing here reads"),
-        ("KPROBES", Absence::TurnedOff, "the same"),
-        // `CONFIG_DEBUG_KERNEL` is deliberately *not* on this list, and the
-        // reason is worth writing down because it looks like an omission.
-        //
-        // It is on in the built kernel and cannot be turned off: `tinyconfig`
-        // requires `CONFIG_EXPERT`, and `EXPERT` *selects* `DEBUG_KERNEL` — see
-        // `init/Kconfig`, whose comment reads "Unhide debug options, to make the
-        // on-by-default options visible". It is a menu gate, not code. Every
-        // option it unhides is off, `CONFIG_DEBUG_INFO_NONE=y`, and the kernel
-        // is not one byte larger for it.
-        //
-        // It sat on the disable list in `config.nix` for two issues doing
-        // nothing. What is asserted instead is what that gate unhides:
-        (
-            "DEBUG_MISC",
-            Absence::TurnedOff,
-            "debug code with no better home",
-        ),
-        ("DYNAMIC_DEBUG", Absence::TurnedOff, "a runtime log surface"),
-        (
-            "DEBUG_FS",
-            Absence::TurnedOff,
-            "a filesystem; A5 twice over",
-        ),
-        (
-            "KGDB",
-            Absence::TurnedOff,
-            "a debugger on a network service",
-        ),
-        ("KASAN", Absence::Unreachable, "gated by its own arch menu"),
-        (
-            "KCSAN",
-            Absence::TurnedOff,
-            "instrumentation in a shipped kernel",
-        ),
-        ("UBSAN", Absence::TurnedOff, "the same"),
-        ("DEBUG_KMEMLEAK", Absence::TurnedOff, "the same"),
-        ("GDB_SCRIPTS", Absence::Unreachable, "gated by DEBUG_INFO"),
-        (
-            "MAGIC_SYSRQ",
-            Absence::TurnedOff,
-            "a console that can panic the host",
-        ),
-        ("USB_SUPPORT", Absence::TurnedOff, "no USB is attached"),
-        ("SOUND", Absence::TurnedOff, "no"),
-        (
-            "WLAN",
-            Absence::TurnedOff,
-            "a hypervisor emulates no wireless",
-        ),
-        ("BT", Absence::TurnedOff, "the same"),
-        ("KVM", Absence::Unreachable, "gated by VIRTUALIZATION"),
-        ("VFIO", Absence::TurnedOff, "nothing is passed through"),
-        // One program, one user, no isolation to configure — and no daemon
-        // that would configure it.
-        ("NAMESPACES", Absence::TurnedOff, "there is one process"),
-        ("CGROUPS", Absence::TurnedOff, "there is one process"),
-        (
-            "SECURITY",
-            Absence::TurnedOff,
-            "no LSM is or could be configured",
-        ),
-        // `OS-026` (#343): the power button needs the event layer and nothing
-        // else. Every one of these was on, unasked, until that issue.
-        (
-            "INPUT_KEYBOARD",
-            Absence::TurnedOff,
-            "OS-026: not a keyboard",
-        ),
-        ("INPUT_MOUSE", Absence::TurnedOff, "OS-026 (#343)"),
-        ("INPUT_MOUSEDEV", Absence::TurnedOff, "OS-026 (#343)"),
-        ("INPUT_JOYDEV", Absence::TurnedOff, "OS-026 (#343)"),
-        (
-            "SERIO",
-            Absence::TurnedOff,
-            "OS-026: nothing sits on a PS/2 bus",
-        ),
-        // `OS-025` (#342): the Xen paravirt path, declined on the measurement
-        // — 148 KiB against RTL8139's 12 KiB, for throughput a host answering
-        // one request per client per few hours does not need.
-        ("XEN", Absence::TurnedOff, "OS-025: XCP-ng works on 8139cp"),
-        ("XEN_NETDEV_FRONTEND", Absence::Unreachable, "gated by XEN"),
-        // `OS-023` (#339): four drivers nobody asked for, present since
-        // `OS-017` (#333) and found by reading the built config.
-        (
-            "INTEL_MEI",
-            Absence::TurnedOff,
-            "a guest has no Management Engine",
-        ),
-        ("INTEL_MEI_ME", Absence::Unreachable, "gated by INTEL_MEI"),
-        // Unreachable rather than off, and only since `HID` above went: this
-        // test reported the change rather than passing through it, which is
-        // what the distinction is for.
-        ("I2C_HID", Absence::Unreachable, "gated by HID"),
-        // `CONFIG_THERMAL` is deliberately absent from this list. It is on,
-        // because `CONFIG_ACPI_PROCESSOR` selects it, and that one earns its
-        // place: ACPI idle states are what stop a host that is idle 99.99 % of
-        // the time from burning a core on the hypervisor. What *is* asserted is
-        // the ACPI thermal-zone driver, which a guest has no zones for.
-        (
-            "ACPI_THERMAL",
-            Absence::TurnedOff,
-            "a guest has no thermal zones",
-        ),
-        (
-            "HID",
-            Absence::TurnedOff,
-            "the button is ACPI, read through evdev",
-        ),
-        ("HID_GENERIC", Absence::Unreachable, "gated by HID"),
-        // `OS-019` (#335): one DHCP client, in the program.
-        (
-            "IP_PNP",
-            Absence::TurnedOff,
-            "OS-019: kmsrs-os speaks DHCP itself",
-        ),
-        ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
-        // Power management this machine has no use for, and which would let a
-        // hypervisor suspend a host that is meant to answer.
-        (
-            "SUSPEND",
-            Absence::TurnedOff,
-            "a host that suspends is a host down",
-        ),
-        (
-            "HIBERNATION",
-            Absence::Unreachable,
-            "gated by SWAP and BLOCK",
-        ),
-    ];
+    for target in TARGETS {
+        let config = built_config(target);
+        let mut present = Vec::new();
+        let mut misclassified = Vec::new();
 
-    let config = built_config();
-    let mut present = Vec::new();
-    let mut misclassified = Vec::new();
+        for (symbol, absence, why) in target.absent {
+            if enabled(&config, symbol) || a_module(&config, symbol) {
+                present.push(format!("CONFIG_{symbol} — {why}"));
+                continue;
+            }
+            match (absence, mentioned(&config, symbol)) {
+                (Absence::TurnedOff, false) => misclassified.push(format!(
+                    "CONFIG_{symbol} is marked TurnedOff and appears nowhere. \
+                     Either the name is misspelled — in which case this entry \
+                     has been asserting nothing — or its gate went off, and it \
+                     is now Unreachable"
+                )),
+                (Absence::Unreachable, true) => misclassified.push(format!(
+                    "CONFIG_{symbol} is marked Unreachable ({why}) and the \
+                     configuration mentions it, so its gate is now on. That is \
+                     a change to what this machine could be built with"
+                )),
+                _ => {}
+            }
+        }
 
-    for (symbol, absence, why) in MUST_BE_ABSENT {
-        if enabled(&config, symbol) || a_module(&config, symbol) {
-            present.push(format!("CONFIG_{symbol} — {why}"));
-            continue;
-        }
-        match (absence, mentioned(&config, symbol)) {
-            (Absence::TurnedOff, false) => misclassified.push(format!(
-                "CONFIG_{symbol} is marked TurnedOff and appears nowhere. \
-                 Either the name is misspelled — in which case this entry has \
-                 been asserting nothing — or its gate went off, and it is now \
-                 Unreachable"
-            )),
-            (Absence::Unreachable, true) => misclassified.push(format!(
-                "CONFIG_{symbol} is marked Unreachable ({why}) and the \
-                 configuration mentions it, so its gate is now on. That is a \
-                 change to what this machine could be built with"
-            )),
-            _ => {}
-        }
+        assert!(
+            present.is_empty(),
+            "these are in the built {} kernel and must not be. If one is \
+             genuinely needed, adding it changes what is in this machine's TCB \
+             and belongs in a commit that says so: {present:#?}",
+            target.arch
+        );
+        assert!(
+            misclassified.is_empty(),
+            "these are absent from the {} kernel, but not in the way this test \
+             claims. A misspelled symbol reads as 'off' forever, which is why \
+             the distinction is asserted rather than assumed: {misclassified:#?}",
+            target.arch
+        );
     }
-
-    assert!(
-        present.is_empty(),
-        "these are in the built kernel and must not be. If one is genuinely \
-         needed, adding it changes what is in this machine's TCB and belongs \
-         in a commit that says so: {present:#?}"
-    );
-    assert!(
-        misclassified.is_empty(),
-        "these are absent, but not in the way this test claims. A misspelled \
-         symbol reads as 'off' forever, which is why the distinction is \
-         asserted rather than assumed: {misclassified:#?}"
-    );
 }
 
-/// `OS-025` (#342): the pare-back may not remove what the matrix promises.
+/// `OS-025` (#342) on **x86_64**: the pare-back may not remove what the matrix
+/// promises.
 ///
 /// Every entry names the platform that needs it. A driver whose platform is no
 /// longer claimed should be removed from *both* this list and
 /// `docs/deployment.md` in the same commit — which is the point of naming them
 /// here rather than keeping a bare list of symbols.
+const X86_64_MUST_BE_PRESENT: &[(&str, &str)] = &[
+    // The console, which is how every one of the failures on this target
+    // has been diagnosed.
+    ("SERIAL_8250_CONSOLE", "every platform with a serial port"),
+    ("FRAMEBUFFER_CONSOLE", "Proxmox's noVNC window"),
+    ("VT_CONSOLE", "the same"),
+    // Boot.
+    ("EFI_STUB", "every UEFI platform, which is most of them"),
+    ("BLK_DEV_INITRD", "the initramfs is the whole userland"),
+    // Networking, which is the entire point of the matrix.
+    (
+        "VIRTIO_NET",
+        "Proxmox, Nutanix AHV, bhyve, Cloud Hypervisor",
+    ),
+    (
+        "E1000",
+        "VirtualBox's default, and Proxmox's E1000 dropdown",
+    ),
+    ("E1000E", "VMware Workstation, Proxmox's E1000E dropdown"),
+    // `OS-025` (#342). Each of these is a row in the matrix in
+    // `docs/deployment.md`; removing one silently turns a supported
+    // platform into an unsupported one.
+    (
+        "VMXNET3",
+        "VMware ESXi and Workstation, Proxmox's vmxnet3 dropdown",
+    ),
+    (
+        "8139CP",
+        "Proxmox's RTL8139 dropdown, and Xen HVM's default NIC",
+    ),
+    ("PCNET32", "VirtualBox's older adapter choices"),
+    (
+        "TULIP",
+        "Hyper-V Gen 1's Legacy Network Adapter, a DEC 21140",
+    ),
+    ("ENA_ETHERNET", "OS-027 (#344): EC2 Nitro"),
+    (
+        "HYPERV",
+        "Hyper-V Gen 2 and Azure, which have no emulated NIC",
+    ),
+    ("HYPERV_NET", "the same — this *is* the NIC there"),
+    (
+        "HYPERV_TIMER",
+        "the reference TSC, which keeps the clock close",
+    ),
+    // `OS-026` (#343): a hypervisor's polite stop.
+    (
+        "INPUT_EVDEV",
+        "OS-026 (#343): reading the ACPI power button",
+    ),
+    ("ACPI_BUTTON", "OS-026 (#343): generating the event to read"),
+    // `OS-022` (#338).
+    ("VIRTIO_CONSOLE", "OS-022 (#338): the guest-agent channel"),
+    ("VIRTIO_BALLOON", "OS-022 (#338): memory statistics"),
+    // Boot time, and the reason the machine does not block in getrandom.
+    ("HW_RANDOM_VIRTIO", "OS-023 (#339): worth ~2.3 s of boot"),
+    // What pid 1 needs to exist at all.
+    ("DEVTMPFS", "OS-021 (#337): /dev has one node without it"),
+    ("PROC_FS", "OS-028 (#345): /proc/consoles"),
+    ("SYSFS", "OS-026 (#343) and OS-022 (#338) both read it"),
+];
+
+/// Every target's must-be-present list, against that target's own kernel.
 #[test]
 fn every_driver_the_platform_matrix_needs_is_in() {
-    /// `(symbol, the platform that would stop working without it)`.
-    const MUST_BE_PRESENT: &[(&str, &str)] = &[
-        // The console, which is how every one of the failures on this target
-        // has been diagnosed.
-        ("SERIAL_8250_CONSOLE", "every platform with a serial port"),
-        ("FRAMEBUFFER_CONSOLE", "Proxmox's noVNC window"),
-        ("VT_CONSOLE", "the same"),
-        // Boot.
-        ("EFI_STUB", "every UEFI platform, which is most of them"),
-        ("BLK_DEV_INITRD", "the initramfs is the whole userland"),
-        // Networking, which is the entire point of the matrix.
-        (
-            "VIRTIO_NET",
-            "Proxmox, Nutanix AHV, bhyve, Cloud Hypervisor",
-        ),
-        (
-            "E1000",
-            "VirtualBox's default, and Proxmox's E1000 dropdown",
-        ),
-        ("E1000E", "VMware Workstation, Proxmox's E1000E dropdown"),
-        // `OS-025` (#342). Each of these is a row in the matrix in
-        // `docs/deployment.md`; removing one silently turns a supported
-        // platform into an unsupported one.
-        (
-            "VMXNET3",
-            "VMware ESXi and Workstation, Proxmox's vmxnet3 dropdown",
-        ),
-        (
-            "8139CP",
-            "Proxmox's RTL8139 dropdown, and Xen HVM's default NIC",
-        ),
-        ("PCNET32", "VirtualBox's older adapter choices"),
-        (
-            "TULIP",
-            "Hyper-V Gen 1's Legacy Network Adapter, a DEC 21140",
-        ),
-        ("ENA_ETHERNET", "OS-027 (#344): EC2 Nitro"),
-        (
-            "HYPERV",
-            "Hyper-V Gen 2 and Azure, which have no emulated NIC",
-        ),
-        ("HYPERV_NET", "the same — this *is* the NIC there"),
-        (
-            "HYPERV_TIMER",
-            "the reference TSC, which keeps the clock close",
-        ),
-        // `OS-026` (#343): a hypervisor's polite stop.
-        (
-            "INPUT_EVDEV",
-            "OS-026 (#343): reading the ACPI power button",
-        ),
-        ("ACPI_BUTTON", "OS-026 (#343): generating the event to read"),
-        // `OS-022` (#338).
-        ("VIRTIO_CONSOLE", "OS-022 (#338): the guest-agent channel"),
-        ("VIRTIO_BALLOON", "OS-022 (#338): memory statistics"),
-        // Boot time, and the reason the machine does not block in getrandom.
-        ("HW_RANDOM_VIRTIO", "OS-023 (#339): worth ~2.3 s of boot"),
-        // What pid 1 needs to exist at all.
-        ("DEVTMPFS", "OS-021 (#337): /dev has one node without it"),
-        ("PROC_FS", "OS-028 (#345): /proc/consoles"),
-        ("SYSFS", "OS-026 (#343) and OS-022 (#338) both read it"),
-    ];
-
-    let config = built_config();
-    let mut missing = Vec::new();
-    for (symbol, platform) in MUST_BE_PRESENT {
-        if !enabled(&config, symbol) {
-            missing.push(format!("CONFIG_{symbol} — needed by {platform}"));
+    for target in TARGETS {
+        let config = built_config(target);
+        let mut missing = Vec::new();
+        for (symbol, platform) in target.present {
+            if !enabled(&config, symbol) {
+                missing.push(format!("CONFIG_{symbol} — needed by {platform}"));
+            }
         }
-    }
 
-    assert!(
-        missing.is_empty(),
-        "these are gone from the built kernel and something depends on each. \
-         `OS-023` (#339) may pare this file back and may not remove anything \
-         `OS-025` (#342)'s matrix promises — a missing NIC driver produces a \
-         machine that boots, reports `listening`, and serves nobody forever: \
-         {missing:#?}"
-    );
+        assert!(
+            missing.is_empty(),
+            "these are gone from the built {} kernel and something depends on \
+             each. `OS-023` (#339) may pare this file back and may not remove \
+             anything `OS-025` (#342)'s matrix promises — a missing NIC driver \
+             produces a machine that boots, reports `listening`, and serves \
+             nobody forever: {missing:#?}",
+            target.arch
+        );
+    }
 }
 
 /// Nothing is a module, because `CONFIG_MODULES` is off.
@@ -451,16 +863,20 @@ fn every_driver_the_platform_matrix_needs_is_in() {
 /// would pass a test that only looked for the symbol's presence.
 #[test]
 fn nothing_is_built_as_a_module() {
-    let config = built_config();
-    let modules: Vec<&str> = config
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.ends_with("=m"))
-        .collect();
+    for target in TARGETS {
+        let config = built_config(target);
+        let modules: Vec<&str> = config
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with("=m"))
+            .collect();
 
-    assert!(
-        modules.is_empty(),
-        "these are built as modules in a kernel with no module loader, so they \
-         cost size and do not exist at runtime: {modules:#?}"
-    );
+        assert!(
+            modules.is_empty(),
+            "these are built as modules in the {} kernel, which has no module \
+             loader, so they cost size and do not exist at runtime: \
+             {modules:#?}",
+            target.arch
+        );
+    }
 }

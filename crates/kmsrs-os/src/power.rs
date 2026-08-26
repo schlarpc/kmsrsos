@@ -71,7 +71,9 @@ const PRESSED: i32 = 1;
 /// Sized from `usize` rather than written as 16, because that is the same width
 /// as the kernel's `long` for a native process on every target this builds for.
 /// A 32-bit userland on a 64-bit kernel would disagree, and there is no such
-/// build here — the bare-metal target is x86_64 and nothing else.
+/// build here — both bare-metal targets are 64-bit, and the aarch64 one turns
+/// `CONFIG_COMPAT` off so its kernel has no 32-bit entry points to disagree
+/// through (`OS-032`, #376).
 const TIME_BYTES: usize = size_of::<usize>().saturating_mul(2);
 
 /// Offset of `__u16 type`.
