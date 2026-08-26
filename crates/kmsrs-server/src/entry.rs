@@ -272,35 +272,7 @@ where
         }
     }
 
-    // `OS-012` (#263): refuse to serve rather than serve a predictable
-    // identity.
-    //
-    // This is not defensive coding. Hermit's `sys_read_entropy` *silently
-    // succeeds* on a seeding failure, filling the buffer from a Park-Miller
-    // LCG seeded with a static zero — a stream identical across boots — and
-    // emitting a warning the guest never sees. `getrandom` reports success and
-    // hands it on. On a default Proxmox VM that is the likely path rather than
-    // the edge case: the `kvm64` CPU model exposes no RDSEED and Proxmox's
-    // virtio-rng lands on a bus Hermit rejects.
-    //
-    // Every anti-fingerprinting property this host has would become a constant
-    // while it kept working perfectly: the association group, response IVs and
-    // salts, the hardware ID, the randomised ePID fields. A host that answers
-    // every client with the same "random" values is worse than one that does
-    // not answer, because nobody finds out.
-    if let Err(failure) = OsEntropy.self_test() {
-        // `OBS-016` (#192): same window as the bind failure — this returns
-        // before anything is listening.
-        crate::eventlog::report(crate::eventlog::Event::EntropyFailed, &failure.to_string());
-        logger.message(
-            Severity::Error,
-            "entropy",
-            &format!(
-                "{failure}; refusing to serve. On a virtual machine, check that                  the CPU model exposes RDSEED — see docs/deployment.md."
-            ),
-        );
-        return Err(EXIT_UNAVAILABLE);
-    }
+    refuse_without_entropy(logger)?;
 
     // Counted before the driver takes ownership, for the `Started` event.
     let bound_count = listeners.len();
@@ -432,6 +404,44 @@ fn arrange_to_stop_politely(logger: Logger, shutdown: &ShutdownHandle) {
             &format!("no handler installed: {error}"),
         ),
     }
+}
+
+/// Refuse to serve rather than serve a predictable identity (`OS-012`, #263).
+///
+/// This is not defensive coding. Hermit's `sys_read_entropy` *silently
+/// succeeds* on a seeding failure, filling the buffer from a Park-Miller LCG
+/// seeded with a static zero — a stream identical across boots — and emitting a
+/// warning the guest never sees. `getrandom` reports success and hands it on.
+/// On a default Proxmox VM that is the likely path rather than the edge case:
+/// the `kvm64` CPU model exposes no RDSEED and Proxmox's virtio-rng lands on a
+/// bus Hermit rejects.
+///
+/// Every anti-fingerprinting property this host has would become a constant
+/// while it kept working perfectly: the association group, response IVs and
+/// salts, the hardware ID, the randomised ePID fields. A host that answers
+/// every client with the same "random" values is worse than one that does not
+/// answer, because nobody finds out.
+///
+/// # Errors
+///
+/// [`EXIT_UNAVAILABLE`] if the source cannot be trusted.
+fn refuse_without_entropy(logger: Logger) -> Result<(), u8> {
+    if let Err(failure) = OsEntropy.self_test() {
+        // `OBS-016` (#192): the same window as a bind failure — this returns
+        // before anything is listening, so neither stderr under the SCM nor the
+        // web UI can report it.
+        crate::eventlog::report(crate::eventlog::Event::EntropyFailed, &failure.to_string());
+        logger.message(
+            Severity::Error,
+            "entropy",
+            &format!(
+                "{failure}; refusing to serve. On a virtual machine, check that \
+                 the CPU model exposes RDSEED — see docs/deployment.md."
+            ),
+        );
+        return Err(EXIT_UNAVAILABLE);
+    }
+    Ok(())
 }
 
 /// Report a panic to the Windows Event Log as well as to stderr
