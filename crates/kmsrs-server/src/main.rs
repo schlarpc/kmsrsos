@@ -1,4 +1,4 @@
-//! `kmsrsos` entry point: the hosted binary, for Linux and Windows.
+//! `kmsrs-server` entry point: the hosted binary, for Linux and Windows.
 //!
 //! Everything it does lives in [`kmsrs_server::entry`], because the Hermit
 //! binary must do exactly the same thing (`OS-001`, #252) and a start-up

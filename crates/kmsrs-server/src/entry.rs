@@ -2,8 +2,9 @@
 //! (`ARCH-001`, #1; `OS-001`, #252).
 //!
 //! This is a module rather than the contents of `main.rs` because there are two
-//! binaries that must run *exactly* this: `kmsrsos` on Linux and Windows, and
-//! `kmsrsos-hermit` on the unikernel. A second copy of the start-up sequence is
+//! binaries that must run *exactly* this: `kmsrs-server` on Linux and Windows,
+//! and `kmsrs-os` as pid 1 on the bare-metal target. A second copy of the
+//! start-up sequence is
 //! a second place where the entropy self-test could be forgotten, and the
 //! target it would be forgotten on is the one nobody can attach a debugger to.
 //!
@@ -183,7 +184,7 @@ where
         eprintln!(
             "Remove the .socket unit and let the service bind 1688 itself: it \
              is an unprivileged port, so nothing is gained by having systemd \
-             open it. See deploy/systemd/kmsrsos.service."
+             open it. See deploy/systemd/kmsrs-server.service."
         );
         return Err(EXIT_BAD_USAGE);
     }

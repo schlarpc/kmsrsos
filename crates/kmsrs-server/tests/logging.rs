@@ -321,7 +321,7 @@ fn a_quiet_logger_emits_no_request_lines() {
 /// about which file descriptor the output lands on.
 #[test]
 fn nothing_is_written_to_stdout() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kmsrsos"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kmsrs-server"))
         .env("KMSRSOS_CONFIG", r#"log-format = "json""#)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -346,7 +346,7 @@ fn nothing_is_written_to_stdout() {
 /// is not observable from inside a unit test.
 #[test]
 fn no_ansi_escapes_when_stderr_is_a_pipe() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kmsrsos"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kmsrs-server"))
         .env("KMSRSOS_CONFIG", "this is not valid toml")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

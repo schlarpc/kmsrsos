@@ -108,7 +108,7 @@ Rust project using Nix flakes with a pinned toolchain. Load the environment firs
 - `cargo run` — build (debug) and run
 - `cargo build --release` — optimized build
 - `nix run` — build and run via Nix
-- `./result/bin/kmsrsos` — the nix-built binary
+- `./result/bin/kmsrs-server` — the nix-built binary
 
 ### Test, lint, format
 

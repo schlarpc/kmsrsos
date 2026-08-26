@@ -239,6 +239,133 @@ fn the_snapshot_is_built_by_the_flake() {
     );
 }
 
+/// **`PKG-017` (#368): the server executable is `kmsrs-server`.**
+///
+/// `kmsrsos` is the project and the bare-metal image it produces. It was also
+/// the name of this binary, which made one word mean three things — and the one
+/// it fitted worst was the executable, a plain Linux and Windows service with
+/// no OS in it.
+///
+/// Asserted rather than left to the manifest, because a rename like this leaks:
+/// every path that installs, launches or documents the binary has to move with
+/// it, and the ones that do not fail at deploy time rather than at build time.
+/// A `.deb` that installs `/usr/bin/kmsrs-server` under a unit whose
+/// `ExecStart` still says `/usr/local/bin/kmsrsos` builds perfectly.
+#[test]
+fn the_server_executable_is_named_kmsrs_server() {
+    let root = workspace_root();
+
+    let manifest = read(&root, "crates/kmsrs-server/Cargo.toml");
+    assert!(
+        manifest.contains("name = \"kmsrs-server\""),
+        "kmsrs-server's [[bin]] is not called kmsrs-server"
+    );
+
+    // Every place that installs or launches it.
+    let flake = read(&root, "flake.nix");
+    for expected in [
+        "${server}/bin/kmsrs-server",
+        "payload/usr/bin/kmsrs-server",
+        "Entrypoint = [ \"/bin/kmsrs-server\" ]",
+        "/usr/lib/systemd/system/kmsrs-server.service",
+    ] {
+        assert!(
+            flake.contains(expected),
+            "flake.nix does not install or launch the binary as {expected:?}"
+        );
+    }
+
+    let unit = read(&root, "deploy/systemd/kmsrs-server.service");
+    assert!(
+        unit.contains("ExecStart=/usr/local/bin/kmsrs-server"),
+        "the unit launches something other than kmsrs-server"
+    );
+
+    // And nothing anywhere still installs, launches or copies an executable by
+    // the old name. Deliberately a search for the *paths*, not for the word:
+    // `kmsrsos` is still correct for the project, the container image, the ISO
+    // and the metric namespace, and a test that banned the string outright
+    // would be asserting something false.
+    //
+    // The list of files is **walked**, not enumerated. The first version of
+    // this test named six files and missed `ci/no-file-access.sh`, which runs
+    // the built binary under strace — so the rename it exists to police leaked
+    // straight past it and failed in CI. A test that has to be told where to
+    // look is a test that finds what somebody already thought of.
+    for (relative, text) in shipped_text_files(&root) {
+        let file = relative.as_str();
+        for stale in [
+            "bin/kmsrsos",
+            "/usr/bin/kmsrsos",
+            "kmsrsos.exe",
+            "kmsrsos.service",
+            "enable --now kmsrsos",
+            "journalctl -u kmsrsos",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "{file} still refers to the executable as {stale:?} \
+                 (PKG-017, #368)"
+            );
+        }
+    }
+}
+
+/// Every text file in the tree that ships or describes what ships.
+///
+/// Walked rather than listed, and filtered by what is *not* interesting rather
+/// than by what is: `target/`, `.git/`, and the generated product data. A test
+/// that enumerates the files it checks can only catch the ones whoever wrote it
+/// remembered.
+fn shipped_text_files(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Hidden directories are caches and checkouts rather than the
+            // tree — `.direnv` holds whole copies of previous revisions of
+            // this repository, which match everything. `.github` is the one
+            // that is genuinely ours.
+            let skip = name.starts_with("result-")
+                || matches!(
+                    name.as_str(),
+                    "target" | "result" | "node_modules" | "vectors" | "seeds"
+                )
+                || (name.starts_with('.') && name != ".github");
+            if skip {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                // This file is the one naming the stale paths, so it would
+                // match every one of them.
+                if relative.ends_with("packaging_invariants.rs") {
+                    continue;
+                }
+                out.push((relative, text.replace("\r\n", "\n")));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    assert!(
+        out.len() > 50,
+        "only found {} text files, so this is not walking the tree",
+        out.len()
+    );
+    out
+}
+
 /// `PKG-005` (#242): the image is built from the local tree and nothing else.
 ///
 /// Structural rather than enforced. `dockerTools.buildLayeredImage` takes store
@@ -616,7 +743,7 @@ fn the_os_packages_carry_the_unit_and_the_guide() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for path in ["deploy/systemd/kmsrsos.service", "docs/deployment.md"] {
+    for path in ["deploy/systemd/kmsrs-server.service", "docs/deployment.md"] {
         assert!(
             flake.contains(path),
             "the OS packages do not install {path} (PKG-009, #246)"
@@ -647,7 +774,7 @@ fn the_os_packages_carry_the_unit_and_the_guide() {
 #[test]
 fn the_systemd_unit_is_hardened_and_stands_alone() {
     let root = workspace_root();
-    let full = read(&root, "deploy/systemd/kmsrsos.service");
+    let full = read(&root, "deploy/systemd/kmsrs-server.service");
     // Comments stripped for the "must not appear" checks: the header explains
     // why CAP_NET_BIND_SERVICE is not needed, and a test that matched its own
     // rationale would be unwritable.
@@ -693,7 +820,7 @@ fn the_systemd_unit_is_hardened_and_stands_alone() {
 
     // `NET-016` (#165), declined as D40.
     assert!(
-        !root.join("deploy/systemd/kmsrsos.socket").exists(),
+        !root.join("deploy/systemd/kmsrs-server.socket").exists(),
         "a .socket unit exists, and this build refuses to start with LISTEN_FDS \
          set (declined item D40)"
     );

@@ -421,7 +421,7 @@ jobs:
           | | |
           |---|---|
           | `kmsrsos-x86_64.iso` | the bootable image; upload it, attach it, boot it |
-          | `kmsrsos.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
+          | `kmsrs-server.exe`, `kmsrs-client.exe` | cross-compiled against a pinned MSVC CRT and SDK |
           | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksums |
 
           Verifying it is the same procedure as a release, with one difference —

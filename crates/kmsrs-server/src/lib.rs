@@ -45,7 +45,14 @@ pub use host::{Host, RequestContext};
 pub use log::{Logger, Severity};
 pub use server::{Handled, Server};
 
-/// The name the emulator reports for itself. Used by the log sink and the web
-/// UI; never sent on the wire, where the only identity that exists is the ePID
-/// (`ID-001`, #106).
-pub const PRODUCT_NAME: &str = "kmsrsos";
+/// The name this executable reports for itself (`PKG-017`, #368).
+///
+/// The **binary**, not the project. It prefixes the errors this program prints
+/// before a logger exists, which is where a reader expects to see the thing
+/// they typed — so it has to match what `[[bin]]` calls it, or an operator
+/// greps their shell history for a name no message ever used.
+///
+/// `kmsrsos` is the project and the bare-metal image; this is a Linux and
+/// Windows service and is now named like one. Never sent on the wire either
+/// way, where the only identity that exists is the ePID (`ID-001`, #106).
+pub const PRODUCT_NAME: &str = "kmsrs-server";
