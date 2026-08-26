@@ -33,6 +33,17 @@
 //! a missing NIC driver produces a machine that boots, reports `listening`, and
 //! serves nobody forever.
 //!
+//! # And one question about the allowlist itself
+//!
+//! [`every_symbol_the_allowlist_enables_is_one_the_kernel_knows`] is the
+//! exception to everything above, and it is a narrow one (`OS-034`, #382). It
+//! reads `config.nix` as well, because the thing it is *about* is the
+//! allowlist: an entry asking to enable a symbol Kconfig has never heard of
+//! does nothing, and reads as a decision while doing it. Four of those had been
+//! found by then, each by somebody looking at something else, so the shape was
+//! established well enough to test for. The generated file is still what
+//! answers — the question is only which side the failure is on.
+//!
 //! # One target today, and the shape that survives a second
 //!
 //! `OS-031` (#375) turned this from a file that reads one path into a loop over
@@ -382,6 +393,48 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         "OS-019: kmsrs-os speaks DHCP itself",
     ),
     ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    // `OS-035` (#383): the 8250 driver's variants, every one of which was
+    // `default SERIAL_8250` and arrived with the console rather than being
+    // asked for. Two PCIe card families, the PnP bus, and two Intel SoC
+    // UARTs; no hypervisor in the matrix emulates any of them.
+    //
+    // `SERIAL_8250_CONSOLE` is untouched and is asserted present below, which
+    // is the pair that matters: this machine keeps the driver that finds a
+    // PC's serial port at 0x3F8 and a Graviton's over PCI, and loses the five
+    // that find hardware no guest has.
+    (
+        "SERIAL_8250_EXAR",
+        Absence::TurnedOff,
+        "Exar and Commtech multiport PCIe cards",
+    ),
+    (
+        "SERIAL_8250_PERICOM",
+        Absence::TurnedOff,
+        "Pericom and Acces I/O PCIe UARTs",
+    ),
+    (
+        "SERIAL_8250_PNP",
+        Absence::TurnedOff,
+        "OS-035: ttyS0 comes from SERIAL_PORT_DFNS here, not the PnP bus",
+    ),
+    (
+        "SERIAL_8250_LPSS",
+        Absence::TurnedOff,
+        "Intel Baytrail, Braswell and Quark SoC UARTs",
+    ),
+    (
+        "SERIAL_8250_MID",
+        Absence::TurnedOff,
+        "Intel Medfield SoC UARTs",
+    ),
+    // Unreachable rather than off, and that is the interesting half: it has no
+    // prompt of its own and exists only to be `select`ed by the two above, so
+    // disabling them removes it from the configuration entirely.
+    (
+        "SERIAL_8250_DWLIB",
+        Absence::Unreachable,
+        "selected by LPSS and MID, both of which are off",
+    ),
     // Power management this machine has no use for, and which would let a
     // hypervisor suspend a host that is meant to answer.
     (
@@ -538,6 +591,39 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         "OS-019: kmsrs-os speaks DHCP itself",
     ),
     ("IP_PNP_DHCP", Absence::Unreachable, "gated by IP_PNP"),
+    // `OS-035` (#383). The same three as x86, disabled on the same shared
+    // list, because both architectures had answered `y` unasked and neither
+    // had said so.
+    (
+        "SERIAL_8250_EXAR",
+        Absence::TurnedOff,
+        "Exar and Commtech multiport PCIe cards",
+    ),
+    (
+        "SERIAL_8250_PERICOM",
+        Absence::TurnedOff,
+        "Pericom and Acces I/O PCIe UARTs",
+    ),
+    // The one that needed an argument rather than a reading. There is no
+    // `arch/arm64/include/asm/serial.h`, so the ISA table x86 gets its ttyS0
+    // from is empty here and every port arrives over PCI, ACPI or DT. On the
+    // one machine in the matrix whose console is a 16550A — an EC2 Graviton
+    // instance — the kernel says `pci 0000:00:01.0: [1d0f:8250]` and then
+    // `ttyS0 at MMIO 0x80000000 … is a 16550A`. A PCI device, bound by
+    // `SERIAL_8250_PCI`, which stays.
+    (
+        "SERIAL_8250_PNP",
+        Absence::TurnedOff,
+        "OS-035: Graviton's 16550A is a PCI device, not a PnP one",
+    ),
+    // Unreachable here rather than merely off, and for a different reason than
+    // on x86: the two symbols that `select` it are `depends on X86`, so this
+    // architecture never had it to turn off.
+    (
+        "SERIAL_8250_DWLIB",
+        Absence::Unreachable,
+        "selected only by the x86-only LPSS and MID drivers",
+    ),
     (
         "SUSPEND",
         Absence::TurnedOff,
@@ -570,6 +656,9 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-032: perf_event_open(2) has no user in a one-program image",
     ),
+    // Deliberately *not* paired with an entry on the x86 list, which would be
+    // an assertion that cannot hold — see
+    // [`perf_events_is_absent_on_one_target_and_forced_on_the_other`].
     (
         "THERMAL_OF",
         Absence::TurnedOff,
@@ -855,6 +944,50 @@ fn every_driver_the_platform_matrix_needs_is_in() {
     }
 }
 
+/// **`OS-035` (#383): the one asymmetry between the two kernels, stated.**
+///
+/// `perf_event_open(2)` exists on the x86_64 machine and not on the aarch64
+/// one. #383 filed that as a gap to close, on the reasonable grounds that a
+/// large syscall with a JIT-adjacent history has no user in an image
+/// containing one program, and that nobody had *chosen* the difference —
+/// each architecture's `tinyconfig` had simply answered differently.
+///
+/// It cannot be closed. `arch/x86/Kconfig` gives `config X86` an unconditional
+/// `select PERF_EVENTS`, so there is no x86 kernel without it at any Kconfig
+/// setting; disabling it and running `olddefconfig` produces a byte-identical
+/// configuration. Naming it on the shared disable list would therefore have
+/// been an entry that cannot be honoured — precisely the thing `OS-034` (#382)
+/// had just finished removing three of.
+///
+/// So what is asserted is the *fact*, per target, rather than a wish. This is
+/// the only place in this file where a symbol's presence is asserted for a
+/// reason that is not "a platform needs it", which is why it is a test of its
+/// own rather than a row in [`X86_64_MUST_BE_PRESENT`]: nothing needs perf
+/// here, and the day x86 stops forcing it — or aarch64 starts acquiring it as
+/// somebody's dependency — this fails and the statement gets revisited instead
+/// of quietly going stale.
+#[test]
+fn perf_events_is_absent_on_one_target_and_forced_on_the_other() {
+    let of = |arch: &str| -> String {
+        let target = TARGETS
+            .iter()
+            .find(|target| target.arch == arch)
+            .unwrap_or_else(|| panic!("no {arch} target"));
+        built_config(target)
+    };
+
+    assert!(
+        enabled(&of("x86_64"), "PERF_EVENTS"),
+        "CONFIG_PERF_EVENTS is off in the x86_64 kernel. That is a better          answer than the one `OS-035` (#383) had to settle for — but it means          `config X86` no longer carries an unconditional `select PERF_EVENTS`,          so the reasoning written into `os/linux/config.nix` is now wrong.          Put it on the shared disable list and delete this half of the test"
+    );
+
+    let arm = of("aarch64");
+    assert!(
+        mentioned(&arm, "PERF_EVENTS") && !enabled(&arm, "PERF_EVENTS"),
+        "CONFIG_PERF_EVENTS is on in the aarch64 kernel, so both targets now          have `perf_event_open(2)` and the one architecture that could refuse          it has stopped (`OS-032`, #376; `OS-035`, #383)"
+    );
+}
+
 /// Nothing is a module, because `CONFIG_MODULES` is off.
 ///
 /// A separate assertion from the one above because the failure is different in
@@ -876,6 +1009,184 @@ fn nothing_is_built_as_a_module() {
             "these are built as modules in the {} kernel, which has no module \
              loader, so they cost size and do not exist at runtime: \
              {modules:#?}",
+            target.arch
+        );
+    }
+}
+
+/// The allowlist in `os/linux/config.nix`, as the symbols it asks to **enable**
+/// for one architecture: `common.enable` plus that architecture's own list.
+///
+/// This is the one question in this file where the allowlist is the *subject*
+/// rather than the thing not to be trusted, so it is the one place that reads
+/// it. Everything else here reads the generated configuration, for the reason
+/// the module comment gives.
+///
+/// A hand-rolled scan rather than a Nix evaluation, because the alternative is
+/// running `nix` from a test — which would make this file's answer depend on a
+/// toolchain no other test here needs. The shape it depends on is small and is
+/// asserted: an attribute set per architecture, each with an `enable = [ … ];`
+/// whose entries are quoted symbols. If `config.nix` is ever restructured out
+/// from under this, [`the_allowlist_is_still_shaped_the_way_this_reads_it`]
+/// fails rather than this quietly returning nothing (`OS-034`, #382).
+fn allowlist_enables(arch: &str) -> Vec<String> {
+    let path = workspace_root().join("os/linux/config.nix");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+    let mut symbols = Vec::new();
+    let mut section: Option<&str> = None;
+    let mut collecting = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // `common = {`, `x86_64 = {`, `aarch64 = {`. Two of the three are this
+        // architecture's statement and the third is the other architecture's,
+        // so entering one clears whatever was open — a scan that only
+        // recognised the sections it wanted would read the aarch64 list as part
+        // of the x86 one.
+        for name in ["common", "x86_64", "aarch64"] {
+            if trimmed.starts_with(&format!("{name} = {{")) {
+                section = (name == "common" || name == arch).then_some(name);
+                collecting = false;
+            }
+        }
+
+        if trimmed.starts_with("enable = [") {
+            collecting = section.is_some();
+            continue;
+        }
+        if trimmed.starts_with("disable = [") {
+            collecting = false;
+            continue;
+        }
+        if trimmed == "];" {
+            collecting = false;
+            continue;
+        }
+        if !collecting {
+            continue;
+        }
+
+        // Comments first. Everything after a `#` is prose, and the prose here
+        // quotes things — `"we do not need it"` is a comment in this very file.
+        let code = line.split('#').next().unwrap_or_default();
+        for piece in code.split('"').skip(1).step_by(2) {
+            if !piece.is_empty()
+                && piece
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
+                symbols.push(piece.to_string());
+            }
+        }
+    }
+    symbols
+}
+
+/// The scan above still finds a list, for every target.
+///
+/// Its own test because the failure it catches is silence: a `config.nix`
+/// reorganised into a shape this does not recognise makes
+/// [`every_symbol_the_allowlist_enables_is_one_the_kernel_knows`] iterate an
+/// empty list and pass, which is the `OS-006` (#257) failure wearing this
+/// file's clothes.
+#[test]
+fn the_allowlist_is_still_shaped_the_way_this_reads_it() {
+    for target in TARGETS {
+        let enables = allowlist_enables(target.arch);
+        assert!(
+            enables.len() > 50,
+            "only {} enable entries were found for {} in os/linux/config.nix. \
+             The file has been reshaped and this scan no longer reads it, so \
+             the test that depends on it is asserting nothing (`OS-034`, #382)",
+            enables.len(),
+            target.arch
+        );
+        // Every target's list has entries the other's does not; a scan that
+        // returned the same symbols for both would have missed the split.
+        assert!(
+            enables.iter().any(|symbol| symbol == "SERIAL_8250"),
+            "the shared half of the allowlist was not read for {}",
+            target.arch
+        );
+    }
+
+    let x86: Vec<String> = allowlist_enables("x86_64");
+    let arm: Vec<String> = allowlist_enables("aarch64");
+    assert!(
+        x86.iter().any(|symbol| symbol == "KVM_GUEST")
+            && arm.iter().any(|symbol| symbol == "ARM_GIC_V3"),
+        "the per-architecture half of the allowlist was not read: x86 should \
+         name KVM_GUEST and aarch64 should name ARM_GIC_V3 (`OS-034`, #382)"
+    );
+}
+
+/// **`OS-034` (#382): an entry that enables nothing is not a decision.**
+///
+/// Four findings of one shape came before this test, and every one was a line
+/// in the allowlist that read as a choice and was in fact a no-op — found by
+/// somebody looking at something else. `DEBUG_KERNEL`, `ELF_CORE` and the
+/// `IP_PNP` group in `OS-023` (#339); then `NET_VENDOR_VMWARE` and both
+/// `RANDOM_TRUST_*` here.
+///
+/// The check is that Kconfig **mentions** each symbol for that architecture —
+/// `=y`, `=m`, or `# … is not set`. That is the line between "off" and
+/// "misspelled", and it is the same distinction [`Absence`] draws on the other
+/// side of the file.
+///
+/// # Why only the enable half
+///
+/// The disable list must not be caught by this net, and that is not an
+/// exemption but a difference in kind. Two dozen of its entries are mentioned
+/// nowhere either, and every one of them is *correct*: `EXT4_FS` is
+/// unreachable because `BLOCK` is off, which is the strongest form of the claim
+/// axiom A5 makes and is exactly what [`Absence::Unreachable`] asserts. Asking
+/// to disable something already unreachable says something true. Asking to
+/// **enable** a symbol Kconfig has never heard of cannot be anything but a
+/// mistake.
+///
+/// # Why `=y` is asserted too
+///
+/// A symbol that exists, was asked for, and came out `# … is not set` is a
+/// second failure with the same visible shape and a different cause:
+/// `olddefconfig` declined it, because something it depends on is off. The
+/// allowlist then still reads as a decision the kernel did not take. Both are
+/// reported, separately, because the fix differs — one is a line to delete and
+/// the other is a dependency to name.
+#[test]
+fn every_symbol_the_allowlist_enables_is_one_the_kernel_knows() {
+    for target in TARGETS {
+        let config = built_config(target);
+        let mut unknown = Vec::new();
+        let mut declined = Vec::new();
+
+        for symbol in allowlist_enables(target.arch) {
+            if !mentioned(&config, &symbol) {
+                unknown.push(format!("CONFIG_{symbol}"));
+            } else if !enabled(&config, &symbol) && !a_module(&config, &symbol) {
+                declined.push(format!("CONFIG_{symbol}"));
+            }
+        }
+
+        assert!(
+            unknown.is_empty(),
+            "os/linux/config.nix asks to enable these for {}, and the built \
+             configuration does not mention them at all — so Kconfig has never \
+             heard of them on this architecture and the entries do nothing. An \
+             entry that enables nothing reads as a decision and is a no-op, \
+             which is the fourth finding of this shape (`OS-034`, #382): \
+             {unknown:#?}",
+            target.arch
+        );
+        assert!(
+            declined.is_empty(),
+            "os/linux/config.nix asks to enable these for {}, they exist, and \
+             `olddefconfig` turned them back off — so something each depends on \
+             is not on. Unlike the list above these are not lines to delete: \
+             the dependency has to be named, or the entry is a claim this \
+             kernel does not honour (`OS-034`, #382): {declined:#?}",
             target.arch
         );
     }

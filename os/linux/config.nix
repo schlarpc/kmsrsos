@@ -289,6 +289,63 @@ let
       # this issue removed.
       "IP_PNP" "IP_PNP_DHCP" "IP_PNP_BOOTP" "IP_PNP_RARP"
 
+      # `OS-035` (#383): the 8250 driver's PCI-card and PnP variants. Every one
+      # of them is `default SERIAL_8250` or `default y`, so all three arrived
+      # with the console driver and none was ever asked for — `OS-006` (#257)
+      # again, and shared rather than per-architecture because both answered the
+      # same way and neither had said so.
+      #
+      #   SERIAL_8250_EXAR      Exar XR17C/XR17V and Commtech multiport PCIe
+      #                         serial cards
+      #   SERIAL_8250_PERICOM   Pericom and Acces I/O PCIe UARTs
+      #   SERIAL_8250_PNP       ports enumerated on the PnP bus
+      #
+      # The first two are cards; no hypervisor in the matrix emulates one. The
+      # PnP entry is the only one that needed an argument rather than a reading,
+      # because it is the one that could plausibly be how a console appears —
+      # and on neither architecture is it:
+      #
+      #   * on x86 the port is found because it is where every PC's port is.
+      #     `arch/x86/include/asm/serial.h` defines `SERIAL_PORT_DFNS` as ttyS0
+      #     at 0x3F8 on IRQ 4, and the table it builds is in `8250_platform.o`,
+      #     which is `8250-y` and therefore unconditional.
+      #   * on aarch64 there is no `asm/serial.h` at all, so that table is empty
+      #     and every port arrives over PCI, ACPI or DT. Observed on the one
+      #     machine in the matrix whose console is a 16550A rather than a
+      #     PL011 — an EC2 Graviton instance, where the kernel says
+      #     `pci 0000:00:01.0: [1d0f:8250]` and then `0000:00:01.0: ttyS0 at
+      #     MMIO 0x80000000 (irq = 14, base_baud = 115200) is a 16550A`. A PCI
+      #     device, bound by `SERIAL_8250_PCI`, which stays.
+      #
+      # Kconfig's own help says the same thing: "You may be able to disable this
+      # feature if you only need legacy serial support."
+      #
+      # Worth **8 KiB** on each architecture — `serial-8250-variants` in
+      # `.#linux-deltas`, which is five symbols on x86 (the two below go with
+      # them) and three here, and lands on the same number both times. Asked in
+      # the enable direction, because they are off in the checked-in
+      # configuration and a delta has to be taken against a baseline that does
+      # not already contain what is being priced.
+      "SERIAL_8250_EXAR" "SERIAL_8250_PERICOM" "SERIAL_8250_PNP"
+
+      # About seventy `NET_VENDOR_*` menus are `y` in both generated files with
+      # no driver enabled under any of them, and none is named here. That is a
+      # decision rather than an oversight (`OS-035`, #383; declined item D45).
+      #
+      # Measured before it was argued about: `.#linux-deltas` has a
+      # `no-vendor-menus` variant that turns off every one, and the delta is
+      # **0 bytes on both architectures**. A vendor menu is a `bool … default y`
+      # whose only effect is that `drivers/net/ethernet/Makefile` descends into
+      # that vendor's directory, where every object is gated by a driver symbol
+      # of its own — all of which are off.
+      #
+      # So it would be seventy lines here against zero bytes and no behaviour
+      # change, in a file whose whole purpose is to be read as a statement. What
+      # actually guards against a driver arriving unasked is that
+      # `kernel.config` is checked in: a new `=y` shows up in a diff, which is
+      # how every finding in `OS-023` (#339), `OS-026` (#343) and `OS-034`
+      # (#382) was made.
+
       # `OS-025` (#342): the Xen *paravirt* path, declined on the measurement.
       #
       # `XEN` + `XEN_NETDEV_FRONTEND` costs **+148 KiB** — 6 % of the whole
@@ -351,18 +408,34 @@ let
         # Xen HVM's RTL8139) or does not offer that adapter there (VMware Fusion
         # on Apple Silicon has no vmxnet3). `ena` went the other way, into
         # `common`, because Graviton is Nitro.
-        "NET_VENDOR_VMWARE" "VMXNET3"
+        #
+        # No `NET_VENDOR_VMWARE` beside `VMXNET3`, and its absence is a
+        # correction rather than an oversight (`OS-034`, #382). Every other
+        # driver here sits under a vendor menu; this one does not. `VMXNET3` is
+        # declared straight in `drivers/net/Kconfig` and the code lives in
+        # `drivers/net/vmxnet3/` rather than under `drivers/net/ethernet/`, so
+        # there is no gate to open and the entry that named one was inert.
+        "VMXNET3"
         "NET_VENDOR_REALTEK" "8139CP" "8139TOO"
         "NET_VENDOR_AMD" "PCNET32"
         "NET_VENDOR_DEC" "NET_TULIP" "TULIP"
 
-        # These two name nothing Kconfig has heard of in 6.12 and therefore do
-        # nothing: `random.trust_cpu` and `random.trust_bootloader` are boot
-        # parameters now, both defaulting to true. Kept here rather than deleted
-        # so that removing them is one change with its own justification —
-        # `OS-034` (#382). They are deliberately **not** copied into the aarch64
-        # list below.
-        "RANDOM_TRUST_CPU" "RANDOM_TRUST_BOOTLOADER"
+        # --- entropy, which is not a setting here ---
+        #
+        # `RANDOM_TRUST_CPU` and `RANDOM_TRUST_BOOTLOADER` were named here and
+        # are gone (`OS-034`, #382). Not because the behaviour they asked for
+        # was declined — it is what this kernel does — but because neither is a
+        # Kconfig symbol any more. `drivers/char/random.c` carries
+        # `static bool trust_cpu __initdata = true;` and a `random.trust_cpu=`
+        # boot parameter, and the bootloader seed is `random.trust_bootloader=`
+        # the same way.
+        #
+        # So the guarantee is a **default**, and the only way to change it is a
+        # command line this image does not pass. There is nothing to enable, and
+        # an entry that enables nothing reads as a decision while being a no-op.
+        # `kernel_tcb.rs` now fails on one rather than letting the next person
+        # find it while looking at something else, so re-adding either of these
+        # is a test failure rather than a line that quietly does nothing.
       ];
 
       disable = [
@@ -370,6 +443,41 @@ let
         # ME, and nothing here would talk to one if it did. x86 only, since the
         # symbol does not exist elsewhere.
         "INTEL_MEI" "INTEL_MEI_ME"
+
+        # The Intel SoC UARTs (`OS-035`, #383). Both are `default SERIAL_8250`
+        # like the group in `common`, and both are `depends on X86`, which is
+        # why they are here and not there: LPSS is Baytrail, Braswell and Quark,
+        # MID is Medfield. No hypervisor emulates an Intel SoC.
+        #
+        # `SERIAL_8250_DWLIB` is deliberately not named beside them. It has no
+        # prompt and exists only to be `select`ed by these two, so disabling
+        # them makes it *unreachable* rather than merely off — which is a
+        # stronger statement, and one `kernel_tcb.rs` asserts as such.
+        # `CONFIG_RATIONAL` goes the same way for the same reason.
+        "SERIAL_8250_LPSS" "SERIAL_8250_MID"
+
+        # `PERF_EVENTS` is deliberately **not** on this list, and its absence is
+        # the answer to `OS-035` (#383) rather than an oversight.
+        #
+        # #383 filed the asymmetry: aarch64 disables `perf_event_open(2)` and
+        # x86 does not, so the two kernels this project ships differ on whether
+        # a large syscall with a JIT-adjacent history exists, and nobody chose
+        # that. It is real, and it cannot be fixed here. `arch/x86/Kconfig`
+        # gives `config X86` an unconditional `select PERF_EVENTS`: there is no
+        # x86 kernel without it, at any Kconfig setting.
+        #
+        # Measured rather than read, because that is this file's rule —
+        # disabling it and running `olddefconfig` produces a byte-identical
+        # configuration. That is also why `linuxDeltaVariants` has no
+        # `no-perf-events` for this architecture: the delta would be exactly
+        # zero, and a zero here reads as "perf costs nothing" when it means "the
+        # question could not be asked". The same trap as `no-smp` on aarch64,
+        # which the flake declines for the same reason.
+        #
+        # What can still be said is what each kernel actually contains, and
+        # `perf_events_is_absent_on_one_target_and_forced_on_the_other` in
+        # `kernel_tcb.rs` says it per target — so the day this stops being
+        # forced, a test fails rather than a comment quietly going stale.
       ];
     };
 
@@ -526,8 +634,15 @@ let
         # `tinyconfig` leaves it off; this says so, so that a future dependency
         # cannot turn it on quietly.
         #
-        # x86 has it **on**, inherited from its own `tinyconfig` answers, and
-        # that asymmetry is a real gap rather than a decision — see #383.
+        # x86 has it **on** and cannot have it off: `config X86` carries an
+        # unconditional `select PERF_EVENTS`. So this is not the asymmetry #383
+        # thought it was — it is not a decision one architecture took and the
+        # other did not, it is a decision only one architecture is allowed to
+        # take. The x86 disable list above is where that is written down.
+        #
+        # Keeping it out is worth **56 KiB** here, which is the one side of the
+        # question that has a number: `perf-events` in `.#linux-deltas`, asked
+        # in the enable direction because it is off in this baseline.
         "PERF_EVENTS"
 
         # Not a security decision: this is how a Kconfig `choice` is pinned.

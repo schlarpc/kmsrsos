@@ -216,6 +216,39 @@ fn the_snapshot_is_built_by_the_flake() {
              #379)"
         );
     }
+
+    // `PKG-021` (#384): **both** ISOs reach the snapshot, each built on its own
+    // architecture's runner.
+    //
+    // The same assertion `the_release_workflow_builds_what_the_gate_checks`
+    // makes about a tag, and it is here because the two channels drifted: a tag
+    // has produced both images since `PKG-019` (#378) and this one produced the
+    // x86 image alone for two issues after that. It matters more here than it
+    // sounds, because this is the channel whose entire purpose is booting a
+    // change before it is tagged — and an operator on arm64 could not.
+    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    assert!(
+        workflow.contains(iso),
+        "the snapshot does not name its ISO {iso}, so either it ships one \
+         image under a name that claims to be both or it ships one \
+         architecture (PKG-021, #384)"
+    );
+    for (arch, runner) in [("x86_64", "ubuntu-latest"), ("aarch64", "ubuntu-24.04-arm")] {
+        let leg = format!("- arch: {arch}\n            runner: {runner}");
+        assert!(
+            workflow.contains(&leg),
+            "the snapshot has no {arch} leg on {runner}. Each image is built \
+             natively, with no snapshot-only build path (PKG-021, #384)"
+        );
+    }
+    // And the x86-only name is gone rather than merely joined by a second one.
+    // A leftover `out/kmsrsos-x86_64.iso` would ship the arm leg's image under
+    // the x86 name and every assertion above would still pass.
+    assert!(
+        !workflow.contains("out/kmsrsos-x86_64.iso"),
+        "the snapshot still hard-codes the x86_64 ISO name, which on the arm \
+         leg would name the wrong image (PKG-021, #384)"
+    );
     for bypass in [
         "cargo build --release",
         "cargo install --path",
@@ -229,9 +262,30 @@ fn the_snapshot_is_built_by_the_flake() {
     }
     // Checksums are produced beside the build rather than centrally, so they
     // are a statement by the machine that made the bytes (`SEC-010`, #202).
+    // One file per leg since `PKG-021` (#384), because there is more than one
+    // machine now.
     assert!(
-        workflow.contains("sha256sum * > SHA256SUMS"),
-        "the snapshot artifacts carry no checksums"
+        workflow.contains(r#"sha256sum * > "SHA256SUMS-${{ matrix.arch }}""#),
+        "the snapshot legs carry no per-leg checksums (PKG-021, #384)"
+    );
+    // Merged after the round trip through the artifact store and before the
+    // signature, which is the only place it can go: the signature is over one
+    // file, and what it has to attest is what came back out of the store.
+    // Character for character what `release.yml`'s `publish` job does.
+    assert!(
+        workflow.contains("sha256sum -c SHA256SUMS-* && sha256sum * > SHA256SUMS"),
+        "the snapshot legs' checksums are not verified after the artifact \
+         round trip and merged into the one file that gets signed (PKG-021, \
+         #384)"
+    );
+    // By pattern, never by "everything": `no-file-access` uploads `strace.log`
+    // on every run and `fuzz` uploads reproducers, and publishing either under
+    // a stable download URL is not something to discover after the fact.
+    assert!(
+        workflow.contains("pattern: snapshot-*"),
+        "the `latest` job does not select the snapshot artifacts by pattern, \
+         so it either misses a leg or publishes artifacts that are not \
+         snapshots (PKG-021, #384)"
     );
     assert!(
         workflow.contains("cosign sign-blob"),

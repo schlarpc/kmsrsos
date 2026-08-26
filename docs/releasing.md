@@ -71,12 +71,22 @@ There is a second channel, and it is deliberately a smaller one. Every push to `
 **whole** gate moves a rolling prerelease at the tag `latest`, carrying the bootable ISO, the two
 Windows binaries, and a signed checksum file.
 
-**The snapshot carries the x86_64 ISO only**, and that is a gap rather than a decision: a tag
-produces both images since `PKG-019` (#378) and this channel has not caught up. See #384.
+**Both ISOs, one per architecture** since `PKG-021` (#384), each built on its own runner exactly as a
+tag builds it:
 
 ```
 https://github.com/schlarpc/kmsrsos/releases/download/latest/kmsrsos-x86_64.iso
+https://github.com/schlarpc/kmsrsos/releases/download/latest/kmsrsos-aarch64.iso
 ```
+
+The second is the one this channel exists for. The ISO's whole surface is *does it boot on your
+hypervisor*, `linux-boot` can only answer that for QEMU, and an operator on Proxmox VE for arm64 or
+on Apple Silicon had no way to boot a change before it was tagged — which is the population the
+second image was added for in the first place.
+
+Each leg produces its own `SHA256SUMS-<arch>`, on the machine that built the bytes. They are verified
+after the round trip through the artifact store, merged into one `SHA256SUMS`, and signed once — the
+same three lines `release.yml` uses, because one shape for both channels is one thing to get right.
 
 **It is not a release, and the differences are the point.** The tag moves without warning, there is no
 version number to put in a bug report, and it carries no SBOM, `.deb`, `.rpm` or container image —
@@ -109,8 +119,10 @@ release identity and a release signature will not verify against this one, which
 worth having.
 
 The artifacts are also uploaded as ordinary workflow artifacts on **every** run, pull requests
-included, under `snapshot-x86_64`. Those expire and have no stable URL; they are there so a reviewer
-can boot a branch.
+included, under `snapshot-x86_64`, `snapshot-aarch64` and `snapshot-windows`. Those expire and have no
+stable URL; they are there so a reviewer can boot a branch. The Windows binaries are one artifact
+rather than a leg of the matrix because they are cross-compiled from Linux: they are a build target,
+not a machine.
 
 **The ISO is bit-reproducible** (`PKG-016`, #366), so the strongest check available is not the
 signature but rebuilding it yourself:

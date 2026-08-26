@@ -179,3 +179,28 @@ awk '/^SRV/{e=1;next} /^A /{if(e){split($2,p,".");print p[1];e=0}}' wA.log | sor
 ```
 
 The committed runs are `captures/DISC-009-w{A,B,C}.log`.
+
+## The ARM64 smoke run (`PKG-022`, #385)
+
+`arm64-smoke.ps1` is in this directory and is not part of the harness above. It
+needs no VM, no capture and no Windows ISO: it starts the **shipped**
+`kmsrs-server.exe` on an ARM64 Windows machine, serves an activation through
+`kmsrs-client.exe`, and captures the sandbox report — which is where the five
+`SetProcessMitigationPolicy` outcomes of `SEC-019` (#356) are stated.
+
+```powershell
+pwsh harness/windows/arm64-smoke.ps1 `
+  -Server out/kmsrs-server-windows-aarch64.exe `
+  -Client out/kmsrs-client-windows-aarch64.exe
+```
+
+It refuses to run on anything but ARM64 and reads `IMAGE_FILE_MACHINE` off both
+binaries before trusting either, because the whole question is *which machine
+executed this*. `PKG-020` (#379) shipped the ARM64 build never having run it,
+and `PKG-018` (#374) is why that mattered: a binary whose every build-time check
+passes can still die before it logs a line.
+
+CI runs it on `windows-11-arm` against the artifact from `snapshot-windows`, so
+it is the cross-compiled binary an operator downloads rather than one rebuilt on
+the test machine. Run it by hand on a Snapdragon X laptop or a Windows 11 ARM
+guest on Apple Silicon and it answers the same question about that machine.

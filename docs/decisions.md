@@ -79,7 +79,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
 | 45 | A second architecture is supported | aarch64, because Proxmox VE for arm64 shipped and KVM is same-architecture — and because on Apple Silicon the whole lab is Arm, [see below](#a-second-architecture-is-supported-os-032-376-pkg-019-378) (#376, #378) |
 | 46 | The arm image has no bootloader | `OS-030`'s GRUB solves two firmwares sharing one kernel; aarch64 has one firmware, so the kernel goes in the ESP and nothing loads it, [see below](#the-arm-image-has-no-bootloader-os-033-377) (#377) |
-| 47 | Windows on Arm is built and shipped | `aarch64-pc-windows-msvc`, and **neither Windows target is the default** — both are named. Its mitigations are unverified and the artifact says so, [see below](#windows-on-arm-ships-untested-and-says-so-pkg-020-379) (#379) |
+| 47 | Windows on Arm is built and shipped | `aarch64-pc-windows-msvc`, and **neither Windows target is the default** — both are named. It shipped unverified and said so; it is verified now, on a hosted ARM64 runner, and takes all five mitigations, [see below](#the-arm64-binary-runs-and-takes-all-five-mitigations-pkg-022-385) (#379, #385) |
 
 ### The bare-metal target speaks DHCP and DNS itself (`OS-019`, #335; `OS-020`, #336)
 
@@ -578,7 +578,7 @@ The alternative was option 4 in #356: declare the asymmetry permanent. That was 
 only ever a proxy for "the unsafe in this tree is auditable" — which one call site with a safety
 comment satisfies directly.
 
-### Windows on Arm ships untested, and says so (`PKG-020`, #379)
+### Windows on Arm is built, named, and now tested (`PKG-020`, #379; `PKG-022`, #385)
 
 The Windows build was x86_64 and nothing else, and the client population that needs it is going Arm:
 Snapdragon X and Windows Dev Kit machines run Windows 11 on Arm natively, and on Apple Silicon it is
@@ -594,13 +594,15 @@ fixed-output MSVC SDK — which now carries both architectures, so bumping the p
 still one hash in one place. `.#windows` is gone: it meant "the x86_64 one", and a release artifact
 named after a default is one nobody can tell apart from the other. Both are named.
 
-**It has never been executed, and the artifact does not pretend otherwise.** There is no ARM64
-Windows to run it on — no hosted GitHub runner, no Windows on Graviton, and emulating ARM64 Windows
-to test a *process mitigation* would answer a question about the emulator, which is the objection
-that made the status quo unacceptable in the first place. `PKG-022` (#385) is where that is done.
+**It shipped never having been executed, and now it has been** (`PKG-022`, #385). At the time there
+was nowhere to run it — no hosted ARM64 Windows runner, no Windows on Graviton, and emulating ARM64
+Windows to test a *process mitigation* would answer a question about the emulator, which is the
+objection that made the status quo unacceptable in the first place. The first of those three stopped
+being true: `windows-11-arm` is a standard GitHub-hosted runner and is free on public repositories.
 
-What makes shipping it defensible is that the failure mode is **visible rather than silent**, which
-is precisely what `PKG-018` below found to be missing:
+What it found is in [its own section below](#the-arm64-binary-runs-and-takes-all-five-mitigations-pkg-022-385).
+What made shipping it defensible in the meantime is that the failure mode is **visible rather than
+silent**, which is precisely what `PKG-018` below found to be missing:
 
 - `refused()` attributes a declined policy to a policy *by name*, and `apply()` reports `Failed`
   rather than aborting — because "this kernel declined a mitigation" already happens on older
@@ -615,6 +617,42 @@ The `SetProcessMitigationPolicy` surface is architecture-independent — every s
 flag word rather than anything with a register layout, and the width assertion below compiles for
 whichever target it is built for. That is a reason to expect it to work; it is not a test, and the
 distinction is the whole of `PKG-018`.
+
+### The ARM64 binary runs, and takes all five mitigations (`PKG-022`, #385)
+
+`PKG-020` shipped an `aarch64-pc-windows-msvc` build that nothing had ever started. The build-time
+checks passed — the PE machine type is read off each artifact and Control Flow Guard is asserted
+absent — and `PKG-018` below is the standing proof that a build-time check can be a true statement
+about an unusable binary.
+
+**Observed, on Windows 11 build 26200 on ARM64:** the process starts, binds 1688 and 8080 on both
+address families, serves a V6 activation to `kmsrs-client`, and reports `process-mitigations:
+applied` — which means all five `SetProcessMitigationPolicy` policies were accepted, none refused.
+`ProcessSystemCallDisablePolicy` is the one that was in doubt, since it removes the `win32k.sys`
+surface and `win32k` on ARM64 is a different build of a driver with its own history of what is
+filterable. It takes it.
+
+So the Windows security posture is the same on both architectures, and this document does not have to
+state it per architecture after all — which is the outcome #385 asked for and not the one it expected.
+
+**Two jobs, because there were two questions.** A `platforms` leg builds and tests natively on
+`windows-11-arm`, which is what covers the service router of `PKG-017` (#368), the Event Log source
+registration and the width assertion compiled for this target. `windows-aarch64-smoke` runs the
+**cross-compiled artifact** from the snapshot — the binary an operator downloads, not one rebuilt on
+the test machine — because the whole lesson of `PKG-018` is that the artifact and a statement about
+the artifact are different things.
+
+**It is CI rather than a machine somebody owns.** #385 listed the plausible ways to get an ARM64
+Windows: a Snapdragon X laptop, a Windows 11 ARM VM on Apple Silicon, or Azure's Cobalt 100
+instances — all of which would have answered the question *once*, by hand, with a note in the issue
+saying who ran it. A hosted runner answers it again on every pull request, and the expected outcome is
+a parameter of the harness that is asserted, so a Windows that starts refusing one of the five fails a
+job instead of changing a log line nobody is reading.
+
+**What it did not establish**, and is now `SEC-020` (#392): a refusal still reports *that* one of the
+five was declined without saying *which*. `refused()` knows the name and `apply()` discards it. That
+is latent rather than live — nothing has refused one yet — but it is the exact property this decision
+rests on, so it is filed rather than noted.
 
 ### Control Flow Guard produced a binary that did not start (`PKG-018`)
 
@@ -1071,3 +1109,41 @@ media whose arm audience has no firmware that can run them. The arm image's clai
 
 Two images, named by architecture. If this is ever revisited it should be as its own issue with the
 sizes measured, and this paragraph is the reason it was not done in #377.
+
+<a id="d45"></a>**D45 — Naming the idle ethernet vendor menus on the disable list (`OS-035`,
+#383).** Both kernels carry about seventy `CONFIG_NET_VENDOR_*=y` entries with no driver enabled
+under any of them. They read like seventy decisions nobody took, and #383 raised them as "how a
+driver arrives later without anybody asking".
+
+Measured before being argued about, which is the point: `.#linux-deltas` has a `no-vendor-menus`
+variant that turns off every one of them, and the delta is **0 bytes on both architectures**. A
+`NET_VENDOR_X` is a `bool … default y` whose only effect is that `drivers/net/ethernet/Makefile`
+descends into that vendor's directory, where every object is gated by a driver symbol of its own —
+all of which are off. Nothing is compiled either way.
+
+So the choice is seventy lines of allowlist against zero bytes and no behaviour change, and seventy
+lines that change nothing make the file *harder* to read as a statement — which is what it is for.
+The guard against a driver arriving unasked is not this list: it is that `kernel.config` is checked
+in, so a new `=y` line appears in a diff somebody reviews. That is the same mechanism that caught
+every finding in `OS-023` (#339), `OS-026` (#343) and `OS-034` (#382).
+
+The variant stays, so the number can be taken again rather than trusted from this paragraph. What
+`OS-035` *did* remove from the same file is worth 8 KiB on each architecture — five 8250 driver
+variants for hardware no hypervisor emulates — which is the shape of pare-back this list is for.
+
+<a id="d46"></a>**D46 — `PERF_EVENTS` off on x86_64 (`OS-035`, #383).** Not declined on a judgement:
+it cannot be done. `arch/x86/Kconfig` gives `config X86` an unconditional `select PERF_EVENTS`, so
+there is no x86 kernel without `perf_event_open(2)` at any Kconfig setting — disabling it and
+running `olddefconfig` produces a byte-identical configuration.
+
+#383 filed it as a real gap, and it was: aarch64 disables it and x86 does not, so the two kernels
+this project ships differ on whether a large syscall with a JIT-adjacent history exists, and nobody
+chose that. Naming it on the shared disable list would have produced an entry that cannot be
+honoured — the exact thing `OS-034` (#382) had just removed three of, and had just built a test
+against.
+
+What is done instead is that the fact is asserted per target:
+`perf_events_is_absent_on_one_target_and_forced_on_the_other` in `kernel_tcb.rs`. If x86 ever stops
+forcing it, that test fails and this paragraph gets revisited rather than quietly going stale. On
+aarch64, where the question can be asked, keeping it out is worth **56 KiB** — `perf-events` in
+`.#linux-deltas`.

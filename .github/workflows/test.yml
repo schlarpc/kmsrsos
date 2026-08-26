@@ -55,6 +55,20 @@ jobs:
             runner: ubuntu-24.04-arm
           - name: windows-x86_64
             runner: windows-latest
+          # `PKG-022` (#385). GitHub had no ARM64 Windows runner when #379
+          # shipped the build, which is why the artifact went out never having
+          # been executed; `windows-11-arm` is one, and it is free on public
+          # repositories like this one.
+          #
+          # This leg is the *test suite* on ARM64 Windows — the service router
+          # of `PKG-017` (#368), the Event Log source registration, and
+          # `the_policy_structures_are_still_flag_words` compiled for this
+          # target. Whether the **shipped**, cross-compiled binary starts and
+          # serves is a different question, asked by `windows-aarch64-smoke`
+          # below, because a binary rebuilt here is not the binary anybody
+          # downloads.
+          - name: windows-aarch64
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@v7.0.0
 
@@ -326,7 +340,66 @@ jobs:
   # somebody boots the change before it merges, which is worth rather more here
   # than usual: the ISO's whole surface is "does it boot", and `linux-boot` only
   # answers that for QEMU.
+  # One leg per architecture (`PKG-021`, #384), matrixed the way `release.yml`
+  # matrixes its `artifacts` job and for the same reason: `linuxIso` on a system
+  # is the image *for* that system, so each is built natively on its own runner
+  # rather than cross-compiled from the other.
+  #
+  # It was one leg until #384, which is the gap that mattered most for exactly
+  # the reason this channel exists: an operator on Proxmox VE for arm64 or on
+  # Apple Silicon could not boot a change before it was tagged, and that is the
+  # population the second architecture was added for.
   snapshot:
+    name: snapshot-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Build the bootable ISO
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          nix build .#linuxIso --print-build-logs --out-link result-iso
+
+          # The same name the release uses, so an operator who has downloaded
+          # both is not comparing `kmsrsos-x86_64.iso` against something else.
+          cp result-iso "out/kmsrsos-${{ matrix.arch }}.iso"
+
+      # Produced here, on the machine that built the artifact, rather than in
+      # the job that publishes it — the same reasoning as `release.yml`
+      # (`SEC-010`, #202). One file per leg, merged into one after the round
+      # trip through the artifact store and signed once.
+      - name: Checksums
+        run: cd out && sha256sum * > "SHA256SUMS-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+
+  # The Windows binaries, which are a *build target* rather than a machine
+  # (`PKG-021`, #384).
+  #
+  # Their own job rather than a step gated to one leg of the matrix above. Both
+  # are cross-compiled from the same Linux runner, so putting them on the x86
+  # leg would say something untrue about where they come from — and `release.yml`
+  # already draws the line in this place, with a `windows` job separate from
+  # `artifacts`.
+  snapshot-windows:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -336,17 +409,12 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      - name: Build the bootable ISO and the Windows binaries
+      - name: Build the Windows binaries
         run: |
           set -euo pipefail
           mkdir -p out
-          nix build .#linuxIso        --print-build-logs --out-link result-iso
           nix build .#windows-x86_64  --print-build-logs --out-link result-win-x86_64
           nix build .#windows-aarch64 --print-build-logs --out-link result-win-aarch64
-
-          # The same names the release uses, so an operator who has downloaded
-          # both is not comparing `kmsrsos-x86_64.iso` against something else.
-          cp result-iso out/kmsrsos-x86_64.iso
           for arch in x86_64 aarch64; do
             cp "result-win-$arch/bin/kmsrs-server.exe" \
                "out/kmsrs-server-windows-$arch.exe"
@@ -354,17 +422,63 @@ jobs:
                "out/kmsrs-client-windows-$arch.exe"
           done
 
-      # Produced here, on the machine that built the artifacts, rather than in
-      # the job that publishes them — the same reasoning as `release.yml`
-      # (`SEC-010`, #202).
       - name: Checksums
-        run: cd out && sha256sum * > SHA256SUMS
+        run: cd out && sha256sum * > SHA256SUMS-windows
 
       - uses: actions/upload-artifact@v4
         with:
-          name: snapshot-x86_64
+          name: snapshot-windows
           path: out/
           if-no-files-found: error
+
+  # The ARM64 binary, started on ARM64 Windows (`PKG-022`, #385).
+  #
+  # `PKG-020` (#379) shipped an `aarch64-pc-windows-msvc` build that had never
+  # been executed. It was checked the way the x86_64 one is checked at build
+  # time — the PE machine type read off the artifact, Control Flow Guard
+  # asserted absent — and `PKG-018` (#374) is the standing precedent for why
+  # that is not enough: CFG produced an artifact whose `DllCharacteristics` bit
+  # was honestly set and which died at start-up before logging a line. Every
+  # check passed, and nothing caught it until somebody ran it.
+  #
+  # What this answers that nothing else does is the second half of `SEC-019`
+  # (#356): five `SetProcessMitigationPolicy` policies are applied and verified
+  # in force on a live process, and that verification had run on x86_64 and
+  # nowhere else. `ProcessSystemCallDisablePolicy` is the one to watch, because
+  # `win32k` on ARM64 is a different build of a driver with its own history of
+  # what is filterable.
+  #
+  # It runs the artifact from `snapshot-windows` rather than building here. The
+  # binary an operator downloads is the one that has to start.
+  windows-aarch64-smoke:
+    needs: snapshot-windows
+    runs-on: windows-11-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: snapshot-windows
+          path: out
+
+      - name: Start it and serve an activation
+        shell: pwsh
+        run: |
+          ./harness/windows/arm64-smoke.ps1 `
+            -Server out/kmsrs-server-windows-aarch64.exe `
+            -Client out/kmsrs-client-windows-aarch64.exe
+
+      # The captured start-up report, which is the artefact #385 asks for: which
+      # of the five policies this kernel accepted, from a machine that ran them.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-aarch64-report
+          path: |
+            arm64-smoke-report.txt
+            arm64-smoke-server.log
+          if-no-files-found: warn
 
   # --- The `latest` pointer, moved only when everything is green ----------
   #
@@ -404,6 +518,8 @@ jobs:
       - panic-freedom
       - fuzz
       - snapshot
+      - snapshot-windows
+      - windows-aarch64-smoke
     # Never from a pull request: a fork's branch must not be able to move a
     # pointer people download from.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -415,16 +531,30 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7.0.0
+
+      # Every snapshot leg, by pattern rather than by name (`PKG-021`, #384).
+      # Not *every* artifact: `no-file-access` uploads `strace.log` on every run
+      # and `fuzz` uploads reproducers, and a download with no filter would
+      # publish both.
       - uses: actions/download-artifact@v4
         with:
-          name: snapshot-x86_64
-          path: release
+          pattern: snapshot-*
+          path: downloaded
 
-      # The checksums came from the machine that built the artifacts. Verifying
+      # The checksums came from the machine that built each artifact. Verifying
       # them here proves the round trip through the artifact store did not
-      # change anything, which is the only thing this job could break.
-      - name: Verify what was uploaded
-        run: cd release && sha256sum -c SHA256SUMS
+      # change anything, which is the only thing this job could break — and it
+      # has to happen *after* the round trip and *before* the signature, which
+      # is why the merge is here rather than in the jobs above.
+      #
+      # The same three lines `release.yml`'s `publish` job uses, deliberately:
+      # one shape for both channels means one thing to get right.
+      - name: Gather and verify what was uploaded
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find downloaded -type f -exec cp {} release/ ';'
+          cd release && sha256sum -c SHA256SUMS-* && sha256sum * > SHA256SUMS
 
       - uses: sigstore/cosign-installer@v3.7.0
       - name: Sign the checksums
@@ -453,6 +583,7 @@ jobs:
           | | |
           |---|---|
           | `kmsrsos-x86_64.iso` | the bootable image; upload it, attach it, boot it |
+          | `kmsrsos-aarch64.iso` | the same, for Proxmox VE on arm64 and Apple Silicon |
           | `kmsrs-server-windows-{x86_64,aarch64}.exe` | cross-compiled against a pinned MSVC CRT and SDK |
           | `kmsrs-client-windows-{x86_64,aarch64}.exe` | the diagnostic client, same build |
           | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksums |
