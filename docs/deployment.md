@@ -249,10 +249,12 @@ vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declin
 Dev Kit, or a Windows 11 on Arm VM on Apple Silicon all want the second — and rename it to
 `kmsrs-server.exe` if you are following the `sc.exe` line below literally.
 
-**The ARM64 binary has not been run on ARM64 Windows.** Everything in this section is written from
-the x86_64 build. The five process mitigations of `SEC-019` (#356) are verified in force on x86_64
-only; if the ARM64 kernel declines any of them the host reports which, by name, at start-up, rather
-than claiming a mitigation it does not have. #385 is where that gets observed.
+**This section applies to both architectures.** The ARM64 binary is started on real ARM64 Windows on
+every pull request (`PKG-022`, #385), and on Windows 11 build 26200 it serves an activation and takes
+all five process mitigations of `SEC-019` (#356) — `ProcessSystemCallDisablePolicy` included. There is
+nothing to read differently here for Arm. If some future Windows declines one of the five, the host
+reports which, by name, at start-up (`SEC-020`, #392) rather than claiming a mitigation it does not
+have, and goes on serving.
 
 `PKG-008` (#245). The binary detects for itself whether it was started by the Service Control
 Manager — `StartServiceCtrlDispatcher` fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` when it
