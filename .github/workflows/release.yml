@@ -95,6 +95,25 @@ jobs:
           nix build .#linuxIso --print-build-logs --out-link result-iso
           cp result-iso "out/kmsrsos-${{ matrix.arch }}.iso"
 
+      # `PKG-023` (#395): the artifacts about to be uploaded are statically
+      # linked, and are the architecture this leg claims.
+      #
+      # `nix flake check` above already runs the `static-binaries` check, and
+      # this runs the same script over `out/` anyway — over the files that will
+      # be attached to the release rather than over the store paths a check
+      # happened to build. That is the `PKG-022` (#385) rule: the artifact
+      # under test is the one an operator downloads. It is also what catches a
+      # `cp` in the step above copying the wrong leg's binary, which no check
+      # inside the flake can see.
+      - name: The binaries are static, and are this architecture
+        run: |
+          set -euo pipefail
+          machine=$([ "${{ matrix.arch }}" = aarch64 ] \
+            && echo 'AArch64' || echo 'Advanced Micro Devices X86-64')
+          ci/static-binaries.sh "$machine" \
+            "out/kmsrs-server-${{ matrix.name }}" \
+            "out/kmsrs-client-${{ matrix.name }}"
+
       # `SEC-010` (#202): the binaries are static, so "what is in this" is a
       # question the file itself has to answer. An SBOM derived from the
       # lockfile is that answer, and it is exact rather than inferred — every

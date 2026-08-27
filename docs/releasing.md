@@ -10,7 +10,7 @@ was tested is a release nobody tested.
 
 | Artifact | Notes |
 |---|---|
-| `kmsrs-server-{x86_64,aarch64}-linux` | statically linked against musl; no runtime dependencies |
+| `kmsrs-server-{x86_64,aarch64}-linux` | statically linked against musl; no runtime dependencies — read off the uploaded file by `ci/static-binaries.sh` (`PKG-023`, #395) |
 | `kmsrs-client-{x86_64,aarch64}-linux` | the diagnostic and detection-resistance client |
 | `kmsrsos_X.Y.Z_{amd64,arm64}.deb` | with the hardened systemd unit (`PKG-007`, #244) |
 | `kmsrsos-X.Y.Z-1.{x86_64,aarch64}.rpm` | the same payload |
@@ -29,6 +29,13 @@ ISO9660 tree that the bootloader existed to read. `docs/decisions.md` has the nu
 
 Both are built on their own architecture's runner, and both get the same SBOM, checksum, signature
 and `--rebuild` treatment. There is no cross-compiled image and no release-only build path.
+
+**"Statically linked" is checked on the file, not claimed by the build** (`PKG-023`, #395). Every
+Linux binary the release attaches is read with `readelf` before it is uploaded: no `PT_INTERP`, no
+`DT_NEEDED`, and an ELF machine matching the leg that produced it. The same script runs in
+`nix flake check` on both architectures, so a pull request that broke the static link fails before a
+tag is ever cut. It replaced two greps over `flake.nix` and `rust-toolchain.toml` — statements about
+the expression that builds the artifact, which `PKG-018` (#374) is the standing lesson against.
 
 **Neither Windows binary is named `kmsrs-server.exe`**, and that is deliberate (`PKG-020`, #379).
 There are two of them now, and the one that used to carry the bare name was the x86_64 build — a

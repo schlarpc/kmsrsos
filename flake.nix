@@ -365,7 +365,19 @@
             if system == "x86_64-linux" then pkgs.pkgsCross.musl64
             else pkgs.pkgsCross.aarch64-multiplatform-musl;
         in
-        if target == null then { } else {
+        # A Linux system with no static target is an error rather than an
+        # ordinary dynamically linked build (`PKG-023`, #395). It used to be
+        # the latter, and the failure was silent in exactly the way that
+        # matters: delete `aarch64-unknown-linux-musl` from
+        # `rust-toolchain.toml` and the arm leg would go on producing a
+        # glibc-linked binary, shipped under a `docs/releasing.md` row that
+        # says "statically linked against musl; no runtime dependencies".
+        # Darwin still gets `{ }`, because there is nothing to ship there.
+        if target == null then
+          (if nixpkgs.lib.hasSuffix "-linux" system
+          then throw "no static target for ${system}, which is a Linux system             that ships binaries. `staticTargetFor` has to name one, or the             artifact is dynamically linked against a claim that says it is not             (`PKG-023`, #395)"
+          else { })
+        else {
           CARGO_BUILD_TARGET = target;
           "CARGO_TARGET_${upper}_LINKER" = "${muslPkgs.stdenv.cc}/bin/${muslPkgs.stdenv.cc.targetPrefix}cc";
           # `+crt-static` is the default for musl targets, but stating it means
@@ -562,6 +574,13 @@
           # asserts each against its own list.
           config = ./os/linux/kernel.config;
 
+          # How `readelf -h` spells this machine, for the check that reads the
+          # shipped binaries rather than the expression that built them
+          # (`PKG-023`, #395). Here rather than derived from the Nix system,
+          # because the two spell it differently and a check comparing the
+          # wrong pair of strings would pass on every artifact.
+          elfMachine = "Advanced Micro Devices X86-64";
+
           # What boots it in a check.
           qemu = "qemu-system-x86_64";
         };
@@ -621,6 +640,11 @@
           bios = false;
 
           config = ./os/linux/kernel.config.aarch64;
+
+          # `PKG-023` (#395). Not "aarch64" and not "arm64": this is
+          # `readelf`'s spelling, and it is the third one this architecture has
+          # in this file.
+          elfMachine = "AArch64";
 
           qemu = "qemu-system-aarch64";
         };
@@ -2489,6 +2513,34 @@
               inherit system;
               arch = linuxArch;
             };
+
+          # `PKG-023` (#395): the shipped binaries are statically linked, read
+          # off the binaries.
+          #
+          # `docs/releasing.md` claims this of both architectures and until this
+          # check nothing read an artifact to establish it — the claim rested on
+          # two greps over `flake.nix` and `rust-toolchain.toml`, one of which
+          # names `x86_64-unknown-linux-musl` literally, so the aarch64 leg
+          # `PKG-019` (#378) added was asserted nowhere at all.
+          #
+          # A check rather than a test, because a Rust test cannot see the
+          # artifact: `packaging_invariants.rs` reads source files out of the
+          # workspace, and what has to be inspected here is the output of a
+          # build. `ci/static-binaries.sh` is shared with `release.yml`, which
+          # runs it over the files it is about to upload — the `PKG-022` (#385)
+          # rule that the artifact under test is the one an operator downloads.
+          static-binaries =
+            let
+              pkgs = pkgsFor system;
+              inherit (mkKmsrsos { inherit system; }) server client;
+            in
+            pkgs.runCommand "static-binaries"
+              { nativeBuildInputs = [ pkgs.binutils ]; } ''
+              bash ${./ci/static-binaries.sh} '${linuxArch.elfMachine}' \
+                ${server}/bin/kmsrs-server \
+                ${client}/bin/kmsrs-client
+              touch $out
+            '';
 
           # `PKG-016` (#366): two builds of the ISO are the same bytes.
           reproducible-iso = reproducibleIsoCheckFor {
