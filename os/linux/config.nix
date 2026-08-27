@@ -292,6 +292,35 @@ let
       # this issue removed.
       "IP_PNP" "IP_PNP_DHCP" "IP_PNP_BOOTP" "IP_PNP_RARP"
 
+      # `OS-037` (#390): the PnP layer's debugging messages, which had been
+      # compiled into every kernel this project ever shipped.
+      #
+      # `PNP_DEBUG_MESSAGES` is `default y`, so it arrived the way everything
+      # in `OS-006` (#257) arrived — nobody asked for it, and nobody was
+      # looking at PnP. The disable list already names `DEBUG_MISC` and
+      # `DYNAMIC_DEBUG` for exactly this reason.
+      #
+      # Shared rather than per-architecture, which is where it belongs and
+      # where `OS-039` (#397) put it: the symbol is `depends on PNP` and
+      # nothing about it is architectural, and both generated files carried it
+      # `y`. #390 could only reach the x86 half, because `nix build
+      # .#linux-config` produces the architecture of the system it runs on
+      # (`OS-031`, #375) and a hand-edited generated file is not a generated
+      # file. The aarch64 allowlist here was regenerated on an aarch64 machine.
+      #
+      # `PNP` and `PNPACPI` are deliberately **not** beside it, and that is a
+      # finding rather than a hedge. #390 asked whether the whole bus could go,
+      # since `SERIAL_8250_PNP` left with `OS-035` (#383) and no driver on
+      # either kernel binds to the PnP bus any more. It cannot:
+      # `drivers/acpi/Kconfig` has `menuconfig ACPI … select PNP`, so Kconfig
+      # forces it back on and `olddefconfig` overwrites the entry — read off
+      # the kernel rather than argued. `PNPACPI` is `bool` with no prompt and
+      # `default (PNP && ACPI)`, so it is not settable at all. An entry that
+      # cannot be honoured is worse than no entry (`OS-034`, #382), so what
+      # stays is this paragraph, declined item D47 and the `kernel_tcb.rs`
+      # assertions that go with them.
+      "PNP_DEBUG_MESSAGES"
+
       # `OS-035` (#383): the 8250 driver's PCI-card and PnP variants. Every one
       # of them is `default SERIAL_8250` or `default y`, so all three arrived
       # with the console driver and none was ever asked for — `OS-006` (#257)
@@ -326,11 +355,12 @@ let
       # Worth **4 KiB on x86 and 8 KiB on aarch64** — `serial-8250-variants` in
       # `.#linux-deltas`, which is five symbols on x86 (the two below go with
       # them) and three here. This said "8 KiB on each architecture … the same
-      # number both times" until `OS-037` (#390) took `PNP_DEBUG_MESSAGES` off
-      # the x86 kernel and the x86 row moved by one page, which is the whole
+      # number both times" until `OS-037` (#390) changed the baseline by one
+      # debug symbol and the x86 row moved by a page, which is the whole
       # resolution of the instrument: see the note on 4 KiB granularity in the
       # x86 driver table below. Two measurements agreeing to within a page were
-      # never two measurements agreeing.
+      # never two measurements agreeing, and either of these may move by one
+      # again the next time anything else changes.
       #
       # Asked in the enable direction, because they are off in the checked-in
       # configuration and a delta has to be taken against a baseline that does
@@ -493,39 +523,6 @@ let
         # stronger statement, and one `kernel_tcb.rs` asserts as such.
         # `CONFIG_RATIONAL` goes the same way for the same reason.
         "SERIAL_8250_LPSS" "SERIAL_8250_MID"
-
-        # `OS-037` (#390): the PnP layer's debugging messages, which have been
-        # compiled into every kernel this project has ever shipped.
-        #
-        # `PNP_DEBUG_MESSAGES` is `default y`, so it arrived the way everything
-        # in `OS-006` (#257) arrived — nobody asked for it, and nobody was
-        # looking at PnP. The disable list already names `DEBUG_MISC` and
-        # `DYNAMIC_DEBUG` for exactly this reason.
-        #
-        # `PNP` and `PNPACPI` are deliberately **not** beside it, and that is
-        # the finding rather than a hedge. #390 asked whether the whole bus
-        # could go, since `SERIAL_8250_PNP` left with `OS-035` (#383) and no
-        # driver on either kernel binds to the PnP bus any more. It cannot:
-        # `drivers/acpi/Kconfig` has `menuconfig ACPI … select PNP`, so Kconfig
-        # forces it back on and `olddefconfig` overwrites the entry. Read off
-        # the kernel rather than argued — with `PNP` on this list the generated
-        # file still says `CONFIG_PNP=y`, and the only line that changed was
-        # this one. `PNPACPI` is `bool` with no prompt and `default (PNP &&
-        # ACPI)`, so it is not settable at all.
-        #
-        # An entry that cannot be honoured is worse than no entry (`OS-034`,
-        # #382), so what stays is this comment and the `kernel_tcb.rs`
-        # assertions that go with it. It also settles #390's real worry without
-        # a boot: nothing about enumeration changes, so no machine whose serial
-        # port comes from firmware rather than from the ISA table can lose its
-        # console. That was the `OS-005` (#256) failure the issue was written
-        # around.
-        #
-        # This belongs in `common` beside `DEBUG_MISC`, and is here because the
-        # aarch64 allowlist can only be regenerated on an aarch64 machine —
-        # `nix build .#linux-config` is gated by system, and a hand-edited
-        # generated file is not a generated file. `OS-039` (#397) moves it.
-        "PNP_DEBUG_MESSAGES"
 
         # `PERF_EVENTS` is deliberately **not** on this list, and its absence is
         # the answer to `OS-035` (#383) rather than an oversight.

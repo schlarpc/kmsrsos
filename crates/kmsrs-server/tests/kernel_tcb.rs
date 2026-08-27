@@ -422,7 +422,8 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
     // are a plain `default y` bool, and a debug-message option compiled into a
     // shipped kernel needs no further argument. The same reason `DEBUG_MISC`
     // and `DYNAMIC_DEBUG` are on this list; this one slipped through because
-    // nobody was looking at PnP.
+    // nobody was looking at PnP. Both tables carry this row since `OS-039`
+    // (#397), which is what a shared disable-list entry should look like.
     (
         "PNP_DEBUG_MESSAGES",
         Absence::TurnedOff,
@@ -648,13 +649,16 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-036: nothing in the arm matrix is a 16550A variant",
     ),
-    // There is no `PNP_DEBUG_MESSAGES` row here yet, and the x86 table has
-    // one. That asymmetry is temporary and tracked: the symbol belongs on the
-    // shared disable list, and `kernel.config.aarch64` can only be regenerated
-    // on an aarch64 machine, so `OS-037` (#390) took the half it could verify
-    // and `OS-039` (#397) moves it. Do not add the row without regenerating the file — a
-    // test that asserts what the generator does not produce is the `OS-006`
-    // (#257) mistake in a new place.
+    // `OS-037` (#390), on the shared disable list since `OS-039` (#397). The
+    // bus itself cannot go — see `the_pnp_bus_stays_because_acpi_selects_it`
+    // — but its debugging messages are a plain `default y` bool, and a
+    // debug-message option compiled into a shipped kernel needs no further
+    // argument.
+    (
+        "PNP_DEBUG_MESSAGES",
+        Absence::TurnedOff,
+        "OS-037: a debug-message option in a shipped kernel",
+    ),
     // Unreachable here rather than merely off, and for a different reason than
     // on x86: the two symbols that `select` it are `depends on X86`, so this
     // architecture never had it to turn off.
