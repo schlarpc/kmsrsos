@@ -915,6 +915,7 @@ dependencies = [
  "kmsrs-proto",
  "kmsrs-vectors",
  "landlock",
+ "libc",
  "rustix",
  "seccompiler",
  "serde",

@@ -1,0 +1,7 @@
+# Provenance, so a list can be traced back to a run.
+kernel:  Linux 7.0.10 x86_64
+server:  target/x86_64-unknown-linux-musl/release/kmsrs-server
+libc:    static-pie linked
+date:    2026-08-27T04:29:47Z
+syscalls:            38
+after the sandbox:   16

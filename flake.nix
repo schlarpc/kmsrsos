@@ -104,16 +104,23 @@
             # The workflows, because `packaging_invariants.rs` asserts that a
             # release builds what the gate checks (PKG-003, #240).
             || (builtins.match ".*/\\.github(/.*)?" path != null)
-            # The PowerShell harnesses, and only those: `PKG-024` (#399) reads
-            # the `-ExpectMitigations` default out of `arm64-smoke.ps1` and
-            # requires the documents to quote it, so the file has to be here or
-            # the test is one that cannot see what it is about. The scripts
-            # alone rather than `harness/`, because `harness/windows/captures`
-            # is a megabyte of `.pcap` that nothing in the build reads.
-            # `harness/` and `harness/windows/` themselves, because a filter
-            # that excludes a directory never visits its children — which is
-            # why every rule above ends in `(/.*)?` rather than naming files.
+            # Two harnesses, for two tests that read them.
+            #
+            # `tests/sandbox.rs` reads the measured syscall surveys back to
+            # assert the seccomp allowlist covers every syscall the shipped
+            # binary was observed making (`SEC-018`, #355). `PKG-024` (#399)
+            # reads the `-ExpectMitigations` default out of `arm64-smoke.ps1`
+            # and requires the documents to quote it — so each file has to be
+            # here, or the test is one that cannot see what it is about.
+            #
+            # Note `harness` and `harness/windows` themselves: a filter that
+            # excludes a directory never visits its children, which is why
+            # every rule above ends in `(/.*)?` rather than naming files. The
+            # Windows side names the scripts rather than the tree, because
+            # `harness/windows/captures` is a megabyte of `.pcap` that nothing
+            # in the build reads.
             || (builtins.match ".*/harness(/windows)?" path != null)
+            || (builtins.match ".*/harness/linux(/.*)?" path != null)
             || (builtins.match ".*/harness/windows/[^/]*\\.ps1" path != null);
         };
 

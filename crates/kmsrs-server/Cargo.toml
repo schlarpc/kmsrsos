@@ -67,6 +67,10 @@ windows-service.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
 seccompiler.workspace = true
+# `SEC-018` (#355): `SYS_*`, and nothing else from this crate. The allowlist
+# names syscalls and the kernel takes numbers; every other route to that
+# mapping is a table somebody typed.
+libc.workspace = true
 rustix = { workspace = true, features = ["thread"] }
 
 [dev-dependencies]

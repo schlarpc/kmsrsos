@@ -118,6 +118,18 @@ windows-service = "=0.8.1"
 # put a C dependency in the one shipped crate that has none.
 seccompiler = "=0.5.0"
 
+# `SEC-018` (#355): the syscall *numbers* the filter is written in terms of.
+#
+# `seccompiler` compiles rules keyed by number and keeps its own name table
+# private, so something has to say which number `recvfrom` is on this
+# architecture. `libc` is the answer that cannot drift: the constants are the
+# kernel's, per target, resolved by the compiler — as against a hand-written
+# table, which is the practice that produced every fabricated value the audits
+# found. It is already in the lockfile through `tokio`, `socket2` and
+# `seccompiler` itself, so this names a version that is present rather than
+# adding one.
+libc = "=0.2.189"
+
 rustix = { version = "=1.1.4", default-features = false, features = [
   # `mount` and `process`: mount(2) and waitpid(2) (`OS-021`, #337).
   # `fs`: mkdir(2), and open(2) for the /proc and /sys reads below. The
