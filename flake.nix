@@ -2650,6 +2650,27 @@
               inherit system;
               arch = linuxArch;
             };
+        }
+        # `PKG-025` (#411): the two OS packages are built by the gate, not only
+        # by a tag.
+        #
+        # `PKG-001` (#238) and `PKG-004` (#241) put the container in this set
+        # for exactly this reason — the artifacts people actually deploy are
+        # built by the gate, not only by a release — and `.deb` and `.rpm` were
+        # left out of it. Nothing but a tag had ever built them: not this set,
+        # not a pull request. An output nobody builds is an output that does
+        # not work, and these two are where the payload, the hardened unit and
+        # the deployment guide are assembled (`PKG-009`, #246).
+        #
+        # Gated on `osPackageArch` rather than on `linuxArch`, because that is
+        # the function that decides whether these exist: off Linux it returns
+        # `null`, which interpolates into the control file as an *evaluation*
+        # error rather than a build failure. `OS-031` (#375) is the standing
+        # lesson — `nix flake check` must skip what a system cannot build, not
+        # fail to evaluate it.
+        // nixpkgs.lib.optionalAttrs (osPackageArch system != null) {
+          deb = self.packages.${system}.deb;
+          rpm = self.packages.${system}.rpm;
         });
 
       devShells = eachSystem (system:

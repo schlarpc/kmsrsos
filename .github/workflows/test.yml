@@ -321,13 +321,24 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
-  # --- The bootable artifacts, on every run -------------------------------
+  # --- The release artifacts, on every run --------------------------------
   #
   # `PKG-015` (#364). Built with `nix build`, the same command the release
   # workflow uses and the same one `nix flake check` gates on. There is no
   # snapshot-only build path for the same reason there is no release-only one:
   # an artifact built differently from the thing that was tested is an artifact
   # nothing has tested.
+  #
+  # **Every artifact a tag produces, not the subset this used to build**
+  # (`PKG-025`, #411). It built the ISO alone, and the sentence above was
+  # therefore only half true: `.#deb` and `.#rpm` appeared in no check set and
+  # in no other job, so a tag was the first thing that had ever built them.
+  # `docs/decisions.md` records why the difference was not defended — nothing
+  # had argued for it, `releasing.md` merely described it.
+  #
+  # The parity is structural rather than asserted. Both channels run
+  # `ci/build-artifacts.sh`, so they cannot build different things; what is
+  # left to assert is only that both still call it.
   #
   # Both are cross-compiled from Linux and neither is built on the platform it
   # runs on. That is deliberate for the Windows binaries — `release.yml` says
@@ -368,15 +379,12 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      - name: Build the bootable ISO
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          nix build .#linuxIso --print-build-logs --out-link result-iso
-
-          # The same name the release uses, so an operator who has downloaded
-          # both is not comparing `kmsrsos-x86_64.iso` against something else.
-          cp result-iso "out/kmsrsos-${{ matrix.arch }}.iso"
+      # The same script `release.yml` runs, so the names are the release's
+      # names too — an operator who has downloaded both is not comparing
+      # `kmsrsos-x86_64.iso` against something else, and the `.deb` they test
+      # from this channel is byte-for-byte the shape a tag will hand them.
+      - name: Build the artifacts
+        run: ci/build-artifacts.sh "${{ matrix.arch }}" out
 
       # Produced here, on the machine that built the artifact, rather than in
       # the job that publishes it — the same reasoning as `release.yml`
@@ -499,9 +507,18 @@ jobs:
   # # Why this is not a release
   #
   # `make_latest` is never set, so GitHub's "Latest" badge stays on the newest
-  # real tag. The release is marked prerelease, its notes say what it is, and it
-  # carries no SBOM and no `.deb`, `.rpm` or container image — those are things
-  # a tag produces (`PKG-003`, #240) and this is not a tag.
+  # real tag. The release is marked prerelease and its notes say what it is.
+  #
+  # What it is *not* is a smaller set of artifacts. It carried the ISO and the
+  # Windows binaries alone until `PKG-025` (#411), and that was not a decision
+  # anybody had defended — it was the reason `.#deb` and `.#rpm` were built by
+  # no gate at all. A snapshot exists to be tried before a tag, and a snapshot
+  # missing the artifact somebody wants to try is one they cannot use.
+  #
+  # The one thing a tag still does alone is push a container **image**. The
+  # snapshot attaches the tarball instead, so `ghcr.io` only ever gains real
+  # versions; the cost is that `docker load`, `docker tag` and `docker manifest
+  # create` stay uncovered until a tag, over a tarball that both channels build.
   #
   # It *is* signed. An unverifiable bootable image that people download is worse
   # than one they can check, the machinery is already here, and keyless signing
@@ -576,16 +593,25 @@ jobs:
 
           Use it to try something before it is tagged. For anything you intend
           to keep running, take a real release: this one is replaced without
-          warning, has no version number to report in a bug, and carries no
-          SBOM, `.deb`, `.rpm` or container image — those are what a tag
-          produces.
+          warning and has no version number to report in a bug.
+
+          It carries **the same artifacts a tag does**, built by the same
+          script on the same runners (`PKG-025`, #411). One difference: no
+          container image is pushed to `ghcr.io`, which only ever gains real
+          versions. The image is here as a tarball — `docker load < …` it.
 
           | | |
           |---|---|
           | `kmsrsos-x86_64.iso` | the bootable image; upload it, attach it, boot it |
           | `kmsrsos-aarch64.iso` | the same, for Proxmox VE on arm64 and Apple Silicon |
+          | `kmsrs-server-{x86_64,aarch64}-linux` | statically linked against musl; no runtime dependencies |
+          | `kmsrs-client-{x86_64,aarch64}-linux` | the diagnostic and detection-resistance client |
+          | `kmsrsos_*_{amd64,arm64}.deb` | with the hardened systemd unit |
+          | `kmsrsos-*.{x86_64,aarch64}.rpm` | the same payload |
+          | `kmsrsos-container-{x86_64,aarch64}-linux.tar.gz` | `docker load`, not pushed to a registry |
           | `kmsrs-server-windows-{x86_64,aarch64}.exe` | cross-compiled against a pinned MSVC CRT and SDK |
           | `kmsrs-client-windows-{x86_64,aarch64}.exe` | the diagnostic client, same build |
+          | `sbom-*.cdx.json` | CycloneDX, derived from the lockfile |
           | `SHA256SUMS`, `.sig`, `.pem` | one keyless cosign signature over the checksums |
 
           Verifying it is the same procedure as a release, with one difference —
