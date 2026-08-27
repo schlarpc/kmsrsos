@@ -1122,3 +1122,81 @@ fn the_binary_starts_through_the_service_router() {
         );
     }
 }
+
+/// `PKG-024` (#399): the documents and the harness agree about what the ARM64
+/// Windows binary does.
+///
+/// `PKG-020` (#379) shipped an ARM64 build nothing had started, and three
+/// documents said so honestly. `PKG-022` (#385) then ran it, found all five
+/// mitigations accepted, and wired `harness/windows/arm64-smoke.ps1` into every
+/// pull request — and the documents went on saying the reverse of what is true,
+/// in the paragraph an operator reads to decide whether to trust an artifact.
+///
+/// A hand-written claim about a test result stays true only if something ties
+/// it to the test. The harness's `-ExpectMitigations` default *is* the expected
+/// result — it is asserted there, not printed — so that string is the source
+/// and the prose has to quote it. If a future Windows refuses one of the five,
+/// the harness default changes to name it and this test fails until the prose
+/// says the same thing, which is the outcome #399 asks for.
+#[test]
+fn the_docs_quote_the_arm64_smoke_harness_expected_result() {
+    let root = workspace_root();
+    let harness = read(&root, "harness/windows/arm64-smoke.ps1");
+
+    // `[string] $ExpectMitigations = 'applied'`, read off the parameter block
+    // rather than duplicated here: a copy in this file would be one more place
+    // to forget.
+    let expected = harness
+        .split_once("$ExpectMitigations = '")
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(value, _)| value)
+        .expect(
+            "arm64-smoke.ps1 must declare a default -ExpectMitigations; it is \
+             what turns the smoke run into an assertion (PKG-022, #385)",
+        );
+    let claim = format!("process-mitigations: {expected}");
+
+    for path in ["docs/releasing.md", "docs/decisions.md"] {
+        // Prose wraps, and `process-mitigations:` sits at the end of a line in
+        // `decisions.md`. Collapsing runs of whitespace is what lets the
+        // comparison be about the claim rather than about the fill column.
+        let prose = read(&root, path)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains(&claim),
+            "{path} does not quote the result the ARM64 smoke run asserts \
+             ({claim:?}). Either the harness default moved and the prose did \
+             not, or the prose was rewritten without it (PKG-024, #399)."
+        );
+    }
+
+    // The claims that were true before #385 and are false after it. They were
+    // written in three documents and corrected in one, which is the defect
+    // #399 reports; a grep is the cheapest thing that notices the next time.
+    for path in [
+        "docs/releasing.md",
+        "docs/deployment.md",
+        "docs/decisions.md",
+    ] {
+        let prose = read(&root, path)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for stale in [
+            "has never been run on ARM64 Windows",
+            "has not been run on ARM64 Windows",
+            "verified in force on x86_64 only",
+            "are verified in force on x86_64 only",
+        ] {
+            assert!(
+                !prose.contains(stale),
+                "{path} still says {stale:?}. PKG-022 (#385) ran the ARM64 \
+                 binary on ARM64 Windows and all five mitigations were \
+                 accepted; the harness re-establishes it on every pull \
+                 request (PKG-024, #399)."
+            );
+        }
+    }
+}

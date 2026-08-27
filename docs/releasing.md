@@ -42,10 +42,18 @@ There are two of them now, and the one that used to carry the bare name was the 
 release artifact named after a default is one nobody can tell apart from the other. Rename on
 install if the service registration in [`deployment.md`](deployment.md) is being followed literally.
 
-**The ARM64 binary has never been run on ARM64 Windows.** Its build-time checks pass — the PE machine
-type is read off the artifact and Control Flow Guard is asserted absent — and no process has started.
-`SEC-019`'s five mitigations are verified in force on x86_64 only; if the ARM64 kernel declines any,
-the host says so on its console rather than claiming it. See #385.
+**The ARM64 binary is run on ARM64 Windows before it ships** (`PKG-022`, #385). It was shipped
+unverified once and said so; it is not shipped unverified now. On Windows 11 build 26200 on ARM64 the
+cross-compiled artifact — the one this release attaches, not a rebuild — starts, binds 1688 and 8080
+on both address families, serves a V6 activation to `kmsrs-client`, and reports `process-mitigations:
+applied`: **all five** of `SEC-019`'s `SetProcessMitigationPolicy` policies accepted, none refused,
+including `ProcessSystemCallDisablePolicy`, which was the one in doubt. The Windows security posture
+is therefore the same on both architectures.
+
+`harness/windows/arm64-smoke.ps1` does that on every pull request, on a hosted `windows-11-arm`
+runner, and **asserts** the outcome rather than printing it — so a Windows that starts refusing one of
+the five fails a job instead of quietly changing a log line. If one ever is refused the host names it,
+by name, on its console (`SEC-020`, #392) and goes on serving.
 
 There is no apt or yum repository and no Homebrew tap (decision 26): a repository is ongoing
 infrastructure with signing keys that have to be rotated, a downloadable package captures most of the
