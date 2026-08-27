@@ -323,10 +323,16 @@ let
       # Kconfig's own help says the same thing: "You may be able to disable this
       # feature if you only need legacy serial support."
       #
-      # Worth **8 KiB** on each architecture — `serial-8250-variants` in
+      # Worth **4 KiB on x86 and 8 KiB on aarch64** — `serial-8250-variants` in
       # `.#linux-deltas`, which is five symbols on x86 (the two below go with
-      # them) and three here, and lands on the same number both times. Asked in
-      # the enable direction, because they are off in the checked-in
+      # them) and three here. This said "8 KiB on each architecture … the same
+      # number both times" until `OS-037` (#390) took `PNP_DEBUG_MESSAGES` off
+      # the x86 kernel and the x86 row moved by one page, which is the whole
+      # resolution of the instrument: see the note on 4 KiB granularity in the
+      # x86 driver table below. Two measurements agreeing to within a page were
+      # never two measurements agreeing.
+      #
+      # Asked in the enable direction, because they are off in the checked-in
       # configuration and a delta has to be taken against a baseline that does
       # not already contain what is being priced.
       "SERIAL_8250_EXAR" "SERIAL_8250_PERICOM" "SERIAL_8250_PNP"
@@ -410,20 +416,29 @@ let
         #   8139cp    -8 KiB    Proxmox's "Realtek RTL8139" entry, and the default
         #   8139too             emulated NIC on Xen HVM (XCP-ng, Citrix)
         #   pcnet32   -8 KiB    VirtualBox's older adapter choices
-        #   tulip     -12 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
+        #   tulip     -16 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
         #                       which is a DEC 21140
         #   ena       -24 KiB   EC2 Nitro (`OS-027`, #344); in `common`, priced
         #                       here because this is where the table is
         #   hv_netvsc -36 KiB   Hyper-V and Azure; likewise `common`
         #
-        # All six together — `no-emulated-nics` — **-116 KiB**,
-        # 2 442 240 -> 2 323 456. *More* than the sum of the rows, which is -108
+        # All six together — `no-emulated-nics` — **-120 KiB**,
+        # 2 442 240 -> 2 319 360. *More* than the sum of the rows, which is -112
         # KiB, and the asymmetry is the reason the aggregate is measured rather
         # than added up: removing the last user of a shared helper takes the
         # helper with it, and no single row can show that. Asked in the enable
         # direction the same set gave a number smaller than its sum, for the
         # mirror-image reason — two drivers sharing a vendor gate paid for it
         # once.
+        #
+        # **Every number here is a multiple of 4 KiB, and that is the
+        # instrument rather than the drivers** (`OS-037`, #390). A `bzImage` is
+        # page-aligned, so `.#linux-deltas` cannot resolve anything finer, and a
+        # row can move by one page when something unrelated changes the
+        # baseline — which is what happened to `tulip` when
+        # `PNP_DEBUG_MESSAGES` came off. Read these as "about this much", and
+        # re-run the command rather than trusting the last digit of a number
+        # somebody typed.
         #
         # This whole group is x86 as of `OS-032` (#376), and the reason is the
         # platform rather than the driver. Every product in it either does not
@@ -478,6 +493,39 @@ let
         # stronger statement, and one `kernel_tcb.rs` asserts as such.
         # `CONFIG_RATIONAL` goes the same way for the same reason.
         "SERIAL_8250_LPSS" "SERIAL_8250_MID"
+
+        # `OS-037` (#390): the PnP layer's debugging messages, which have been
+        # compiled into every kernel this project has ever shipped.
+        #
+        # `PNP_DEBUG_MESSAGES` is `default y`, so it arrived the way everything
+        # in `OS-006` (#257) arrived — nobody asked for it, and nobody was
+        # looking at PnP. The disable list already names `DEBUG_MISC` and
+        # `DYNAMIC_DEBUG` for exactly this reason.
+        #
+        # `PNP` and `PNPACPI` are deliberately **not** beside it, and that is
+        # the finding rather than a hedge. #390 asked whether the whole bus
+        # could go, since `SERIAL_8250_PNP` left with `OS-035` (#383) and no
+        # driver on either kernel binds to the PnP bus any more. It cannot:
+        # `drivers/acpi/Kconfig` has `menuconfig ACPI … select PNP`, so Kconfig
+        # forces it back on and `olddefconfig` overwrites the entry. Read off
+        # the kernel rather than argued — with `PNP` on this list the generated
+        # file still says `CONFIG_PNP=y`, and the only line that changed was
+        # this one. `PNPACPI` is `bool` with no prompt and `default (PNP &&
+        # ACPI)`, so it is not settable at all.
+        #
+        # An entry that cannot be honoured is worse than no entry (`OS-034`,
+        # #382), so what stays is this comment and the `kernel_tcb.rs`
+        # assertions that go with it. It also settles #390's real worry without
+        # a boot: nothing about enumeration changes, so no machine whose serial
+        # port comes from firmware rather than from the ISA table can lose its
+        # console. That was the `OS-005` (#256) failure the issue was written
+        # around.
+        #
+        # This belongs in `common` beside `DEBUG_MISC`, and is here because the
+        # aarch64 allowlist can only be regenerated on an aarch64 machine —
+        # `nix build .#linux-config` is gated by system, and a hand-edited
+        # generated file is not a generated file. `OS-039` (#397) moves it.
+        "PNP_DEBUG_MESSAGES"
 
         # `PERF_EVENTS` is deliberately **not** on this list, and its absence is
         # the answer to `OS-035` (#383) rather than an oversight.
