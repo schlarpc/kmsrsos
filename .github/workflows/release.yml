@@ -56,83 +56,17 @@ jobs:
       # checked, and that is the case worth catching.
       - run: nix flake check --print-build-logs
 
-      - name: Build the artifacts
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          nix build .#server    --print-build-logs --out-link result-server
-          nix build .#client    --print-build-logs --out-link result-client
-          nix build .#deb       --print-build-logs --out-link result-deb
-          nix build .#rpm       --print-build-logs --out-link result-rpm
-          nix build .#container --print-build-logs --out-link result-container
-
-          cp result-server/bin/kmsrs-server "out/kmsrs-server-${{ matrix.name }}"
-          cp result-client/bin/kmsrs-client "out/kmsrs-client-${{ matrix.name }}"
-          cp result-deb/*.deb out/
-          cp result-rpm/*.rpm out/
-          cp result-container "out/kmsrsos-container-${{ matrix.name }}.tar.gz"
-
-          # One bare-metal ISO per architecture, each built on its own leg
-          # (`PKG-019`, #378).
-          #
-          # There is no `if` here any more, and the one that was here is worth
-          # remembering: it tested the matrix name against the x86 leg, because
-          # `pkgs.syslinux` is unavailable off x86 and the whole target was
-          # gated by system. That reasoning is now *correct and irrelevant* —
-          # the arm recipe has no BIOS path, so it never reaches syslinux
-          # (`OS-033`, #377) — and the gate that remains lives in the flake,
-          # where `linuxArches` decides which systems build a target at all.
-          #
-          # This block used to build `.#osImage` and `.#osIso` and ship
-          # `kmsrsos-hermit.img`. `OS-018` (#334) removed that target and left
-          # this behind, so a release would have failed on a missing flake
-          # attribute — and `the_release_workflow_builds_what_the_gate_checks`
-          # did not catch it, because it was asserting the same stale names.
-          #
-          # Shipped uncompressed: 5.3 MiB on x86_64 and 4.4 MiB on aarch64, and
-          # a `.iso.gz` is one more step between an operator and a running host
-          # — the whole deployment procedure is "upload it, attach it, boot it".
-          nix build .#linuxIso --print-build-logs --out-link result-iso
-          cp result-iso "out/kmsrsos-${{ matrix.arch }}.iso"
-
-      # `PKG-023` (#395): the artifacts about to be uploaded are statically
-      # linked, and are the architecture this leg claims.
+      # Every Linux artifact for this leg, built by the one script the
+      # snapshot channel also runs (`PKG-025`, #411). Builds, copies under the
+      # names below, reads the binaries to prove they are static and this
+      # architecture (`PKG-023`, #395), and emits the two SBOMs.
       #
-      # `nix flake check` above already runs the `static-binaries` check, and
-      # this runs the same script over `out/` anyway — over the files that will
-      # be attached to the release rather than over the store paths a check
-      # happened to build. That is the `PKG-022` (#385) rule: the artifact
-      # under test is the one an operator downloads. It is also what catches a
-      # `cp` in the step above copying the wrong leg's binary, which no check
-      # inside the flake can see.
-      - name: The binaries are static, and are this architecture
-        run: |
-          set -euo pipefail
-          machine=$([ "${{ matrix.arch }}" = aarch64 ] \
-            && echo 'AArch64' || echo 'Advanced Micro Devices X86-64')
-          ci/static-binaries.sh "$machine" \
-            "out/kmsrs-server-${{ matrix.name }}" \
-            "out/kmsrs-client-${{ matrix.name }}"
-
-      # `SEC-010` (#202): the binaries are static, so "what is in this" is a
-      # question the file itself has to answer. An SBOM derived from the
-      # lockfile is that answer, and it is exact rather than inferred — every
-      # version in it is pinned with `=` (PKG-006, #243).
-      - name: Software bill of materials
-        run: |
-          set -euo pipefail
-          # Through the dev shell: `cargo-cyclonedx` shells out to `rustc` for
-          # the target triple, so it needs the toolchain on PATH, and running it
-          # from the shell means flake.lock pins the version.
-          nix develop -c cargo cyclonedx --format json --describe crate
-          # One SBOM per crate is emitted; the two that ship are the two that
-          # are attached, named after the binary rather than after the crate so
-          # that a reader can match them to what they downloaded.
-          cp crates/kmsrs-server/kmsrs-server.cdx.json \
-             "out/sbom-kmsrs-server-${{ matrix.name }}.cdx.json"
-          cp crates/kmsrs-client/kmsrs-client.cdx.json \
-             "out/sbom-kmsrs-client-${{ matrix.name }}.cdx.json"
-          test -s "out/sbom-kmsrs-server-${{ matrix.name }}.cdx.json"
+      # This was seventy lines of `nix build` and `cp` here and a shorter list
+      # in `test.yml`, which is how `.#deb` and `.#rpm` came to be built by no
+      # gate at all. One script means the two channels cannot build different
+      # things.
+      - name: Build the artifacts
+        run: ci/build-artifacts.sh "${{ matrix.arch }}" out
 
       # Two builds of one revision are the same bytes. Checked on every pull
       # request too (SEC-010, #202; CFG-008, #173), and again here because a

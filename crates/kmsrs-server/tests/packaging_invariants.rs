@@ -634,6 +634,7 @@ fn both_linux_architectures_are_static_and_something_reads_the_binary() {
     let toolchain = read(&root, "rust-toolchain.toml");
     let flake = read(&root, "flake.nix");
     let release = read(&root, ".github/workflows/release.yml");
+    let build_artifacts = read(&root, "ci/build-artifacts.sh");
 
     for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
         assert!(
@@ -672,11 +673,21 @@ fn both_linux_architectures_are_static_and_something_reads_the_binary() {
         "the `static-binaries` check is gone from flake.nix, so `nix flake \
          check` no longer reads the artifact"
     );
+    // Asserted on the script rather than on the workflow since `PKG-025`
+    // (#411), because that is where the upload-time check now lives — and the
+    // script is run by both channels, so the snapshot's binaries are read the
+    // same way a tag's are.
     assert!(
-        release.contains("ci/static-binaries.sh"),
-        "release.yml no longer checks the binaries it uploads, so the only \
-         thing asserting the shipped file is static is a check over a \
-         different file (PKG-023, #395)"
+        build_artifacts.contains("ci/static-binaries.sh"),
+        "ci/build-artifacts.sh no longer checks the binaries it stages, so \
+         the only thing asserting the shipped file is static is a check over \
+         a different file (PKG-023, #395)"
+    );
+    assert!(
+        release.contains("ci/build-artifacts.sh"),
+        "release.yml no longer builds through ci/build-artifacts.sh, so it \
+         has a build path of its own again and nothing reads what it uploads \
+         (PKG-023, #395; PKG-025, #411)"
     );
 }
 
@@ -752,6 +763,13 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     let root = workspace_root();
     let workflow = read(&root, ".github/workflows/release.yml");
 
+    // Since `PKG-025` (#411) the Linux artifacts are built by a script the
+    // snapshot channel runs too, so "the release builds this" is a statement
+    // about the pair. Asserting it against the workflow alone would have gone
+    // stale the moment the build moved, which is this test's own history.
+    let script = read(&root, "ci/build-artifacts.sh");
+    let built = format!("{workflow}\n{script}");
+
     // Every artifact `PKG-003` (#240) names.
     for output in [
         ".#server",
@@ -788,9 +806,15 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         // prevent, so it is worth the comment.
         ".#linuxIso",
     ] {
+        // `nix build <output>`, not the bare attribute. A bare `.#deb` is
+        // satisfied by any comment that happens to mention one, and both this
+        // workflow and the script have prose that does — so the loose form
+        // passed with the build deleted, which is the exact failure this test
+        // exists to catch.
+        let command = format!("nix build {output}");
         assert!(
-            workflow.contains(output),
-            "the release does not build {output} (PKG-003, #240)"
+            built.contains(&command),
+            "the release does not run `{command}` (PKG-003, #240)"
         );
     }
 
@@ -802,9 +826,9 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // operator can tell apart. The x86 ISO was built and copied inside an
     // `if [ "$matrix.name" = "x86_64-linux" ]` for two issues, and nothing here
     // would have noticed the day that condition stopped being what was meant.
-    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    let iso = "kmsrsos-${arch}.iso";
     assert!(
-        workflow.contains(iso),
+        script.contains(iso),
         "the release does not attach the ISO as {iso}, so either it ships \
          under one name for two architectures or it does not ship \
          (PKG-019, #378)"
@@ -830,7 +854,7 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // `if [ "$matrix.name" = "x86_64-linux" ]` would silently ship one ISO
     // while every assertion above still passed.
     assert!(
-        !workflow.contains("= \"x86_64-linux\" ]"),
+        !built.contains("= \"x86_64-linux\" ]"),
         "the release still gates something on being the x86_64 leg. Since \
          `OS-033` (#377) there is an image for each architecture and the flake \
          decides which systems have one (PKG-019, #378)"
@@ -864,14 +888,14 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // build path, which is the whole thing this test is about.
     for bypass in ["cargo build --release", "cargo install", "docker build"] {
         assert!(
-            !workflow.contains(bypass),
+            !built.contains(bypass),
             "the release workflow uses {bypass}, which is a build path nothing \
              else exercises"
         );
     }
 
     // `SEC-010` (#202): an SBOM, checksums, a signature, and a rebuild.
-    assert!(workflow.contains("cyclonedx"), "no SBOM is produced");
+    assert!(built.contains("cyclonedx"), "no SBOM is produced");
     assert!(workflow.contains("sha256sum"), "no checksums are produced");
     assert!(workflow.contains("cosign sign-blob"), "nothing is signed");
     assert!(
