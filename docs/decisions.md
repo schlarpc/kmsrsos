@@ -51,7 +51,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 16 | Metrics | `/metrics` in Prometheus text format, including an entropy-health gauge (#189) |
 | 17 | Web UI | Read-only — under A5 there is nothing durable to mutate (#186) |
 | 18 | Socket activation | Declined → [D40](#d40). The binary refuses to start if `LISTEN_FDS` is set, rather than degrading |
-| 19 | Linux hardening | Landlock + seccomp (#197); privilege drop declined → [D41](#d41), because there is never a privilege to drop |
+| 19 | Linux hardening | Landlock, `no_new_privs` and a **measured** seccomp allowlist (#197, #355); privilege drop declined → [D41](#d41), because there is never a privilege to drop |
 | 20 | Windows hardening | Self-applicable process mitigations only; AppContainer skipped, asymmetry documented (#197) |
 | 21 | Windows service | Dispatcher + control handler; **no installer**; web UI mandatory in service mode (#245) |
 | 22 | SRV publishing | RFC 2136 dropped → [D15](#d15). Instructions page emits zone snippet, `nsupdate` **and** `dnscmd`/PowerShell (#148) |
@@ -74,7 +74,7 @@ These constrain everything. A proposal that violates one is wrong by default, no
 | 39 | Host clock in the request path | One start-up reading, projected by the monotonic clock and re-anchored when SNTP corrects it, [see below](#the-host-clock-is-projected-and-re-anchored-pol-020-346) (#346) |
 | 40 | GRUB in the ISO | **Supersedes `OS-023`**: a six-module GRUB with an embedded config takes the kernel to one copy, 8.32 → 5.32 MiB. FAT-only priced and declined, [see below](#the-kernel-is-in-the-iso-once-os-023-339-os-030-348) (#348) |
 | 41 | SRV weighting | RFC 2782's running-sum selection, **not** the `isqrt` formula `DISC-001` quoted from vlmcsd, [see below](#the-srv-weighting-is-the-specifications-not-vlmcsds-disc-001-143) (#143) |
-| 42 | Self-sandboxing | Landlock and `no_new_privs` after binding, on the hosted build only. seccomp and the Windows mitigations split out, [see below](#the-sandbox-is-what-could-be-verified-sec-005-197) (#197) |
+| 42 | Self-sandboxing | Landlock, `no_new_privs` and seccomp after binding, on the hosted build only. The syscall list was split out and then [measured on both libcs](#the-syscall-allowlist-was-measured-not-reasoned-sec-018-355) rather than reasoned (#197, #355) |
 | 43 | `TCP_NODELAY` | Left at the OS default, having been **measured** rather than assumed: Nagle cannot engage in this protocol, so the option is unobservable, [see below](#tcp_nodelay-is-unobservable-so-it-is-not-set-net-015-164) (#164) |
 | 44 | Windows mitigations | Five applied through `SetProcessMitigationPolicy`, reopening the unsafe boundary for one call, [see below](#the-unsafe-boundary-was-reopened-for-five-calls-sec-019-356). CFG removed: it produced a binary that did not start (#356) |
 | 45 | A second architecture is supported | aarch64, because Proxmox VE for arm64 shipped and KVM is same-architecture — and because on Apple Silicon the whole lab is Arm, [see below](#a-second-architecture-is-supported-os-032-376-pkg-019-378) (#376, #378) |
@@ -704,14 +704,15 @@ that is not kills pid 1 — a kernel panic, not a failed request. The value is a
 limits what a compromised process can reach, and on a machine whose entire userland is this process
 there is nothing else to reach. So `sandbox::apply` is called from `serve` and not from `serve_with`.
 
-#### Why seccomp was split out rather than written
+#### Why seccomp was split out rather than written, and how it was measured
 
-The two that shipped are verifiable in a way a syscall filter is not. Landlock either denies
+The two that shipped first are verifiable in a way a syscall filter is not. Landlock either denies
 `/proc/self/cmdline` or it does not, and `tests/sandbox.rs` checks exactly that in a real sandboxed
 subprocess. A seccomp allowlist is a claim about *every syscall this process will ever make*, across
 every libc, allocator, kernel and tokio version it ships against — and the cost of getting it wrong is
 the process being killed on something nobody predicted, under load, in production, with no log line
-because the process is gone. That list has to be measured, on both libc targets, which is #355.
+because the process is gone. That list had to be measured, on both libc targets, which is #355 — and
+it has been. See [the decision below](#the-syscall-allowlist-was-measured-not-reasoned-sec-018-355).
 
 #### Why the Windows mitigations were split out, and how it was settled
 
@@ -746,6 +747,71 @@ could never fill. Landlock, being one thing rather than five, still reports the 
 A measure that cannot be applied is never fatal. A host that refused to activate anything because it
 could not sandbox itself would be trading its entire function for a hardening measure — the same shape
 of mistake as [D35], and as `POL-011`'s clock-skew tolerance.
+
+### The syscall allowlist was measured, not reasoned (`SEC-018`, #355)
+
+`SEC-005` shipped two of its three Linux measures and said so. The third is here, and the interesting
+part is not the list — it is that **the list is not derivable from this workspace's source**.
+
+**What was run.** `harness/linux/syscall-survey.sh` starts the shipped binary under `strace` and
+drives it through every path #355 names: idle, a v4, a v5 and a v6 activation, every web route, the
+rate limiter engaging, a connection sitting until its deadline fires, the five-minute entropy re-test
+of `SEC-011` (#203), and shutdown and drain. It ran against **both** libc targets, and the distilled
+result of each run is checked in under `harness/linux/surveys/`.
+
+**What it found, and why it settles the argument.** The same program, the same requests, the same
+kernel: glibc calls `epoll_wait` and musl calls `epoll_pwait`. glibc reaches for `brk`, `gettid`,
+`mprotect` and `sched_getaffinity`; musl does not. Not one of those differences is visible in a line
+of this workspace, and a filter written from a reading of the code would have shipped fine and killed
+a container on its first request. That is the whole of why #355 was split out of #197 rather than
+guessed at.
+
+So the surveys are a **floor**, not the list. `the_allowlist_covers_every_syscall_the_survey_measured`
+asserts the floor is covered; the list above it is written a family at a time, because which member
+of `read`/`readv`, `sendto`/`sendmsg` or `nanosleep`/`clock_nanosleep` gets used belongs to a library
+rather than to this program. `clock_gettime` is in the list and in neither survey, and that is
+deliberate: it is served from the vDSO and never reaches the kernel — until a `vdso=0` boot, when it
+does.
+
+**The failure action is not one decision.** #355 put the two candidates plainly and asked for an
+argument rather than a default. The answer is that the question is per syscall:
+
+- **`KillProcess` by default.** A KMS host's failure that matters is not an outage, it is an answer
+  that is wrong on the wire — a client that gets a subtly wrong response has detected an emulator, and
+  the activation it recorded is one nobody can undo. A process that has just made a syscall its own
+  model of itself says it never makes is one whose next response nobody can predict. It is also the
+  more diagnosable of the two: the kernel writes an audit record naming the syscall number, which is
+  more than a swallowed `EPERM` leaves behind, and `Restart=on-failure` in the shipped unit makes it a
+  restart.
+- **`EPERM` for three.** `openat`/`open` and `socket`/`socketpair` are refused with an errno instead.
+  Each is provably never called after binding, each is reached only by error paths in the standard
+  library that already handle a failure, and a kill would be strictly worse: `std` opens
+  `/proc/self/maps` to print a panic backtrace, and a panicking connection task is survivable today
+  and must not become a process kill.
+
+`socket` is also the measure **Landlock cannot take**. ABI 4 governs `bind` and `connect` for TCP; it
+says nothing about creating an `AF_UNIX` or `AF_NETLINK` socket. And refusing it with an errno is what
+makes the filter observable from inside the process, which is what
+`a_socket_that_could_be_created_before_the_sandbox_cannot_be_after` needs — there is no way to test a
+`KillProcess` rule from inside except by dying.
+
+**Two filters, and the order is load-bearing.** The kernel takes the most severe action across every
+installed filter, so `EPERM` has to come from a *second* filter under the allowlist rather than from
+a rule inside it. The softening filter goes on first, because installing a filter is itself a
+`seccomp(2)` and `seccomp` is deliberately not in the allowlist — put the allowlist on first and the
+next call is killed by the filter that was just applied. That is not hypothetical; it is what the
+first version did, and `tests/sandbox.rs` caught it by dying with `SIGSYS`.
+
+**An architecture nobody surveyed does not get a guess.** `SYSCALLS_CAN_BE_RESTRICTED` is x86_64 and
+aarch64, the two this program ships to. A third Linux architecture would compile — `libc` has the
+numbers — and nobody would have watched it serve a request under the filter, so it reports
+`NotOnThisTarget` instead. An older kernel that refuses the filter outright reports `Failed` and the
+process goes on serving, for the same reason Landlock does.
+
+**What this does not change.** The bare-metal target is still not sandboxed, so
+`CONFIG_SECCOMP`/`CONFIG_SECCOMP_FILTER` in `os/linux/kernel.config` remain a reservation against a
+mitigation that is applied on the hosted path and nowhere near pid 1. That was true before #355 and
+is still true after it; removing them is `OS-042` (#408).
 
 ### Notes on the three decisions that took the most argument
 

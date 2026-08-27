@@ -213,6 +213,37 @@ genuinely does not do:
 | `MemoryDenyWriteExecute=yes` | no JIT, no dynamic code |
 | `MemoryMax=128M` | the heap ceiling is 8 MiB and asserted at compile time (`OS-011`, #262) |
 
+### The host also confines itself, wherever it is started from
+
+The unit's hardening is systemd's. **The same restrictions are applied by the process to itself**
+(`SEC-005`, #197; `SEC-018`, #355) — Landlock with an empty ruleset, `no_new_privs`, and a seccomp
+allowlist — which is what makes them true in a scratch container, under any other init, and on a
+machine where somebody started the binary by hand. They go on after the listeners are bound and
+before the first connection is accepted, so nothing an operator does can order them wrongly.
+
+The start-up log says what took, one line per measure, at `debug`:
+
+```
+{"level":"debug","event":"sandbox","detail":"syscalls: applied"}
+```
+
+`refused by the kernel` there is **not fatal** and does not need action beyond knowing: an older
+kernel without Landlock or `CONFIG_SECCOMP_FILTER` serves unconfined rather than refusing to start.
+
+**What it looks like when the filter bites.** A syscall the allowlist does not name ends the process
+with `SIGSYS` and no message of its own, because the process is gone before it could write one. The
+kernel records it instead:
+
+```
+journalctl -k | grep seccomp
+audit: type=1326 ... comm="kmsrs-server" ... syscall=257
+```
+
+That number is the syscall, and it is what a bug report needs. `Restart=on-failure` in the unit brings
+the host back. This is a deliberate trade and the argument is in
+[`decisions.md`](decisions.md#the-syscall-allowlist-was-measured-not-reasoned-sec-018-355): for a KMS
+host the failure that matters is an answer that is wrong on the wire, not a restart.
+
 **Privileges are never dropped, because they never exist** ([D41](decisions.md#d41)). The issue that
 proposed `setuid`/`setgid` named this path as the preferred one itself; with `DynamicUser` and an
 unprivileged port there is nothing left for the drop to remove, and three `unsafe` libc calls in a

@@ -1,0 +1,7 @@
+# Provenance, so a list can be traced back to a run.
+kernel:  Linux 7.0.10 x86_64
+server:  target/release/kmsrs-server
+libc:    dynamically linked
+date:    2026-08-27T04:23:30Z
+syscalls:            50
+after the sandbox:   20

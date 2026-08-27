@@ -1,0 +1,16 @@
+accept4
+close
+epoll_ctl
+epoll_pwait
+exit_group
+futex
+getrandom
+landlock_restrict_self
+mmap
+munmap
+recvfrom
+rt_sigreturn
+sendto
+shutdown
+sigaltstack
+write

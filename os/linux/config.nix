@@ -83,10 +83,24 @@ let
       "64BIT" "SMP" "MULTIUSER" "POSIX_TIMERS" "FUTEX" "EPOLL" "EVENTFD"
       "SIGNALFD" "TIMERFD" "BINFMT_ELF" "PRINTK" "PRINTK_TIME" "BUG"
 
-      # Kept for `SEC-005` (#197), which is not written yet — so this is a
-      # *reservation*, and saying so is the point. The comment here used to read
-      # as though the mitigation were already applied; nothing in this tree calls
-      # `seccomp(2)` today. Measured cost of keeping it: see `.#linux-deltas`.
+      # A reservation, still — and `SEC-018` (#355) is what makes that worth
+      # restating rather than deleting.
+      #
+      # This comment used to say "kept for `SEC-005` (#197), which is not
+      # written yet". #355 wrote it: `sandbox::restrict_syscalls` installs a
+      # measured allowlist now. What did not change is which entry point applies
+      # it. `sandbox::apply` is called from `serve` and not from `serve_with`
+      # (`SEC-005`, #197), `serve_with` is what `kmsrs-os` runs, and
+      # `the_bare_metal_entry_point_does_not_sandbox_itself` asserts it — so
+      # these two symbols are in the TCB of a kernel whose only userland process
+      # will never call `seccomp(2)`, and are now kept against a test that says
+      # they cannot be used.
+      #
+      # Taking them out is `OS-042` (#408), because it moves the baseline every
+      # delta in this file is measured against and that is a unit of work of its
+      # own. Measured cost of keeping them: `no-seccomp` in `.#linux-deltas`,
+      # which is -4 KiB on both architectures — the instrument's floor, so the
+      # size is not the argument. `OS-023` (#339) is.
       "SECCOMP" "SECCOMP_FILTER"
 
       # A relocatable kernel and a randomised base, stated rather than inherited
