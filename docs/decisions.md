@@ -604,10 +604,11 @@ What it found is in [its own section below](#the-arm64-binary-runs-and-takes-all
 What made shipping it defensible in the meantime is that the failure mode is **visible rather than
 silent**, which is precisely what `PKG-018` below found to be missing:
 
-- `refused()` attributes a declined policy to a policy *by name*, and `apply()` reports `Failed`
+- `refused()` attributes a declined policy to a policy *by name*, and `apply()` reports a refusal
   rather than aborting — because "this kernel declined a mitigation" already happens on older
   Windows builds and is not a reason to stop serving. A host that gets fewer mitigations than it
-  asked for says so on its console at start-up.
+  asked for says so on its console at start-up, and says **which** — that last part was the claim
+  this section made before it was true, and `SEC-020` (#392) is where it was made true.
 - The `windows-mitigations` check now reads `IMAGE_FILE_MACHINE` off each artifact **before** it
   asserts anything else about it. Without that, a check reading only the binary it knew about would
   pass for the whole time the other was unbuilt or wrong — the same shape of hole `PKG-018` was
@@ -730,8 +731,17 @@ free. It was neither: the binary it produced did not start. See
 
 `Applied::Failed` and `Applied::NotOnThisTarget` are separate variants because they are different
 facts — "Windows has no Landlock" and "Landlock is here and refused" call for different responses, and
-collapsing them would hide the second. Windows reports `process_mitigations: Failed` rather than
-`NotOnThisTarget`, because the capability exists on that platform and is not being used.
+collapsing them would hide the second. Windows reports a refusal rather than `NotOnThisTarget`,
+because the capability exists on that platform and is not being used.
+
+`Applied::FailedInPart` is the same distinction one level down (`SEC-020`, #392). Windows applies
+*five* policies under one measure name, and reporting them as one word meant an operator learned that
+at least one of the five did not take and could not tell which — with
+`ProcessSystemCallDisablePolicy` refused being a materially different posture from
+`ProcessStrictHandleCheckPolicy` refused. The variant carries a `Refusals`: a `&'static` name table
+owned by the platform module and a bitmask over it, which is what lets the refusal be attributed
+while `Report` stays `Copy`, allocation-free and free of any field the Linux and bare-metal targets
+could never fill. Landlock, being one thing rather than five, still reports the plain `Failed`.
 
 A measure that cannot be applied is never fatal. A host that refused to activate anything because it
 could not sandbox itself would be trading its entire function for a hardening measure — the same shape

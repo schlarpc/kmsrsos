@@ -46,7 +46,12 @@ param(
     # What the process-mitigation line is expected to say. Asserted rather than
     # merely printed, so that the day this stops being true a job fails instead
     # of a log line changing where nobody is reading.
-    [ValidateSet('applied', 'refused by the kernel', 'not available on this target')]
+    #
+    # Not a `ValidateSet` since `SEC-020` (#392): a refusal now names the
+    # policies it refused — `refused by the kernel (win32k, image-load)` — so
+    # the set of things this line can say is the power set of five policies
+    # rather than three fixed strings. The shape is checked below instead, and
+    # a refusal that named nothing is itself a failure.
     [string] $ExpectMitigations = 'applied'
 )
 
@@ -178,6 +183,20 @@ $summary | Tee-Object -FilePath $Report
 # the other, and `docs/decisions.md` has to say so per architecture rather than
 # once.
 if ($mitigations -ne $ExpectMitigations) {
-    Fail "process mitigations reported '$mitigations', expected '$ExpectMitigations'. If this ARM64 kernel genuinely refuses one of the five, record which in docs/decisions.md and change -ExpectMitigations; do not delete the assertion (PKG-022, #385)"
+    Fail "process mitigations reported '$mitigations', expected '$ExpectMitigations'. If this ARM64 kernel genuinely refuses one of the five, record which in docs/decisions.md and change -ExpectMitigations to the exact line including the names; do not delete the assertion (PKG-022, #385)"
 }
-Write-Host "process mitigations: $mitigations" -ForegroundColor Green
+
+# `SEC-020` (#392): a refusal has to say which. The defect this guards against
+# is not the kernel refusing — that is allowed for, non-fatal and expected on
+# older builds — it is the report collapsing five policies into one word, so
+# that an operator cannot tell the win32k policy going missing from the strict
+# handle one. If this ever reads as a bare refusal again, the attribution has
+# been lost somewhere between `refused()` and the log line.
+if ($mitigations -like 'refused by the kernel*') {
+    if ($mitigations -notmatch '^refused by the kernel \(([^)]+)\)$') {
+        Fail "a refusal was reported without naming any policy: '$mitigations' (SEC-020, #392)"
+    }
+    Write-Host "process mitigations refused: $($Matches[1])" -ForegroundColor Yellow
+} else {
+    Write-Host "process mitigations: $mitigations" -ForegroundColor Green
+}
