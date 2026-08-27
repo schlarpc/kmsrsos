@@ -417,6 +417,17 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-035: ttyS0 comes from SERIAL_PORT_DFNS here, not the PnP bus",
     ),
+    // `OS-037` (#390). The bus itself cannot go — see
+    // `the_pnp_bus_stays_because_acpi_selects_it` — but its debugging messages
+    // are a plain `default y` bool, and a debug-message option compiled into a
+    // shipped kernel needs no further argument. The same reason `DEBUG_MISC`
+    // and `DYNAMIC_DEBUG` are on this list; this one slipped through because
+    // nobody was looking at PnP.
+    (
+        "PNP_DEBUG_MESSAGES",
+        Absence::TurnedOff,
+        "OS-037: a debug-message option in a shipped kernel",
+    ),
     (
         "SERIAL_8250_LPSS",
         Absence::TurnedOff,
@@ -616,6 +627,13 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-035: Graviton's 16550A is a PCI device, not a PnP one",
     ),
+    // There is no `PNP_DEBUG_MESSAGES` row here yet, and the x86 table has
+    // one. That asymmetry is temporary and tracked: the symbol belongs on the
+    // shared disable list, and `kernel.config.aarch64` can only be regenerated
+    // on an aarch64 machine, so `OS-037` (#390) took the half it could verify
+    // and `OS-039` (#397) moves it. Do not add the row without regenerating the file — a
+    // test that asserts what the generator does not produce is the `OS-006`
+    // (#257) mistake in a new place.
     // Unreachable here rather than merely off, and for a different reason than
     // on x86: the two symbols that `select` it are `depends on X86`, so this
     // architecture never had it to turn off.
@@ -986,6 +1004,49 @@ fn perf_events_is_absent_on_one_target_and_forced_on_the_other() {
         mentioned(&arm, "PERF_EVENTS") && !enabled(&arm, "PERF_EVENTS"),
         "CONFIG_PERF_EVENTS is on in the aarch64 kernel, so both targets now          have `perf_event_open(2)` and the one architecture that could refuse          it has stopped (`OS-032`, #376; `OS-035`, #383)"
     );
+}
+
+/// `OS-037` (#390): the PnP bus is in both kernels and cannot be taken out.
+///
+/// It enumerates nothing worth having. `SERIAL_8250_PNP` was the only driver on
+/// either kernel that bound to the PnP bus and `OS-035` (#383) removed it; on
+/// an EC2 Graviton instance `/sys/bus/pnp/devices/` holds exactly one entry,
+/// the ACPI motherboard-resources pseudo-device, and on x86 the console comes
+/// from `SERIAL_PORT_DFNS` in `arch/x86/include/asm/serial.h`.
+///
+/// It still cannot be removed: `drivers/acpi/Kconfig` gives `menuconfig ACPI`
+/// an unconditional `select PNP`, so Kconfig forces the symbol back on and
+/// `olddefconfig` overwrites the entry — observed, by putting `PNP` on the
+/// disable list and reading the generated file, which still said
+/// `CONFIG_PNP=y`. `PNPACPI` follows: `bool` with no prompt and
+/// `default (PNP && ACPI)`, so it is not settable at all.
+///
+/// Naming either on the disable list would be an entry that cannot be
+/// honoured, which is what `OS-034` (#382) exists to keep out. So the fact is
+/// asserted per target instead — the same shape, and for the same reason, as
+/// [`perf_events_is_absent_on_one_target_and_forced_on_the_other`]. The day
+/// ACPI stops selecting PNP this fails, and the pare-back #390 asked for
+/// becomes possible.
+#[test]
+fn the_pnp_bus_stays_because_acpi_selects_it() {
+    for target in TARGETS {
+        let config = built_config(target);
+        assert!(
+            enabled(&config, "ACPI"),
+            "CONFIG_ACPI is off on {}, so the reasoning below does not apply",
+            target.arch
+        );
+        assert!(
+            enabled(&config, "PNP"),
+            "CONFIG_PNP is off in the {} kernel. That is a better answer than              the one `OS-037` (#390) had to settle for — but it means              `menuconfig ACPI` no longer carries `select PNP`, so the bus can              now be pared back. Put PNP on the disable list, regenerate, and              delete this test",
+            target.arch
+        );
+        assert!(
+            enabled(&config, "PNPACPI"),
+            "CONFIG_PNPACPI is off in the {} kernel while PNP is on, which              `default (PNP && ACPI)` says cannot happen (`OS-037`, #390)",
+            target.arch
+        );
+    }
 }
 
 /// Nothing is a module, because `CONFIG_MODULES` is off.

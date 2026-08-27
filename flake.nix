@@ -791,6 +791,29 @@
             "SERIAL_8250_LPSS" "SERIAL_8250_MID"
           ];
 
+          # `OS-037` (#390): what the PnP layer's debugging messages cost to put
+          # back. The enable direction, because `PNP_DEBUG_MESSAGES` is off in
+          # the checked-in configuration as of that issue — the `OS-038` (#391)
+          # rule, applied the first time it was needed.
+          #
+          # There is no `no-pnp` beside it. `menuconfig ACPI` carries
+          # `select PNP`, so the symbol cannot be turned off while ACPI is on
+          # and the variant would report exactly zero — "the question could not
+          # be asked" rather than "the PnP bus is free". `os/linux/config.nix`
+          # is where that is written down.
+          #
+          # Measured: **0**, and that zero is a measurement rather than an
+          # unasked question. The variant does turn a symbol on that the
+          # baseline has off — `olddefconfig` produces a genuinely different
+          # configuration — and the image comes out the same size, because a
+          # `bzImage` is page-aligned and this measurement's resolution is
+          # therefore 4 KiB. So what it says is "the PnP debugging messages
+          # cost less than this instrument can see", which is a different and
+          # much weaker fact than `no-smp`'s zero on aarch64, and is why it is
+          # still worth having a row. `OS-037` disabled them on the argument
+          # rather than on the number.
+          pnp-debug = [ "PNP_DEBUG_MESSAGES" ];
+
           # There is no `no-perf-events` here, and its absence is a finding
           # rather than an omission (`OS-035`, #383). `config X86` carries an
           # unconditional `select PERF_EVENTS`, so the variant would produce a

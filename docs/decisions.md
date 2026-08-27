@@ -1157,3 +1157,25 @@ What is done instead is that the fact is asserted per target:
 forcing it, that test fails and this paragraph gets revisited rather than quietly going stale. On
 aarch64, where the question can be asked, keeping it out is worth **56 KiB** — `perf-events` in
 `.#linux-deltas`.
+
+<a id="d47"></a>**D47 — Removing the PnP bus (`OS-037`, #390).** Not declined on a judgement either:
+it cannot be done, and this is the second entry in a row with that shape. `drivers/acpi/Kconfig`
+gives `menuconfig ACPI` an unconditional `select PNP`, so Kconfig forces the symbol back on and
+`olddefconfig` overwrites the entry. `PNPACPI` follows, being `bool` with no prompt and
+`default (PNP && ACPI)` — it is not settable at all.
+
+The case for removing it was good. `SERIAL_8250_PNP` left with `OS-035` (#383) and was the only
+driver on either kernel that bound to the bus; on an EC2 Graviton instance `/sys/bus/pnp/devices/`
+holds exactly one entry, `00:00`, the ACPI motherboard-resources pseudo-device; and on x86 the
+console comes from `SERIAL_PORT_DFNS` in `arch/x86/include/asm/serial.h` rather than from
+enumeration. So the bus enumerates nothing this machine uses, on either architecture.
+
+It stays anyway, and nothing about enumeration changes — which incidentally disposes of the risk
+#390 was written around, that a VM whose serial port comes from firmware rather than the ISA table
+would boot in silence (`OS-005`, #256). What *was* removed is `PNP_DEBUG_MESSAGES`, a `default y`
+debug-message option that had been compiled into every kernel this project has shipped.
+
+Read off the kernel rather than argued, per `OS-006` (#257): with `PNP` on the disable list the
+generated file still said `CONFIG_PNP=y`, and the only line that changed was the debug one. The fact
+is asserted per target in `the_pnp_bus_stays_because_acpi_selects_it`, so the day ACPI stops
+selecting PNP this fails and the pare-back becomes possible rather than this paragraph going stale.
