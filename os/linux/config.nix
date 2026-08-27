@@ -441,16 +441,24 @@ let
         # added, when the baseline did not contain it — right when written, and
         # not reproducible by running the command this comment names.
         #
+        # Keyed by the `.#linux-deltas` variant name rather than by symbol, so
+        # that a row here, a row in `docs/deployment.md` and a line of the
+        # report are all the same row. `docs/deployment.md` carried this table
+        # in the enable direction for one issue longer than this file did
+        # (`OS-040`, #401), and `kernel_tcb.rs` now fails if the two disagree.
+        #
         #   vmxnet3   -20 KiB   VMware ESXi and Workstation's default for a modern
         #                       Linux guest; Proxmox's "VMware vmxnet3" entry
-        #   8139cp    -8 KiB    Proxmox's "Realtek RTL8139" entry, and the default
-        #   8139too             emulated NIC on Xen HVM (XCP-ng, Citrix)
+        #   rtl8139   -8 KiB    `8139CP` and `8139TOO`: Proxmox's "Realtek
+        #                       RTL8139" entry, and the default emulated NIC on
+        #                       Xen HVM (XCP-ng, Citrix)
         #   pcnet32   -8 KiB    VirtualBox's older adapter choices
         #   tulip     -16 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
         #                       which is a DEC 21140
         #   ena       -24 KiB   EC2 Nitro (`OS-027`, #344); in `common`, priced
         #                       here because this is where the table is
-        #   hv_netvsc -36 KiB   Hyper-V and Azure; likewise `common`
+        #   hyperv    -36 KiB   `hv_netvsc` and the reference timer: Hyper-V and
+        #                       Azure; likewise `common`
         #
         # All six together — `no-emulated-nics` — **-120 KiB**,
         # 2 442 240 -> 2 319 360. *More* than the sum of the rows, which is -112
@@ -567,11 +575,14 @@ let
     # enable direction, because those symbols are *not* in the list. `OS-038`
     # (#391) is where reading a sign as a direction stopped being optional.
     #
-    #   e1000 + e1000e   -96 KiB    Proxmox's Intel entries, and what Parallels
-    #                               and Fusion present on Apple Silicon
-    #   hv_netvsc        -40 KiB    Azure's Cobalt 100 instances
+    # Keyed by variant name for the reason the x86 table above gives.
+    #
+    #   e1000            -96 KiB    `NET_VENDOR_INTEL`, so both `e1000` and
+    #                               `e1000e`: Proxmox's Intel entries, and what
+    #                               Parallels and Fusion present on Apple Silicon
+    #   hyperv           -40 KiB    `hv_netvsc`: Azure's Cobalt 100 instances
     #   ena              -28 KiB    EC2 Graviton
-    #   KASLR            -4 KiB     the `RANDOMIZE_BASE` entry in `common`
+    #   no-kaslr         -4 KiB     the `RANDOMIZE_BASE` entry in `common`
     #
     # And three numbers that decided something rather than merely reporting:
     #
@@ -582,11 +593,12 @@ let
     #                               but nothing observed needs it yet; the
     #                               measurement is kept so the question can be
     #                               settled with a number when it is asked.
-    #   16550A variants  0 bytes    `OS-036` (#389). Below what this instrument
+    #   no-16550a-variants
+    #                    0 bytes    `OS-036` (#389). Below what this instrument
     #                               resolves, which is why that entry was
     #                               settled on the console it produces rather
     #                               than on its size.
-    #   no IPv6          -152 KiB   the largest saving available and still
+    #   no-ipv6          -152 KiB   the largest saving available and still
     #                               declined, for the reason `OS-023` (#339)
     #                               declines it on x86: clients reach this host
     #                               over whatever the network gives them.
