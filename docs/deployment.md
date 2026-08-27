@@ -280,10 +280,12 @@ vlmcsd-under-systemd degrades without telling anybody ([D20](decisions.md#declin
 Dev Kit, or a Windows 11 on Arm VM on Apple Silicon all want the second — and rename it to
 `kmsrs-server.exe` if you are following the `sc.exe` line below literally.
 
-**The ARM64 binary has not been run on ARM64 Windows.** Everything in this section is written from
-the x86_64 build. The five process mitigations of `SEC-019` (#356) are verified in force on x86_64
-only; if the ARM64 kernel declines any of them the host reports which, by name, at start-up, rather
-than claiming a mitigation it does not have. #385 is where that gets observed.
+**This section applies to both architectures.** The ARM64 binary is started on real ARM64 Windows on
+every pull request (`PKG-022`, #385), and on Windows 11 build 26200 it serves an activation and takes
+all five process mitigations of `SEC-019` (#356) — `ProcessSystemCallDisablePolicy` included. There is
+nothing to read differently here for Arm. If some future Windows declines one of the five, the host
+reports which, by name, at start-up (`SEC-020`, #392) rather than claiming a mitigation it does not
+have, and goes on serving.
 
 `PKG-008` (#245). The binary detects for itself whether it was started by the Service Control
 Manager — `StartServiceCtrlDispatcher` fails with `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` when it
@@ -535,24 +537,44 @@ table and asserts the machine **serves an activation**, not that it booted. Ever
 
 Measured on the built `bzImage` with the initramfs held constant, which is the only way the number
 means anything — the initramfs is *inside* the image, so a change to the program moves the total by
-more than a driver does. Reproduce with `nix build .#linux-deltas && cat result/report`.
+more than a driver does. Reproduce with `nix build .#linux-deltas && cat result/report`; the left
+column is the variant name that report prints, so a row here can be checked one command at a time.
 
-| Driver | Cost | For |
+**These are costs to keep, so they are negative** (`OS-038`, #391). Every driver but the last is
+already in the allowlist, so the only question a shipped configuration can act on is what removing it
+would save — and that is the direction the command asks in. Against a **2 442 240**-byte `bzImage`:
+
+| variant | delta | For |
 |---|---|---|
-| `8139cp` + `8139too` | +12 KiB | Proxmox's RTL8139 entry; Xen HVM's default |
-| `pcnet32` | +12 KiB | VirtualBox's older adapters |
-| `tulip` | +16 KiB | Hyper-V Gen 1's Legacy Network Adapter |
-| `vmxnet3` | +24 KiB | VMware, and Proxmox's vmxnet3 entry |
-| `ena` | +24 KiB | EC2 Nitro |
-| **VMBus** (`hv_netvsc` + timer) | **+40 KiB** | Hyper-V Gen 1 and 2, Azure |
-| ~~Xen PV~~ (`xen-netfront`) | ~~+148 KiB~~ | **declined** — see below |
-| **all of the above, as shipped** | **+120 KiB** | 2,364,416 → 2,487,296 bytes |
+| `rtl8139` (`8139cp` + `8139too`) | -8 KiB | Proxmox's RTL8139 entry; Xen HVM's default |
+| `pcnet32` | -8 KiB | VirtualBox's older adapters |
+| `tulip` | -16 KiB | Hyper-V Gen 1's Legacy Network Adapter |
+| `vmxnet3` | -20 KiB | VMware, and Proxmox's vmxnet3 entry |
+| `ena` | -24 KiB | EC2 Nitro |
+| `hyperv` (`hv_netvsc` + timer) | **-36 KiB** | Hyper-V Gen 1 and 2, Azure |
+| **`no-emulated-nics`** — all six at once | **-120 KiB** | 2 442 240 → 2 319 360 bytes |
+| `xen` (`xen-netfront`) | +140 KiB | **declined** — see below. The one row in the *enable* direction, because it is the one driver not in the allowlist |
 
-The total is less than the sum, because drivers sharing a vendor gate pay for it once. Taking Xen on
-top of this would add a further **140 KiB**.
+The aggregate is **larger** than the sum of its six rows, which is -112 KiB: removing the last user of
+a shared vendor gate takes the gate with it, and no single row can show that. This table used to say
+the total was *less* than the sum, which was true of the enable direction — two drivers sharing a gate
+pay for it once — and is the mirror image of what the command prints now.
+
+**Every number here is a multiple of 4 KiB, and that is the instrument rather than the driver**
+(`OS-037`, #390). A kernel image is page-aligned, so `.#linux-deltas` cannot resolve anything finer,
+and a row moves by a page when something unrelated changes the baseline — which is what turning off
+one PnP debug symbol did to `tulip`. Read these as "about this much", and re-run the command rather
+than trusting a last digit somebody typed. It applies to the aarch64 table below as well.
+
+Both tables are keyed by the variant name for a reason beyond convenience: `kernel_tcb.rs` reads
+those names out of `flake.nix` and fails if this document and `os/linux/config.nix` price the same
+variant differently, which is the state `OS-040` (#401) found them in. Generating them outright is
+`OS-041` (#406).
 
 **For scale, the drivers are the small part.** The whole `bzImage` went from 2,814,976 to 3,539,968
-bytes across this round of work, and the kernel configuration is a rounding error in that:
+bytes across this round of work, and the kernel configuration is a rounding error in that. These are
+what each issue did to the image at the time — a history of the file, not deltas `.#linux-deltas`
+prints today:
 
 | | |
 |---|---|
@@ -568,8 +590,9 @@ reasoning is in [`decisions.md`](decisions.md) — and this is what it weighs. A
 smaller image should start there and not with the drivers.
 
 **VMBus was expected to be the expensive one and is not.** The kernel config used to say `hv_netvsc`
-"drags in the whole VMBus stack, which is not a driver-sized cost". Measured, it is 40 KiB — less
-than twice a plain PCI driver. The estimate had never been taken on a built image.
+"drags in the whole VMBus stack, which is not a driver-sized cost". Measured, dropping all three of
+its symbols saves 36 KiB — less than twice a plain PCI driver. The estimate had never been taken on a
+built image.
 
 ### Which hypervisors this runs on — aarch64 (`OS-032`, #376)
 
@@ -607,19 +630,28 @@ copy of the x86 one.
 #### What each row costs
 
 `nix build .#linux-deltas && cat result/report` on an aarch64 machine, initramfs held constant,
-against a 2 740 736-byte `vmlinuz.efi` baseline:
+against a **2 732 544**-byte `vmlinuz.efi` baseline. Re-measured on an EC2 Graviton instance against
+6.12.94 while settling `OS-036` (#389) and `OS-037` (#390); the left column is the variant name the
+report prints, and the sign is the direction it asked in, not a decoration:
 
-| Driver | Cost | For |
+| variant | delta | For |
 |---|---|---|
-| `e1000` + `e1000e` | +100 KiB | Proxmox's Intel entries; Parallels and Fusion on Apple Silicon |
-| `hv_netvsc` | +40 KiB | Azure Cobalt 100 |
-| `ena` | +32 KiB | EC2 Graviton |
-| KASLR | +4 KiB | `RANDOMIZE_BASE`, which x86 had by default and this did not |
-| ~~`virtio-gpu`~~ | ~~+12 KiB~~ | **not taken** — see the console note below |
+| `e1000` (`e1000` + `e1000e`) | -96 KiB | Proxmox's Intel entries; Parallels and Fusion on Apple Silicon |
+| `hyperv` (`hv_netvsc`) | -40 KiB | Azure Cobalt 100 |
+| `ena` | -28 KiB | EC2 Graviton |
+| `no-kaslr` | -4 KiB | `RANDOMIZE_BASE`, which x86 had by default and this did not |
+| `no-16550a-variants` | 0 | `OS-036` (#389): under the 4 KiB floor, so it was settled on the console it produces |
+| `virtio-gpu` | +16 KiB | **not taken** — see the console note below. Enable direction: it is not in the allowlist |
+| `no-efi-zboot` | **+3 811 328** | the image format, below |
 
-**The image format dominates every driver.** `CONFIG_EFI_ZBOOT` is worth **3.69 MiB**, thirty times
-the largest driver: arm64's `Image` is uncompressed and there is no self-decompressing counterpart of
-`bzImage`.
+The four negative rows are **costs to keep** — those drivers are in the allowlist, so what the command
+can ask is what removing them would save. The two positive rows are the enable direction, because
+those symbols are *not* in the allowlist and adding what is already there measures nothing
+(`OS-038`, #391).
+
+**The image format dominates every driver.** `CONFIG_EFI_ZBOOT` is worth **3.63 MiB** — 6 543 872
+bytes without it against 2 732 544 with — which is forty times the largest driver: arm64's `Image` is
+uncompressed and there is no self-decompressing counterpart of `bzImage`.
 
 #### The console is two devices, not one
 
@@ -632,7 +664,7 @@ Graviton host, where ACPI SPCR reads `uart,mmio,0x90a0000,115200` and the kernel
 The framebuffer half is less settled. `-machine virt` has **no display device by default**; a `ramfb`
 gives an EFI GOP that `simpledrm` takes over, and a `virtio-gpu` does not — the EFI framebuffer stops
 being scanned out at `ExitBootServices` and the window freezes on the firmware logo. `DRM_VIRTIO_GPU`
-would cost 12 KiB and is not in the kernel, because nothing observed needs it yet. If a Proxmox arm64
+would cost 16 KiB and is not in the kernel, because nothing observed needs it yet. If a Proxmox arm64
 VM shows a frozen console, that is the reason and the fix is measured.
 
 #### Powering it off
@@ -649,10 +681,10 @@ plain AAVMF with no RNG source the boot log says `KASLR disabled due to lack of 
 runs at its link address; on EC2, where firmware has one, it is seeded and that line is absent.
 **Attach `virtio-rng`** — it is the same checkbox that is worth a second of boot time on x86.
 
-**The Xen paravirtual path is the expensive one, and is declined.** 148 KiB is 6 % of the whole
-kernel, because it is xenbus, grant tables and event channels rather than a driver. What it buys is
-throughput on XCP-ng and Citrix Hypervisor — whose *default* emulated NIC is RTL8139 and therefore
-already works for 12 KiB. A host that answers one 384-byte request per client per few hours does not
+**The Xen paravirtual path is the expensive one, and is declined.** 140 KiB is 6 % of the whole
+x86 kernel, because it is xenbus, grant tables and event channels rather than a driver. What it buys
+is throughput on XCP-ng and Citrix Hypervisor — whose *default* emulated NIC is RTL8139, which is
+already in the kernel and costs 8 KiB to keep there. A host that answers one 384-byte request per client per few hours does not
 need the faster path.
 
 **A machine with no usable interface says so.** That is the other half of this, and the half no

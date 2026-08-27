@@ -904,6 +904,39 @@ says what was meant. Neither failure appears in a debug build.
 
 ---
 
+### The snapshot channel ships what a tag ships (`PKG-025`, #411)
+
+The `latest` prerelease carried the two ISOs, the four Windows binaries and a signed `SHA256SUMS`. A
+tag additionally produced the static Linux binaries, the `.deb`, the `.rpm`, the container tarball and
+the SBOMs. That difference had never been decided — it does not appear anywhere in this file, and
+`releasing.md` described it rather than defending it: "those are things a tag produces."
+
+It was not merely a shorter list. **`.#deb` and `.#rpm` were built by no gate at all.** They were not
+in the flake's `checks`, and no job in `test.yml` named them, so a tag was the first thing that had
+ever built them — in the workflow whose stated axiom is that there is no release-only build path.
+
+This project has already had that failure once. `release.yml` went on building `.#osImage` and
+`.#osIso` for two issues after `OS-018` (#334) deleted those attributes, and
+`the_release_workflow_builds_what_the_gate_checks` asserted the same stale names, so it passed while
+describing a release that could not have run. Two statements agreeing with each other and neither of
+them built.
+
+So the fix is not a third statement. Both channels call one `ci/build-artifacts.sh` with the same
+arguments, which makes "the two channels build the same artifacts" the same code running twice rather
+than two lists somebody has to keep in step, and `.#deb` and `.#rpm` became flake checks so a
+developer running the gate builds them too. Writing the test for this also exposed that the existing
+parity assertions matched a bare `.#deb` — which any comment mentioning one satisfies — and passed
+with the build deleted; they now match `nix build .#deb`.
+
+**One difference is kept, and it is a publishing decision rather than a build one.** The snapshot
+attaches the container tarball and pushes no image, so `ghcr.io/schlarpc/kmsrsos` only ever gains real
+versions. The cost is that `docker load`, `docker tag` and `docker manifest create` stay uncovered
+until a tag is cut. That is a narrow gap over a tarball both channels build and the `container` check
+builds on every pull request — and it is worth naming here, because the alternative was a moving
+`:latest` tag on a public registry, which is a thing an operator can pull by accident.
+
+---
+
 ## Declined, with rationale
 
 Nothing here has an issue. That is the point — these are recorded so they are not rediscovered and

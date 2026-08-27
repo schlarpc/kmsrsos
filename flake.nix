@@ -104,16 +104,24 @@
             # The workflows, because `packaging_invariants.rs` asserts that a
             # release builds what the gate checks (PKG-003, #240).
             || (builtins.match ".*/\\.github(/.*)?" path != null)
-            # The measured syscall surveys, which `tests/sandbox.rs` reads back
-            # to assert that the seccomp allowlist covers every syscall the
-            # shipped binary was observed making (`SEC-018`, #355). Note the
-            # `harness` directory itself: a filter that excludes a directory
-            # never visits its children, which is why every rule above ends in
-            # `(/.*)?` rather than naming files. `harness/windows/captures` is
-            # deliberately left out — it is a megabyte of `.pcap` that nothing
+            # Two harnesses, for two tests that read them.
+            #
+            # `tests/sandbox.rs` reads the measured syscall surveys back to
+            # assert the seccomp allowlist covers every syscall the shipped
+            # binary was observed making (`SEC-018`, #355). `PKG-024` (#399)
+            # reads the `-ExpectMitigations` default out of `arm64-smoke.ps1`
+            # and requires the documents to quote it — so each file has to be
+            # here, or the test is one that cannot see what it is about.
+            #
+            # Note `harness` and `harness/windows` themselves: a filter that
+            # excludes a directory never visits its children, which is why
+            # every rule above ends in `(/.*)?` rather than naming files. The
+            # Windows side names the scripts rather than the tree, because
+            # `harness/windows/captures` is a megabyte of `.pcap` that nothing
             # in the build reads.
-            || (builtins.match ".*/harness" path != null)
-            || (builtins.match ".*/harness/linux(/.*)?" path != null);
+            || (builtins.match ".*/harness(/windows)?" path != null)
+            || (builtins.match ".*/harness/linux(/.*)?" path != null)
+            || (builtins.match ".*/harness/windows/[^/]*\\.ps1" path != null);
         };
 
       commonArgsFor = system:
@@ -2649,6 +2657,27 @@
               inherit system;
               arch = linuxArch;
             };
+        }
+        # `PKG-025` (#411): the two OS packages are built by the gate, not only
+        # by a tag.
+        #
+        # `PKG-001` (#238) and `PKG-004` (#241) put the container in this set
+        # for exactly this reason — the artifacts people actually deploy are
+        # built by the gate, not only by a release — and `.deb` and `.rpm` were
+        # left out of it. Nothing but a tag had ever built them: not this set,
+        # not a pull request. An output nobody builds is an output that does
+        # not work, and these two are where the payload, the hardened unit and
+        # the deployment guide are assembled (`PKG-009`, #246).
+        #
+        # Gated on `osPackageArch` rather than on `linuxArch`, because that is
+        # the function that decides whether these exist: off Linux it returns
+        # `null`, which interpolates into the control file as an *evaluation*
+        # error rather than a build failure. `OS-031` (#375) is the standing
+        # lesson — `nix flake check` must skip what a system cannot build, not
+        # fail to evaluate it.
+        // nixpkgs.lib.optionalAttrs (osPackageArch system != null) {
+          deb = self.packages.${system}.deb;
+          rpm = self.packages.${system}.rpm;
         });
 
       devShells = eachSystem (system:

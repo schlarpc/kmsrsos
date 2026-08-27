@@ -1277,3 +1277,271 @@ fn every_symbol_the_allowlist_enables_is_one_the_kernel_knows() {
         );
     }
 }
+
+// --- The measured kernel deltas, which live in three files (`OS-040`, #401) ---
+
+/// A signed KiB figure and the variant it prices.
+///
+/// `.#linux-deltas` is the instrument; `flake.nix` holds the variants it
+/// measures; `os/linux/config.nix` and `docs/deployment.md` each quote the
+/// results in prose. Two hand-written copies of a measured number is two
+/// chances to correct one of them — which is precisely what happened:
+/// `OS-038` (#391) found every driver delta in `config.nix` taken in the enable
+/// direction at the moment the driver was added, fixed that file, and left
+/// `docs/deployment.md` as the stale copy for an issue. The operator-facing
+/// document is the worse of the two to be wrong in.
+///
+/// Nothing a host test can do reproduces these numbers — they come from
+/// building two kernels — so what is asserted is that the copies agree, and
+/// that both are talking about variants that exist.
+type Delta = (String, i64);
+
+/// Whether `needle` occurs in `haystack` as a whole word.
+///
+/// `-` and `_` count as word characters, because variant names contain them:
+/// without that, `kaslr` would match inside `no-kaslr` and price the wrong
+/// question. It is also what keeps `ena` out of `enable` and `e1000` out of
+/// `e1000e`.
+fn mentions(haystack: &str, needle: &str) -> bool {
+    haystack
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+        .any(|word| word == needle)
+}
+
+/// Every signed KiB figure on a line: `-20 KiB`, `+140 KiB`, `**-36 KiB**`.
+///
+/// Unsigned figures are ignored on purpose. A magnitude with an implied sign is
+/// the defect `OS-038` (#391) is about, so this reads only numbers that state
+/// their direction, and a row that stops stating it stops being compared —
+/// which the completeness check below then catches.
+fn kib_figures(line: &str) -> Vec<i64> {
+    // Prose uses U+2212 for a minus in places and the tables use ASCII; both
+    // mean the same thing to a reader and must mean the same thing here. The
+    // byte counts are written with U+00A0 thin gaps in one file and commas in
+    // the other, but those carry no unit and are never read as a delta.
+    let line = line.replace('\u{2212}', "-").replace('\u{00a0}', " ");
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .filter_map(|pair| {
+            let [number, unit] = pair else { return None };
+            // `**` is markdown's bold, which lands between the number and the
+            // unit's own markers rather than around the pair.
+            if !unit.trim_start_matches('*').starts_with("KiB") {
+                return None;
+            }
+            let number = number.trim_start_matches('*');
+            if !number.starts_with(['-', '+']) {
+                return None;
+            }
+            number.trim_start_matches('+').parse::<i64>().ok()
+        })
+        .collect()
+}
+
+/// The delta each variant is quoted at in one region of one file.
+fn quoted_deltas(region: &str, variants: &[String]) -> Vec<Delta> {
+    let mut quoted: Vec<Delta> = Vec::new();
+    for line in region.lines() {
+        let figures = kib_figures(line);
+        if figures.len() != 1 {
+            // Zero figures is prose; more than one is a sentence comparing two
+            // numbers ("-120 KiB … the sum, which is -112 KiB"), and guessing
+            // which belongs to the variant would be the kind of cleverness that
+            // makes a failure unreadable.
+            continue;
+        }
+        for variant in variants {
+            if let (true, Some(figure)) = (mentions(line, variant), figures.first()) {
+                quoted.push((variant.clone(), *figure));
+            }
+        }
+    }
+    quoted
+}
+
+/// The `.#linux-deltas` variant names `flake.nix` defines, per architecture.
+fn delta_variants(root: &Path) -> Vec<(String, Vec<String>)> {
+    let flake = std::fs::read_to_string(root.join("flake.nix")).expect("flake.nix is readable");
+    let block = flake
+        .split_once("linuxDeltaVariants = {")
+        .expect("flake.nix defines linuxDeltaVariants")
+        .1;
+    let mut arches: Vec<(String, Vec<String>)> = Vec::new();
+    for line in block.lines() {
+        // Eight spaces is an architecture, ten is a variant inside it. The
+        // shape rather than a parser, for the reason `packaging_invariants.rs`
+        // gives: this workspace has no Nix parser and reading two lists is not
+        // a reason to acquire one.
+        if let Some(rest) = line.strip_prefix("        ")
+            && !rest.starts_with(' ')
+            && rest.ends_with(" = {")
+        {
+            arches.push((rest.trim_end_matches(" = {").to_owned(), Vec::new()));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("          ")
+            && !rest.starts_with(' ')
+            && let Some((name, _)) = rest.split_once(" = ")
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+            && let Some(arch) = arches.last_mut()
+        {
+            arch.1.push(name.to_owned());
+        }
+        // The closing brace of the whole attribute set, at six spaces.
+        if line == "      };" {
+            break;
+        }
+    }
+    assert_eq!(
+        arches.len(),
+        2,
+        "linuxDeltaVariants should name one list per bare-metal architecture, \
+         found {arches:?}"
+    );
+    arches
+}
+
+/// Cut a file into one region per architecture at a named marker.
+fn region<'a>(text: &'a str, from: &str, to: Option<&str>) -> &'a str {
+    let (_, rest) = text
+        .split_once(from)
+        .unwrap_or_else(|| panic!("{from:?} is not in this file — the section was renamed"));
+    match to.and_then(|marker| rest.split_once(marker)) {
+        Some((inside, _)) => inside,
+        None => rest,
+    }
+}
+
+/// `OS-040` (#401): `docs/deployment.md` and `os/linux/config.nix` quote the
+/// same delta for the same variant.
+///
+/// The failure this catches is not a wrong number — no test here can know what
+/// the right one is, since it comes from building two kernels — it is the two
+/// copies **disagreeing**, which is the state #401 reports and the state that
+/// tells a reader one of them is stale. `OS-038` (#391) corrected one file; the
+/// other went on saying the reverse of it, in the document an operator reads to
+/// decide whether to deploy.
+#[test]
+fn the_delta_tables_in_the_docs_and_the_kernel_config_agree() {
+    let root = workspace_root();
+    let variants = delta_variants(&root);
+    let config = std::fs::read_to_string(root.join("os/linux/config.nix")).expect("config.nix");
+    let docs = std::fs::read_to_string(root.join("docs/deployment.md")).expect("deployment.md");
+
+    // `config.nix`'s aarch64 table is the doc comment *above* `aarch64 = {`, so
+    // the x86 region ends where that comment begins rather than at the brace.
+    let arm_preamble = "# # What the shared drivers cost *here*";
+    let regions: &[(&str, &str, &str)] = &[
+        (
+            "x86_64",
+            region(&config, "    x86_64 = {", Some(arm_preamble)),
+            region(
+                &docs,
+                "### Which hypervisors this runs on — x86_64",
+                Some("### Which hypervisors this runs on — aarch64"),
+            ),
+        ),
+        (
+            "aarch64",
+            region(&config, arm_preamble, None),
+            region(
+                &docs,
+                "### Which hypervisors this runs on — aarch64",
+                Some("### The console (`OS-028`"),
+            ),
+        ),
+    ];
+
+    let mut compared: Vec<(String, String)> = Vec::new();
+    for (arch, config_region, docs_region) in regions {
+        let names = &variants
+            .iter()
+            .find(|(name, _)| name == arch)
+            .unwrap_or_else(|| panic!("flake.nix has no delta variants for {arch}"))
+            .1;
+
+        let from_config = quoted_deltas(config_region, names);
+        let from_docs = quoted_deltas(docs_region, names);
+
+        for (variant, documented) in &from_docs {
+            for (other, measured) in &from_config {
+                if other == variant {
+                    assert_eq!(
+                        documented, measured,
+                        "docs/deployment.md prices the {arch} `{variant}` variant at \
+                         {documented} KiB and os/linux/config.nix at {measured} KiB. One of \
+                         them was corrected and the other was not — re-run \
+                         `nix build .#linux-deltas && cat result/report` and make both say \
+                         what it says (OS-040, #401)."
+                    );
+                    compared.push(((*arch).to_owned(), variant.clone()));
+                }
+            }
+        }
+
+        // A table that quotes no variant at all would pass everything above
+        // vacuously, which is how a check stops being one.
+        assert!(
+            !from_docs.is_empty(),
+            "the {arch} section of docs/deployment.md prices no `.#linux-deltas` \
+             variant. Its table is keyed by variant name so that it can be \
+             checked against os/linux/config.nix one row at a time (OS-040, #401)."
+        );
+    }
+
+    assert!(
+        compared.len() >= 8,
+        "only {} delta rows are quoted in both docs/deployment.md and \
+         os/linux/config.nix. Both files carried a full table when this was \
+         written; a row that stops naming its variant, or stops stating the \
+         sign of its delta, silently drops out of this comparison (OS-040, #401).",
+        compared.len()
+    );
+}
+
+/// `OS-040` (#401): every variant the documents name is one that exists.
+///
+/// The other half of keying the tables by variant name: a row that names a
+/// variant `.#linux-deltas` does not have is a row nobody can reproduce, which
+/// is the property #401 is really about — the tables told a reader to run a
+/// command that printed something else.
+#[test]
+fn every_delta_variant_the_docs_name_exists() {
+    let root = workspace_root();
+    let variants = delta_variants(&root);
+    let docs = std::fs::read_to_string(root.join("docs/deployment.md")).expect("deployment.md");
+
+    let known: Vec<&String> = variants.iter().flat_map(|(_, names)| names).collect();
+    for line in docs.lines() {
+        // Only the delta tables, which are the rows whose first cell is a
+        // single backticked token.
+        let Some(cell) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let Some((name, _)) = cell.split_once('`') else {
+            continue;
+        };
+        if !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            continue;
+        }
+        // A backticked lower-case token in the first cell of a table row that
+        // also quotes a KiB figure or a byte count is a delta row.
+        if kib_figures(line).is_empty() && !line.contains(" bytes") && !line.contains('→') {
+            continue;
+        }
+        assert!(
+            known.iter().any(|variant| *variant == name),
+            "docs/deployment.md quotes a delta for `{name}`, which is not a \
+             `.#linux-deltas` variant in flake.nix. A row a reader cannot \
+             reproduce with the command the section names is the defect \
+             OS-040 (#401) was filed about."
+        );
+    }
+}

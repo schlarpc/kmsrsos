@@ -6,6 +6,11 @@ builds with `nix build` — the same command a developer runs and the same one `
 on. There is deliberately no release-only build path: a release built differently from the thing that
 was tested is a release nobody tested.
 
+Since `PKG-025` (#411) that is enforced rather than intended. Every Linux artifact on this page is
+built by `ci/build-artifacts.sh`, which the tag workflow and the snapshot workflow both call with the
+same arguments — so "the two channels build the same things" is one script running twice rather than
+two lists somebody has to keep in step.
+
 ## What a tag produces
 
 | Artifact | Notes |
@@ -42,10 +47,18 @@ There are two of them now, and the one that used to carry the bare name was the 
 release artifact named after a default is one nobody can tell apart from the other. Rename on
 install if the service registration in [`deployment.md`](deployment.md) is being followed literally.
 
-**The ARM64 binary has never been run on ARM64 Windows.** Its build-time checks pass — the PE machine
-type is read off the artifact and Control Flow Guard is asserted absent — and no process has started.
-`SEC-019`'s five mitigations are verified in force on x86_64 only; if the ARM64 kernel declines any,
-the host says so on its console rather than claiming it. See #385.
+**The ARM64 binary is run on ARM64 Windows before it ships** (`PKG-022`, #385). It was shipped
+unverified once and said so; it is not shipped unverified now. On Windows 11 build 26200 on ARM64 the
+cross-compiled artifact — the one this release attaches, not a rebuild — starts, binds 1688 and 8080
+on both address families, serves a V6 activation to `kmsrs-client`, and reports `process-mitigations:
+applied`: **all five** of `SEC-019`'s `SetProcessMitigationPolicy` policies accepted, none refused,
+including `ProcessSystemCallDisablePolicy`, which was the one in doubt. The Windows security posture
+is therefore the same on both architectures.
+
+`harness/windows/arm64-smoke.ps1` does that on every pull request, on a hosted `windows-11-arm`
+runner, and **asserts** the outcome rather than printing it — so a Windows that starts refusing one of
+the five fails a job instead of quietly changing a log line. If one ever is refused the host names it,
+by name, on its console (`SEC-020`, #392) and goes on serving.
 
 There is no apt or yum repository and no Homebrew tap (decision 26): a repository is ongoing
 infrastructure with signing keys that have to be rotated, a downloadable package captures most of the
@@ -74,9 +87,11 @@ sha256sum -c SHA256SUMS
 
 ## The `latest` snapshot (`PKG-015`, #364)
 
-There is a second channel, and it is deliberately a smaller one. Every push to `main` that passes the
-**whole** gate moves a rolling prerelease at the tag `latest`, carrying the bootable ISO, the two
-Windows binaries, and a signed checksum file.
+There is a second channel. It is a faster one rather than a smaller one — what makes it a snapshot is
+that the tag moves and there is no version number, not that it holds back artifacts. Every push to
+`main` that passes the
+**whole** gate moves a rolling prerelease at the tag `latest`, carrying **the same artifacts a tag
+produces** and a signed checksum file.
 
 **Both ISOs, one per architecture** since `PKG-021` (#384), each built on its own runner exactly as a
 tag builds it:
@@ -95,13 +110,23 @@ Each leg produces its own `SHA256SUMS-<arch>`, on the machine that built the byt
 after the round trip through the artifact store, merged into one `SHA256SUMS`, and signed once — the
 same three lines `release.yml` uses, because one shape for both channels is one thing to get right.
 
-**It is not a release, and the differences are the point.** The tag moves without warning, there is no
-version number to put in a bug report, and it carries no SBOM, `.deb`, `.rpm` or container image —
-those are things a tag produces. GitHub's "Latest" badge stays on the newest real tag, because the
-snapshot release never sets `make_latest`.
+**It is not a release, and what makes it one is not a shorter artifact list.** The tag moves without
+warning and there is no version number to put in a bug report. GitHub's "Latest" badge stays on the
+newest real tag, because the snapshot release never sets `make_latest`.
 
-It exists for one thing: booting a change before it is tagged. The ISO's entire surface is *does it
-boot on your hypervisor*, and `linux-boot` can only answer that for QEMU.
+The artifact list used to be the difference — this channel carried the ISO and the Windows binaries
+and nothing else — and `PKG-025` (#411) ended that. Nothing had argued for it. What it produced was
+that `.#deb` and `.#rpm` were built by **no gate at all**: not `nix flake check`, not a pull request,
+so a tag was the first thing that had ever built them. That is the shape of the `OS-018` (#334)
+failure, where `release.yml` went on building two flake attributes that had been deleted and the test
+asserting otherwise agreed with it. Both channels now run `ci/build-artifacts.sh`, which is one list
+rather than two that are meant to match, and `.#deb` and `.#rpm` are checks in the flake.
+
+**The one thing a tag still does alone is push a container image.** The snapshot attaches the tarball
+— `docker load < kmsrsos-container-x86_64-linux.tar.gz` — and pushes nothing, so `ghcr.io` only ever
+gains real versions. The cost is named rather than hidden: `docker load`, `docker tag` and `docker
+manifest create` are uncovered until a tag is cut, over a tarball both channels build and the
+`container` check builds on every pull request.
 
 **"All green" means every job.** Actions has no way to say "everything" — `needs` is a list of names —
 so `the_latest_pointer_waits_for_every_job` reads the workflow and fails if any job is missing from

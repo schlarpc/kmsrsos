@@ -209,10 +209,20 @@ fn the_snapshot_is_built_by_the_flake() {
     let root = workspace_root();
     let workflow = read(&root, ".github/workflows/test.yml");
 
+    // The Linux artifacts moved into the script both channels run (`PKG-025`,
+    // #411), so what the snapshot builds is again a statement about the pair.
+    let script = read(&root, "ci/build-artifacts.sh");
+    let built = format!("{workflow}\n{script}");
+
     for output in [".#linuxIso", ".#windows-x86_64", ".#windows-aarch64"] {
+        // `nix build <output>` rather than the bare attribute, for the reason
+        // `the_release_workflow_builds_what_the_gate_checks` gives: prose
+        // mentioning `.#linuxIso` satisfies the loose form, and both of these
+        // files have plenty of it.
+        let command = format!("nix build {output}");
         assert!(
-            workflow.contains(output),
-            "the snapshot does not build {output} (PKG-015, #364; PKG-020, \
+            built.contains(&command),
+            "the snapshot does not run `{command}` (PKG-015, #364; PKG-020, \
              #379)"
         );
     }
@@ -226,9 +236,9 @@ fn the_snapshot_is_built_by_the_flake() {
     // x86 image alone for two issues after that. It matters more here than it
     // sounds, because this is the channel whose entire purpose is booting a
     // change before it is tagged — and an operator on arm64 could not.
-    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    let iso = "kmsrsos-${arch}.iso";
     assert!(
-        workflow.contains(iso),
+        script.contains(iso),
         "the snapshot does not name its ISO {iso}, so either it ships one \
          image under a name that claims to be both or it ships one \
          architecture (PKG-021, #384)"
@@ -255,7 +265,7 @@ fn the_snapshot_is_built_by_the_flake() {
         "docker build",
     ] {
         assert!(
-            !workflow.contains(bypass),
+            !built.contains(bypass),
             "test.yml uses {bypass}, which is a build path nothing else \
              exercises"
         );
@@ -291,6 +301,101 @@ fn the_snapshot_is_built_by_the_flake() {
         workflow.contains("cosign sign-blob"),
         "the snapshot checksums are not signed, so a downloaded ISO cannot be \
          verified at all"
+    );
+}
+
+/// **`PKG-025` (#411): both channels build their artifacts with one script.**
+///
+/// The `latest` snapshot used to build the ISO and nothing else, so `.#deb`
+/// and `.#rpm` were built by no gate at all — not `nix flake check`, not a
+/// pull request — and a tag was the first thing that had ever run them.
+/// Nothing had argued for the difference: `docs/decisions.md` did not mention
+/// it and `docs/releasing.md` only described it.
+///
+/// What is asserted here is deliberately *not* "the two lists agree". Two
+/// lists that are meant to agree is the arrangement that let `release.yml` go
+/// on building `.#osImage` and `.#osIso` for two issues after `OS-018` (#334)
+/// deleted them, with this very file asserting the same stale names and
+/// passing. It is that both channels run the same script with the same
+/// arguments — one list, so agreement is not a thing anyone can forget.
+#[test]
+fn both_channels_build_their_artifacts_with_the_same_script() {
+    let root = workspace_root();
+    let release = read(&root, ".github/workflows/release.yml");
+    let test = read(&root, ".github/workflows/test.yml");
+    let script = read(&root, "ci/build-artifacts.sh");
+    let channels = [("release.yml", &release), ("test.yml", &test)];
+
+    let invocation = r#"ci/build-artifacts.sh "${{ matrix.arch }}" out"#;
+    for (name, workflow) in channels {
+        assert!(
+            workflow.contains(invocation),
+            "{name} does not run `{invocation}`, so its channel has a build \
+             path of its own and the two can ship different artifacts \
+             (PKG-025, #411)"
+        );
+    }
+
+    // Everything the script stages, under the names both channels publish.
+    for artifact in [
+        "kmsrs-server-${name}",
+        "kmsrs-client-${name}",
+        "kmsrsos-container-${name}.tar.gz",
+        "kmsrsos-${arch}.iso",
+        "sbom-kmsrs-server-${name}.cdx.json",
+        "sbom-kmsrs-client-${name}.cdx.json",
+    ] {
+        assert!(
+            script.contains(artifact),
+            "ci/build-artifacts.sh does not stage {artifact}, so neither \
+             channel ships it (PKG-025, #411)"
+        );
+    }
+    for pattern in ["result-deb/*.deb", "result-rpm/*.rpm"] {
+        assert!(
+            script.contains(pattern),
+            "ci/build-artifacts.sh does not stage {pattern}, and `.#deb` and \
+             `.#rpm` were built by nothing but a tag until PKG-025 (#411)"
+        );
+    }
+
+    // And neither workflow builds one of them behind the script's back. These
+    // three have no legitimate second use, unlike `.#server` and `.#linuxIso`:
+    // `release.yml` and the `reproducible` job both rebuild those to prove the
+    // build is reproducible, so a bare-name check would fire on that.
+    for output in [".#deb", ".#rpm", ".#container"] {
+        let command = format!("nix build {output}");
+        for (name, workflow) in channels {
+            assert!(
+                !workflow.contains(&command),
+                "{name} runs `{command}` itself rather than through \
+                 ci/build-artifacts.sh, which is the second build path this \
+                 test exists to forbid (PKG-025, #411)"
+            );
+        }
+    }
+
+    // The OS packages are in the gate as well, so `nix flake check` builds
+    // them for a developer and on every pull request (`PKG-001`, #238;
+    // `PKG-004`, #241). Without this a snapshot job that stopped running would
+    // take the only coverage they have with it.
+    let flake = read(&root, "flake.nix");
+    for check in ["deb = self.packages", "rpm = self.packages"] {
+        assert!(
+            flake.contains(check),
+            "`{check}` is not in the flake's check set, so the OS packages are \
+             built by a workflow and by nothing a developer runs (PKG-025, \
+             #411)"
+        );
+    }
+
+    // And the `latest` notes describe what is attached. A table still saying
+    // the snapshot "carries no SBOM, `.deb`, `.rpm` or container image" would
+    // be this test's own subject, in the one place an operator reads.
+    assert!(
+        !test.contains("carries no"),
+        "the `latest` release notes still tell operators the snapshot is \
+         missing artifacts it now ships (PKG-025, #411)"
     );
 }
 
@@ -634,6 +739,7 @@ fn both_linux_architectures_are_static_and_something_reads_the_binary() {
     let toolchain = read(&root, "rust-toolchain.toml");
     let flake = read(&root, "flake.nix");
     let release = read(&root, ".github/workflows/release.yml");
+    let build_artifacts = read(&root, "ci/build-artifacts.sh");
 
     for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
         assert!(
@@ -672,11 +778,21 @@ fn both_linux_architectures_are_static_and_something_reads_the_binary() {
         "the `static-binaries` check is gone from flake.nix, so `nix flake \
          check` no longer reads the artifact"
     );
+    // Asserted on the script rather than on the workflow since `PKG-025`
+    // (#411), because that is where the upload-time check now lives — and the
+    // script is run by both channels, so the snapshot's binaries are read the
+    // same way a tag's are.
     assert!(
-        release.contains("ci/static-binaries.sh"),
-        "release.yml no longer checks the binaries it uploads, so the only \
-         thing asserting the shipped file is static is a check over a \
-         different file (PKG-023, #395)"
+        build_artifacts.contains("ci/static-binaries.sh"),
+        "ci/build-artifacts.sh no longer checks the binaries it stages, so \
+         the only thing asserting the shipped file is static is a check over \
+         a different file (PKG-023, #395)"
+    );
+    assert!(
+        release.contains("ci/build-artifacts.sh"),
+        "release.yml no longer builds through ci/build-artifacts.sh, so it \
+         has a build path of its own again and nothing reads what it uploads \
+         (PKG-023, #395; PKG-025, #411)"
     );
 }
 
@@ -752,6 +868,13 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     let root = workspace_root();
     let workflow = read(&root, ".github/workflows/release.yml");
 
+    // Since `PKG-025` (#411) the Linux artifacts are built by a script the
+    // snapshot channel runs too, so "the release builds this" is a statement
+    // about the pair. Asserting it against the workflow alone would have gone
+    // stale the moment the build moved, which is this test's own history.
+    let script = read(&root, "ci/build-artifacts.sh");
+    let built = format!("{workflow}\n{script}");
+
     // Every artifact `PKG-003` (#240) names.
     for output in [
         ".#server",
@@ -788,9 +911,15 @@ fn the_release_workflow_builds_what_the_gate_checks() {
         // prevent, so it is worth the comment.
         ".#linuxIso",
     ] {
+        // `nix build <output>`, not the bare attribute. A bare `.#deb` is
+        // satisfied by any comment that happens to mention one, and both this
+        // workflow and the script have prose that does — so the loose form
+        // passed with the build deleted, which is the exact failure this test
+        // exists to catch.
+        let command = format!("nix build {output}");
         assert!(
-            workflow.contains(output),
-            "the release does not build {output} (PKG-003, #240)"
+            built.contains(&command),
+            "the release does not run `{command}` (PKG-003, #240)"
         );
     }
 
@@ -802,9 +931,9 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // operator can tell apart. The x86 ISO was built and copied inside an
     // `if [ "$matrix.name" = "x86_64-linux" ]` for two issues, and nothing here
     // would have noticed the day that condition stopped being what was meant.
-    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    let iso = "kmsrsos-${arch}.iso";
     assert!(
-        workflow.contains(iso),
+        script.contains(iso),
         "the release does not attach the ISO as {iso}, so either it ships \
          under one name for two architectures or it does not ship \
          (PKG-019, #378)"
@@ -830,7 +959,7 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // `if [ "$matrix.name" = "x86_64-linux" ]` would silently ship one ISO
     // while every assertion above still passed.
     assert!(
-        !workflow.contains("= \"x86_64-linux\" ]"),
+        !built.contains("= \"x86_64-linux\" ]"),
         "the release still gates something on being the x86_64 leg. Since \
          `OS-033` (#377) there is an image for each architecture and the flake \
          decides which systems have one (PKG-019, #378)"
@@ -864,14 +993,14 @@ fn the_release_workflow_builds_what_the_gate_checks() {
     // build path, which is the whole thing this test is about.
     for bypass in ["cargo build --release", "cargo install", "docker build"] {
         assert!(
-            !workflow.contains(bypass),
+            !built.contains(bypass),
             "the release workflow uses {bypass}, which is a build path nothing \
              else exercises"
         );
     }
 
     // `SEC-010` (#202): an SBOM, checksums, a signature, and a rebuild.
-    assert!(workflow.contains("cyclonedx"), "no SBOM is produced");
+    assert!(built.contains("cyclonedx"), "no SBOM is produced");
     assert!(workflow.contains("sha256sum"), "no checksums are produced");
     assert!(workflow.contains("cosign sign-blob"), "nothing is signed");
     assert!(
@@ -1120,5 +1249,83 @@ fn the_binary_starts_through_the_service_router() {
              reintroduces the ImagePath password leak and the strcat overflow \
              (PKG-008, #245)."
         );
+    }
+}
+
+/// `PKG-024` (#399): the documents and the harness agree about what the ARM64
+/// Windows binary does.
+///
+/// `PKG-020` (#379) shipped an ARM64 build nothing had started, and three
+/// documents said so honestly. `PKG-022` (#385) then ran it, found all five
+/// mitigations accepted, and wired `harness/windows/arm64-smoke.ps1` into every
+/// pull request — and the documents went on saying the reverse of what is true,
+/// in the paragraph an operator reads to decide whether to trust an artifact.
+///
+/// A hand-written claim about a test result stays true only if something ties
+/// it to the test. The harness's `-ExpectMitigations` default *is* the expected
+/// result — it is asserted there, not printed — so that string is the source
+/// and the prose has to quote it. If a future Windows refuses one of the five,
+/// the harness default changes to name it and this test fails until the prose
+/// says the same thing, which is the outcome #399 asks for.
+#[test]
+fn the_docs_quote_the_arm64_smoke_harness_expected_result() {
+    let root = workspace_root();
+    let harness = read(&root, "harness/windows/arm64-smoke.ps1");
+
+    // `[string] $ExpectMitigations = 'applied'`, read off the parameter block
+    // rather than duplicated here: a copy in this file would be one more place
+    // to forget.
+    let expected = harness
+        .split_once("$ExpectMitigations = '")
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(value, _)| value)
+        .expect(
+            "arm64-smoke.ps1 must declare a default -ExpectMitigations; it is \
+             what turns the smoke run into an assertion (PKG-022, #385)",
+        );
+    let claim = format!("process-mitigations: {expected}");
+
+    for path in ["docs/releasing.md", "docs/decisions.md"] {
+        // Prose wraps, and `process-mitigations:` sits at the end of a line in
+        // `decisions.md`. Collapsing runs of whitespace is what lets the
+        // comparison be about the claim rather than about the fill column.
+        let prose = read(&root, path)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains(&claim),
+            "{path} does not quote the result the ARM64 smoke run asserts \
+             ({claim:?}). Either the harness default moved and the prose did \
+             not, or the prose was rewritten without it (PKG-024, #399)."
+        );
+    }
+
+    // The claims that were true before #385 and are false after it. They were
+    // written in three documents and corrected in one, which is the defect
+    // #399 reports; a grep is the cheapest thing that notices the next time.
+    for path in [
+        "docs/releasing.md",
+        "docs/deployment.md",
+        "docs/decisions.md",
+    ] {
+        let prose = read(&root, path)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for stale in [
+            "has never been run on ARM64 Windows",
+            "has not been run on ARM64 Windows",
+            "verified in force on x86_64 only",
+            "are verified in force on x86_64 only",
+        ] {
+            assert!(
+                !prose.contains(stale),
+                "{path} still says {stale:?}. PKG-022 (#385) ran the ARM64 \
+                 binary on ARM64 Windows and all five mitigations were \
+                 accepted; the harness re-establishes it on every pull \
+                 request (PKG-024, #399)."
+            );
+        }
     }
 }
