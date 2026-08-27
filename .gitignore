@@ -58,3 +58,9 @@ fuzz/coverage/
 # uploads it as an artifact on failure, because it is the evidence; a copy in
 # the tree is just the last local run.
 strace.log
+
+# `cargo cyclonedx` writes one of these per crate, next to the crate
+# (`SEC-010`, #202). Only two of them ship, copied out under the binary's name
+# by `ci/build-artifacts.sh` — the rest are by-products, and since `PKG-025`
+# (#411) that script is a thing a developer can run, so they land here.
+**/*.cdx.json

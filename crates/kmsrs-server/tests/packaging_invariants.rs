@@ -209,10 +209,20 @@ fn the_snapshot_is_built_by_the_flake() {
     let root = workspace_root();
     let workflow = read(&root, ".github/workflows/test.yml");
 
+    // The Linux artifacts moved into the script both channels run (`PKG-025`,
+    // #411), so what the snapshot builds is again a statement about the pair.
+    let script = read(&root, "ci/build-artifacts.sh");
+    let built = format!("{workflow}\n{script}");
+
     for output in [".#linuxIso", ".#windows-x86_64", ".#windows-aarch64"] {
+        // `nix build <output>` rather than the bare attribute, for the reason
+        // `the_release_workflow_builds_what_the_gate_checks` gives: prose
+        // mentioning `.#linuxIso` satisfies the loose form, and both of these
+        // files have plenty of it.
+        let command = format!("nix build {output}");
         assert!(
-            workflow.contains(output),
-            "the snapshot does not build {output} (PKG-015, #364; PKG-020, \
+            built.contains(&command),
+            "the snapshot does not run `{command}` (PKG-015, #364; PKG-020, \
              #379)"
         );
     }
@@ -226,9 +236,9 @@ fn the_snapshot_is_built_by_the_flake() {
     // x86 image alone for two issues after that. It matters more here than it
     // sounds, because this is the channel whose entire purpose is booting a
     // change before it is tagged — and an operator on arm64 could not.
-    let iso = "kmsrsos-${{ matrix.arch }}.iso";
+    let iso = "kmsrsos-${arch}.iso";
     assert!(
-        workflow.contains(iso),
+        script.contains(iso),
         "the snapshot does not name its ISO {iso}, so either it ships one \
          image under a name that claims to be both or it ships one \
          architecture (PKG-021, #384)"
@@ -255,7 +265,7 @@ fn the_snapshot_is_built_by_the_flake() {
         "docker build",
     ] {
         assert!(
-            !workflow.contains(bypass),
+            !built.contains(bypass),
             "test.yml uses {bypass}, which is a build path nothing else \
              exercises"
         );
@@ -291,6 +301,101 @@ fn the_snapshot_is_built_by_the_flake() {
         workflow.contains("cosign sign-blob"),
         "the snapshot checksums are not signed, so a downloaded ISO cannot be \
          verified at all"
+    );
+}
+
+/// **`PKG-025` (#411): both channels build their artifacts with one script.**
+///
+/// The `latest` snapshot used to build the ISO and nothing else, so `.#deb`
+/// and `.#rpm` were built by no gate at all — not `nix flake check`, not a
+/// pull request — and a tag was the first thing that had ever run them.
+/// Nothing had argued for the difference: `docs/decisions.md` did not mention
+/// it and `docs/releasing.md` only described it.
+///
+/// What is asserted here is deliberately *not* "the two lists agree". Two
+/// lists that are meant to agree is the arrangement that let `release.yml` go
+/// on building `.#osImage` and `.#osIso` for two issues after `OS-018` (#334)
+/// deleted them, with this very file asserting the same stale names and
+/// passing. It is that both channels run the same script with the same
+/// arguments — one list, so agreement is not a thing anyone can forget.
+#[test]
+fn both_channels_build_their_artifacts_with_the_same_script() {
+    let root = workspace_root();
+    let release = read(&root, ".github/workflows/release.yml");
+    let test = read(&root, ".github/workflows/test.yml");
+    let script = read(&root, "ci/build-artifacts.sh");
+    let channels = [("release.yml", &release), ("test.yml", &test)];
+
+    let invocation = r#"ci/build-artifacts.sh "${{ matrix.arch }}" out"#;
+    for (name, workflow) in channels {
+        assert!(
+            workflow.contains(invocation),
+            "{name} does not run `{invocation}`, so its channel has a build \
+             path of its own and the two can ship different artifacts \
+             (PKG-025, #411)"
+        );
+    }
+
+    // Everything the script stages, under the names both channels publish.
+    for artifact in [
+        "kmsrs-server-${name}",
+        "kmsrs-client-${name}",
+        "kmsrsos-container-${name}.tar.gz",
+        "kmsrsos-${arch}.iso",
+        "sbom-kmsrs-server-${name}.cdx.json",
+        "sbom-kmsrs-client-${name}.cdx.json",
+    ] {
+        assert!(
+            script.contains(artifact),
+            "ci/build-artifacts.sh does not stage {artifact}, so neither \
+             channel ships it (PKG-025, #411)"
+        );
+    }
+    for pattern in ["result-deb/*.deb", "result-rpm/*.rpm"] {
+        assert!(
+            script.contains(pattern),
+            "ci/build-artifacts.sh does not stage {pattern}, and `.#deb` and \
+             `.#rpm` were built by nothing but a tag until PKG-025 (#411)"
+        );
+    }
+
+    // And neither workflow builds one of them behind the script's back. These
+    // three have no legitimate second use, unlike `.#server` and `.#linuxIso`:
+    // `release.yml` and the `reproducible` job both rebuild those to prove the
+    // build is reproducible, so a bare-name check would fire on that.
+    for output in [".#deb", ".#rpm", ".#container"] {
+        let command = format!("nix build {output}");
+        for (name, workflow) in channels {
+            assert!(
+                !workflow.contains(&command),
+                "{name} runs `{command}` itself rather than through \
+                 ci/build-artifacts.sh, which is the second build path this \
+                 test exists to forbid (PKG-025, #411)"
+            );
+        }
+    }
+
+    // The OS packages are in the gate as well, so `nix flake check` builds
+    // them for a developer and on every pull request (`PKG-001`, #238;
+    // `PKG-004`, #241). Without this a snapshot job that stopped running would
+    // take the only coverage they have with it.
+    let flake = read(&root, "flake.nix");
+    for check in ["deb = self.packages", "rpm = self.packages"] {
+        assert!(
+            flake.contains(check),
+            "`{check}` is not in the flake's check set, so the OS packages are \
+             built by a workflow and by nothing a developer runs (PKG-025, \
+             #411)"
+        );
+    }
+
+    // And the `latest` notes describe what is attached. A table still saying
+    // the snapshot "carries no SBOM, `.deb`, `.rpm` or container image" would
+    // be this test's own subject, in the one place an operator reads.
+    assert!(
+        !test.contains("carries no"),
+        "the `latest` release notes still tell operators the snapshot is \
+         missing artifacts it now ships (PKG-025, #411)"
     );
 }
 
