@@ -868,6 +868,16 @@
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
 
+          # `OS-036` (#389): what the 16550A variant probe costs to keep.
+          #
+          # The disable direction, because it is in this architecture's
+          # allowlist and off on x86 — the asymmetry #389 was filed about. It
+          # measures **0**, which is this instrument's 4 KiB floor rather than
+          # "the probe is free": the question it was settled on is the console
+          # it produces, checked on an EC2 Graviton instance, and
+          # `os/linux/config.nix` is where that is written down.
+          no-16550a-variants = { disable = [ "SERIAL_8250_16550A_VARIANTS" ]; };
+
           # `OS-035` (#383). Two of the three questions #383 asks have a number
           # on this architecture and one of them has a number *only* here.
           #
