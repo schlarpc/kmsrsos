@@ -802,11 +802,15 @@ a rule inside it. The softening filter goes on first, because installing a filte
 next call is killed by the filter that was just applied. That is not hypothetical; it is what the
 first version did, and `tests/sandbox.rs` caught it by dying with `SIGSYS`.
 
-**An architecture nobody surveyed does not get a guess.** `SYSCALLS_CAN_BE_RESTRICTED` is x86_64 and
-aarch64, the two this program ships to. A third Linux architecture would compile — `libc` has the
-numbers — and nobody would have watched it serve a request under the filter, so it reports
-`NotOnThisTarget` instead. An older kernel that refuses the filter outright reports `Failed` and the
-process goes on serving, for the same reason Landlock does.
+**Two architectures, and the evidence for them is not the same strength.** `SYSCALLS_CAN_BE_RESTRICTED`
+is x86_64 and aarch64, the two this program ships to. x86_64 is *surveyed*, on both libcs. aarch64 is
+**tested and not surveyed**: nobody has run `strace` over this program on an aarch64 machine, and what
+runs there is the driver test, natively, on the `linux-aarch64` leg of every pull request — which
+answers "does the filter kill it" and not "what does it call". That distinction is the whole of
+`PKG-018` (#374) and it is stated rather than glossed; closing it is `SEC-021` (#410). A third Linux
+architecture would compile — `libc` has the numbers — and nothing would have watched it serve
+anything, so it reports `NotOnThisTarget` instead. An older kernel that refuses the filter outright
+reports `Failed` and the process goes on serving, for the same reason Landlock does.
 
 **What this does not change.** The bare-metal target is still not sandboxed, so
 `CONFIG_SECCOMP`/`CONFIG_SECCOMP_FILTER` in `os/linux/kernel.config` remain a reservation against a

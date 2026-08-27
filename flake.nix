@@ -103,7 +103,17 @@
             || (builtins.match ".*/\\.config(/.*)?" path != null)
             # The workflows, because `packaging_invariants.rs` asserts that a
             # release builds what the gate checks (PKG-003, #240).
-            || (builtins.match ".*/\\.github(/.*)?" path != null);
+            || (builtins.match ".*/\\.github(/.*)?" path != null)
+            # The measured syscall surveys, which `tests/sandbox.rs` reads back
+            # to assert that the seccomp allowlist covers every syscall the
+            # shipped binary was observed making (`SEC-018`, #355). Note the
+            # `harness` directory itself: a filter that excludes a directory
+            # never visits its children, which is why every rule above ends in
+            # `(/.*)?` rather than naming files. `harness/windows/captures` is
+            # deliberately left out — it is a megabyte of `.pcap` that nothing
+            # in the build reads.
+            || (builtins.match ".*/harness" path != null)
+            || (builtins.match ".*/harness/linux(/.*)?" path != null);
         };
 
       commonArgsFor = system:

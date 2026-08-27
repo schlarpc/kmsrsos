@@ -107,14 +107,28 @@ pub const FILESYSTEM_CAN_BE_DENIED: bool = cfg!(target_os = "linux");
 
 /// Whether this target can restrict which syscalls it may make.
 ///
-/// Linux, **and an architecture somebody has surveyed** (`SEC-018`, #355). A
-/// seccomp filter is written in syscall numbers, the numbers differ per
-/// architecture, and the list of which ones this process makes was measured on
-/// the two architectures this program ships to (`PKG-004`, #241) rather than
-/// derived. A third Linux architecture would compile — `libc` has its numbers
-/// — and nobody would have watched it serve a request under the filter, which
-/// is the one thing #355 says a syscall allowlist may not be built without. So
-/// it reports [`Applied::NotOnThisTarget`] there rather than shipping a guess.
+/// Linux, **and an architecture something has watched serve a request under
+/// the filter** (`SEC-018`, #355).
+///
+/// A seccomp filter is written in syscall numbers and the numbers differ per
+/// architecture, so this is not a property of the operating system alone. The
+/// two here are the two this program ships to (`PKG-004`, #241), and the
+/// evidence for each is not the same strength:
+///
+/// * **x86_64** is surveyed. `harness/linux/syscall-survey.sh` traced the
+///   shipped binary through every path #355 names, on both libcs, and the
+///   results are in `harness/linux/surveys/`.
+/// * **aarch64** is *tested* rather than surveyed. Nobody has run `strace` over
+///   this program on an aarch64 machine; what runs there is
+///   `a_sandboxed_driver_serves_activations_on_every_protocol_version`, on the
+///   `linux-aarch64` leg, natively, on every pull request — which answers "does
+///   the filter kill it" and not "what does it call". Closing that gap is
+///   `SEC-021` (#410), and it is the same shape of gap `PKG-022` (#385) closed
+///   for the ARM64 Windows binary.
+///
+/// A third Linux architecture would compile — `libc` has its numbers — and
+/// nothing would have watched it serve anything, so it reports
+/// [`Applied::NotOnThisTarget`] rather than shipping a guess.
 pub const SYSCALLS_CAN_BE_RESTRICTED: bool = cfg!(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")

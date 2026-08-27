@@ -28,6 +28,13 @@ regenerated rather than committed — see `surveys/.gitignore`.
 cover it. So a re-run that turns up something new is a failing test rather than a note somebody has to
 remember to act on.
 
+## Both surveys are x86_64
+
+There is no aarch64 survey, and that is a gap rather than an omission: `SEC-018` (#355) required both
+*libcs* and got them, and the second **architecture** this program ships to has been watched serve
+requests under the filter — `tests/sandbox.rs` runs natively on the `linux-aarch64` leg — without
+anybody tracing what it calls. Running this script there is `SEC-021` (#410).
+
 ## What the surveys are, and what they are not
 
 They are a **floor**. The two checked in are the same program, driven through the same requests, on
