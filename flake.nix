@@ -674,34 +674,81 @@
       # (`OS-032`, #376).
       linuxDeltaVariants = {
         x86_64 = {
+          # The NIC drivers the `OS-025` (#342) matrix claims on this
+          # architecture, every one of them asked in the **disable**
+          # direction — which is `OS-038` (#391), and is not a style choice.
+          #
+          # These are all in the checked-in allowlist, so an `enable` variant
+          # turns on what is already on: `olddefconfig` produces a
+          # configuration byte-identical to the baseline and the report prints
+          # a delta of exactly zero. Six of them sat here doing that, next to
+          # comments in `os/linux/config.nix` quoting real positive numbers
+          # taken by `OS-025` at the moment each driver was *added*, when the
+          # baseline did not contain it. The numbers were right and
+          # unreproducible: running the command the file tells you to run
+          # printed zeros that contradicted them.
+          #
+          # Asked this way the delta is negative and is the thing a shipped
+          # configuration can act on — what this driver costs to keep, the
+          # `OS-023` (#339) direction the aarch64 list below already used.
+          #
+          # Each list is the enable list reversed rather than the vendor gate
+          # alone. `olddefconfig` would drop a driver whose vendor menu went
+          # away, but naming both makes the variant say what it prices without
+          # depending on that.
+
           # Proxmox's "VMware vmxnet3" dropdown entry, and the default NIC
           # for a modern Linux guest on ESXi and Workstation.
-          # One symbol, not two: there is no `NET_VENDOR_VMWARE` gate to open
-          # (`OS-034`, #382). The measurement is unchanged, which is what
-          # proves the entry that named one was inert.
-          vmxnet3 = [ "VMXNET3" ];
+          # One symbol, not two: there is no `NET_VENDOR_VMWARE` gate
+          # (`OS-034`, #382).
+          vmxnet3 = { disable = [ "VMXNET3" ]; };
           # Proxmox's "Realtek RTL8139" entry, and Xen HVM's default.
-          rtl8139 = [ "NET_VENDOR_REALTEK" "8139CP" "8139TOO" ];
+          rtl8139 = { disable = [ "8139CP" "8139TOO" "NET_VENDOR_REALTEK" ]; };
           # VirtualBox's older adapter choices.
-          pcnet32 = [ "NET_VENDOR_AMD" "PCNET32" ];
+          pcnet32 = { disable = [ "PCNET32" "NET_VENDOR_AMD" ]; };
           # Hyper-V Generation 1's "Legacy Network Adapter", a DEC 21140.
-          tulip = [ "NET_VENDOR_DEC" "NET_TULIP" "TULIP" ];
+          tulip = { disable = [ "TULIP" "NET_TULIP" "NET_VENDOR_DEC" ]; };
           # EC2 Nitro (`OS-027`, #344).
-          ena = [ "NET_VENDOR_AMAZON" "ENA_ETHERNET" ];
+          ena = { disable = [ "ENA_ETHERNET" "NET_VENDOR_AMAZON" ]; };
           # Hyper-V and Azure. The one item `OS-025` calls "genuinely
           # large", and the reason this output exists rather than an
           # estimate in a comment.
-          hyperv = [ "HYPERV" "HYPERV_NET" "HYPERV_TIMER" ];
-          # Xen PV networking on XCP-ng and Citrix Hypervisor.
+          hyperv = { disable = [ "HYPERV_NET" "HYPERV_TIMER" "HYPERV" ]; };
+          # All six at once, because two drivers sharing a vendor gate pay for
+          # it once and the total is therefore not the sum of the rows above.
+          # `os/linux/config.nix` quotes that aggregate, so it has to be
+          # reproducible rather than arithmetic somebody did by hand.
+          no-emulated-nics = {
+            disable = [
+              "VMXNET3"
+              "8139CP" "8139TOO" "NET_VENDOR_REALTEK"
+              "PCNET32" "NET_VENDOR_AMD"
+              "TULIP" "NET_TULIP" "NET_VENDOR_DEC"
+              "ENA_ETHERNET" "NET_VENDOR_AMAZON"
+              "HYPERV_NET" "HYPERV_TIMER" "HYPERV"
+            ];
+          };
+
+          # Xen PV networking on XCP-ng and Citrix Hypervisor. The one driver
+          # variant here still asked in the enable direction, and the reason is
+          # that it is the only one **not** in the allowlist: `OS-025` declined
+          # it on this measurement, so what there is to price is what putting
+          # it back would cost. A `disable` variant would turn off what is
+          # already off and report zero.
           xen = [ "XEN" "XEN_NETDEV_FRONTEND" ];
+
           # `OS-023` (#339) asks in the other direction: what does something
           # already in the allowlist cost to *keep*? A negative delta is the
           # saving available if it were removed.
           no-smp = { disable = [ "SMP" ]; };
-          no-elf-core = { disable = [ "ELF_CORE" ]; };
           no-seccomp = { disable = [ "SECCOMP" ]; };
           no-ipv6 = { disable = [ "IPV6" ]; };
           no-packet = { disable = [ "PACKET" ]; };
+
+          # There is no `no-elf-core`. `ELF_CORE` was inert and `OS-034` (#382)
+          # took it out of the allowlist, so disabling it disabled nothing and
+          # the row read zero — the same "the question was not asked" zero as
+          # `no-smp` on aarch64 (`OS-038`, #391).
 
           # `OS-035` (#383): the 8250 variants this kernel no longer builds —
           # the two PCIe card families and the PnP bus named in `common`, plus

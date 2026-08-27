@@ -165,10 +165,13 @@ let
       # This list used to say hv_netvsc "drags in the whole VMBus stack, which is
       # not a driver-sized cost". That comment is superseded twice over.
       #
-      # It is wrong on the facts. Measured: **+40 KiB**, less than twice a plain
-      # PCI driver and a sixth of what the Xen paravirt stack costs. The estimate
-      # was never taken on a built image, which is what `.#linux-deltas` now
-      # exists to prevent.
+      # It is wrong on the facts. Measured: **-36 KiB** to keep on x86, less than
+      # twice a plain PCI driver and a quarter of what the Xen paravirt stack
+      # costs. The estimate was never taken on a built image, which is what
+      # `.#linux-deltas` now exists to prevent — and the number is negative
+      # because the variant that produces it asks what this costs to keep
+      # (`OS-038`, #391), which is the only direction a driver already in the
+      # list can be priced in.
       #
       # And it was answering the wrong question. Hyper-V Generation 2 has **no
       # emulated NIC at all** — there is no PCI device to fall back to — so on
@@ -348,11 +351,14 @@ let
 
       # `OS-025` (#342): the Xen *paravirt* path, declined on the measurement.
       #
-      # `XEN` + `XEN_NETDEV_FRONTEND` costs **+148 KiB** — 6 % of the whole
-      # kernel, and 3.7 times what VMBus costs — because it is xenbus, grant
-      # tables and event channels rather than a driver. What it buys is better
-      # throughput on XCP-ng and Citrix Hypervisor, whose *default* emulated NIC
-      # is RTL8139 and therefore already works for +12 KiB.
+      # `XEN` + `XEN_NETDEV_FRONTEND` costs **+140 KiB** — 6 % of the whole
+      # kernel, and 3.9 times what VMBus costs — because it is xenbus, grant
+      # tables and event channels rather than a driver. This is one of the two
+      # driver variants still asked in the *enable* direction, and legitimately
+      # so: it is not in the list, so what there is to price is what putting it
+      # back would cost (`OS-038`, #391). What it buys is better throughput on
+      # XCP-ng and Citrix Hypervisor, whose *default* emulated NIC is RTL8139 and
+      # therefore already works for the 8 KiB that driver costs to keep.
       #
       # A host that answers one 384-byte request per client per few hours does not
       # need the faster path, so this is the one row of the matrix taken by the
@@ -390,16 +396,33 @@ let
         # `nix build .#linux-deltas` to reproduce the numbers, which are taken on
         # the built bzImage with the initramfs held constant.
         #
-        #   vmxnet3   +24 KiB   VMware ESXi and Workstation's default for a modern
-        #                       Linux guest; Proxmox's "VMware vmxnet3" entry
-        #   8139cp    +12 KiB   Proxmox's "Realtek RTL8139" entry, and the default
-        #   8139too             emulated NIC on Xen HVM (XCP-ng, Citrix)
-        #   pcnet32   +12 KiB   VirtualBox's older adapter choices
-        #   tulip     +16 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
-        #                       which is a DEC 21140
+        # **Negative, and that is the direction the command asks in** (`OS-038`,
+        # #391). These drivers are in this list, so the question a shipped
+        # configuration can act on is what each costs to *keep*, and a variant
+        # that enabled what is already enabled produced a config identical to the
+        # baseline and a delta of exactly zero. The numbers here used to be
+        # positive because `OS-025` (#342) took them at the moment each driver was
+        # added, when the baseline did not contain it — right when written, and
+        # not reproducible by running the command this comment names.
         #
-        # All of them together with `ena`: **+120 KiB**, 2 364 416 -> 2 487 296.
-        # Less than the sum, because two drivers sharing a vendor gate pay for it
+        #   vmxnet3   -20 KiB   VMware ESXi and Workstation's default for a modern
+        #                       Linux guest; Proxmox's "VMware vmxnet3" entry
+        #   8139cp    -8 KiB    Proxmox's "Realtek RTL8139" entry, and the default
+        #   8139too             emulated NIC on Xen HVM (XCP-ng, Citrix)
+        #   pcnet32   -8 KiB    VirtualBox's older adapter choices
+        #   tulip     -12 KiB   Hyper-V Generation 1's "Legacy Network Adapter",
+        #                       which is a DEC 21140
+        #   ena       -24 KiB   EC2 Nitro (`OS-027`, #344); in `common`, priced
+        #                       here because this is where the table is
+        #   hv_netvsc -36 KiB   Hyper-V and Azure; likewise `common`
+        #
+        # All six together — `no-emulated-nics` — **-116 KiB**,
+        # 2 442 240 -> 2 323 456. *More* than the sum of the rows, which is -108
+        # KiB, and the asymmetry is the reason the aggregate is measured rather
+        # than added up: removing the last user of a shared helper takes the
+        # helper with it, and no single row can show that. Asked in the enable
+        # direction the same set gave a number smaller than its sum, for the
+        # mirror-image reason — two drivers sharing a vendor gate paid for it
         # once.
         #
         # This whole group is x86 as of `OS-032` (#376), and the reason is the
@@ -490,7 +513,14 @@ let
     # on the other architecture is not one. Everything below is
     # `.#linux-deltas` on aarch64 with the initramfs held constant, against a
     # 2 740 736-byte `vmlinuz.efi` baseline — so these are the costs of the
-    # entries that live in `common` above, priced on this target:
+    # entries that live in `common` above, priced on this target.
+    #
+    # The three driver rows are **magnitudes**, and the command prints them as
+    # negative deltas: those variants are `{ disable = … }`, because the drivers
+    # are in the list and the answerable question is what each costs to keep
+    # (`OS-023`, #339). The two rows below them that are marked `+` are the
+    # enable direction, because those symbols are *not* in the list. `OS-038`
+    # (#391) is where reading a sign as a direction stopped being optional.
     #
     #   e1000 + e1000e   +100 KiB   Proxmox's Intel entries, and what Parallels
     #                               and Fusion present on Apple Silicon
