@@ -428,6 +428,17 @@ const X86_64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         Absence::TurnedOff,
         "OS-037: a debug-message option in a shipped kernel",
     ),
+    // `OS-036` (#389). Off here because Kconfig's default is `!X86` rather
+    // than because anybody said so, which is why it is asserted: this is the
+    // half of the symmetry that costs nothing to keep and would otherwise go
+    // unnoticed if a future kernel changed that default. The aarch64 table
+    // above carries the same row for the opposite reason — there it took a
+    // decision and a Graviton instance.
+    (
+        "SERIAL_8250_16550A_VARIANTS",
+        Absence::TurnedOff,
+        "OS-036: both kernels agree, and now say so",
+    ),
     (
         "SERIAL_8250_LPSS",
         Absence::TurnedOff,
@@ -626,6 +637,16 @@ const AARCH64_MUST_BE_ABSENT: &[(&str, Absence, &str)] = &[
         "SERIAL_8250_PNP",
         Absence::TurnedOff,
         "OS-035: Graviton's 16550A is a PCI device, not a PnP one",
+    ),
+    // `OS-036` (#389). The probe for 16550A *variants*, whose Kconfig default
+    // is `!X86` — so it was on here, off there, and neither was a decision.
+    // Nothing in this architecture's matrix is a variant: QEMU `virt` and
+    // Proxmox VE for arm64 present a PL011, and Graviton's port is a plain
+    // 16550A, confirmed on an instance with this option off.
+    (
+        "SERIAL_8250_16550A_VARIANTS",
+        Absence::TurnedOff,
+        "OS-036: nothing in the arm matrix is a 16550A variant",
     ),
     // There is no `PNP_DEBUG_MESSAGES` row here yet, and the x86 table has
     // one. That asymmetry is temporary and tracked: the symbol belongs on the

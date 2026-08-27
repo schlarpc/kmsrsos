@@ -560,7 +560,7 @@ let
     # `OS-025` (#342) requires a measured number per driver, and a number taken
     # on the other architecture is not one. Everything below is
     # `.#linux-deltas` on aarch64 with the initramfs held constant, against a
-    # 2 740 736-byte `vmlinuz.efi` baseline — so these are the costs of the
+    # 2 732 544-byte `vmlinuz.efi` baseline — so these are the costs of the
     # entries that live in `common` above, priced on this target.
     #
     # The three driver rows are **magnitudes**, and the command prints them as
@@ -570,25 +570,37 @@ let
     # enable direction, because those symbols are *not* in the list. `OS-038`
     # (#391) is where reading a sign as a direction stopped being optional.
     #
-    #   e1000 + e1000e   +100 KiB   Proxmox's Intel entries, and what Parallels
+    #   e1000 + e1000e   -96 KiB    Proxmox's Intel entries, and what Parallels
     #                               and Fusion present on Apple Silicon
-    #   hv_netvsc        +40 KiB    Azure's Cobalt 100 instances
-    #   ena              +32 KiB    EC2 Graviton
-    #   KASLR            +4 KiB     the `RANDOMIZE_BASE` entry in `common`
+    #   hv_netvsc        -40 KiB    Azure's Cobalt 100 instances
+    #   ena              -28 KiB    EC2 Graviton
+    #   KASLR            -4 KiB     the `RANDOMIZE_BASE` entry in `common`
     #
-    # And two numbers that decided something rather than merely reporting:
+    # And three numbers that decided something rather than merely reporting:
     #
-    #   virtio-gpu       +12 KiB    **not taken.** A `virt` machine with a
+    #   virtio-gpu       +16 KiB    **not taken.** A `virt` machine with a
     #                               virtio GPU instead of a `ramfb` loses the
     #                               EFI framebuffer at ExitBootServices, and
     #                               `simpledrm` has nothing to take over. Cheap,
     #                               but nothing observed needs it yet; the
     #                               measurement is kept so the question can be
     #                               settled with a number when it is asked.
-    #   no IPv6          -156 KiB   the largest saving available and still
+    #   16550A variants  0 bytes    `OS-036` (#389). Below what this instrument
+    #                               resolves, which is why that entry was
+    #                               settled on the console it produces rather
+    #                               than on its size.
+    #   no IPv6          -152 KiB   the largest saving available and still
     #                               declined, for the reason `OS-023` (#339)
     #                               declines it on x86: clients reach this host
     #                               over whatever the network gives them.
+    #
+    # These were re-measured for `OS-036` (#389) on an EC2 Graviton instance
+    # against 6.12.94, and every one of them moved by a page or two from what
+    # this table used to say — the four driver rows are also **negative** here,
+    # because those variants ask what a driver in the list costs to keep and
+    # the command prints that as a negative delta (`OS-038`, #391). Nothing
+    # regressed; the numbers were taken against an older kernel and read as
+    # magnitudes. The x86 table's note on 4 KiB granularity applies here too.
     #
     # Compare the x86 table above and the shape is different: there the NIC
     # drivers are the interesting numbers, and here the interesting number is
@@ -658,8 +670,8 @@ let
         #
         # `CONFIG_EFI_ZBOOT` replaces the uncompressed `Image` with
         # `vmlinuz.efi`, a compressed PE that firmware runs directly. Measured
-        # with `.#linux-deltas`, initramfs held constant: **6 611 456 ->
-        # 2 740 736 bytes**, a saving of **3.69 MiB and 58 %**. On the shipped
+        # with `.#linux-deltas`, initramfs held constant: **6 543 872 ->
+        # 2 732 544 bytes**, a saving of **3.63 MiB and 58 %**. On the shipped
         # kernel, with the real initramfs inside it, 7 660 032 -> 3 760 640 —
         # which is what brings this image within 300 KiB of the x86 one instead
         # of twice its size. arm64 has no self-decompressing counterpart of
@@ -722,6 +734,50 @@ let
         # question that has a number: `perf-events` in `.#linux-deltas`, asked
         # in the enable direction because it is off in this baseline.
         "PERF_EVENTS"
+
+        # `OS-036` (#389): the 8250 driver's probe for 16550A *variants*.
+        #
+        # Its Kconfig default is `!X86`, so it is on here and off on the other
+        # kernel, and neither was a decision anybody took — the `OS-006` (#257)
+        # shape that `OS-035` (#383) spent an issue on and did not reach this
+        # symbol. What it buys is telling a 16650, a 16750, an NS16550A or an
+        # XScale UART apart from a plain 16550A. What it costs is what its own
+        # help says: "Doing so takes additional time at boot."
+        #
+        # Nothing in the matrix is a variant. QEMU `virt` and Proxmox VE for
+        # arm64 present a PL011, which is a different driver entirely; the one
+        # machine here with a 16550A is an EC2 Graviton instance, and it is a
+        # plain one.
+        #
+        # That last claim is the reason this took a machine rather than an
+        # argument, and it was checked on one:
+        #
+        #   * **Amazon Linux 2023's own arm64 kernel ships this option off** —
+        #     `# CONFIG_SERIAL_8250_16550A_VARIANTS is not set` in
+        #     `/boot/config-6.1.180` — and on a `c7g` instance it still says
+        #     `0000:00:01.0: ttyS0 at MMIO 0x80108000 (irq = 14, base_baud =
+        #     115200) is a 16550A`, with `uart:16550A` in
+        #     `/proc/tty/driver/serial`. Same type, same `base_baud`, same FIFO
+        #     entry in `uart_config[]`. The configuration under test is already
+        #     running in production on the machine in question.
+        #   * **This kernel, built with the option off, was booted on that
+        #     instance** by `kexec` and logged its whole start-up — `console`,
+        #     `listening`, DHCP, SNTP — to that same port.
+        #
+        # `drivers/tty/serial/8250/8250_port.c` says why that has to hold:
+        # `autoconfig_16550a()` sets `PORT_16550A` and `UART_CAP_FIFO` *before*
+        # the `IS_ENABLED` check and returns there when the option is off, and
+        # every probe below it only ever refines that to some other type. A
+        # port that reports `16550A` with the option on is a port for which
+        # every one of those probes failed, so turning them off cannot change
+        # what it settles on.
+        #
+        # Worth **0 bytes**, measured — `no-16550a-variants` in
+        # `.#linux-deltas`, which is below the 4 KiB the instrument can
+        # resolve. So this is not a size decision. It is boot time, and an
+        # asymmetry that arrived from a Kconfig default being replaced by one
+        # somebody took.
+        "SERIAL_8250_16550A_VARIANTS"
 
         # Not a security decision: this is how a Kconfig `choice` is pinned.
         # `ARM64_VA_BITS_48` above cannot win the choice while the default
