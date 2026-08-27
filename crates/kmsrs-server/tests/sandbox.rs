@@ -470,6 +470,24 @@ fn a_socket_that_could_be_created_before_the_sandbox_cannot_be_after() {
 /// the same kernel calls `epoll_wait` under glibc and `epoll_pwait` under musl,
 /// and a list cut down to one run's observations is a list that kills a process
 /// on the other libc.
+///
+/// # A survey is evidence about one architecture
+///
+/// Only surveys taken on the architecture this test is running on are compared,
+/// and the directory names are what say which. That is not tidiness: `arm64`
+/// has no `epoll_wait` at all — the number does not exist, `libc` has no
+/// constant for it, and the allowlist therefore cannot name it. Checking an
+/// x86_64 survey against an aarch64 filter asks whether a syscall that cannot
+/// be made is permitted, and the honest answer to that is not "no".
+///
+/// This test found that the hard way: it ran on the `linux-aarch64` leg and
+/// failed on `epoll_wait` while every test that actually *exercises* the filter
+/// on that architecture passed beside it.
+///
+/// The consequence is that on aarch64 this compares nothing, because there is
+/// no aarch64 survey — `SEC-021` (#410). The requirement that both libcs be
+/// surveyed is asserted regardless of where this runs, so that gap cannot widen
+/// quietly into no surveys at all.
 #[test]
 fn the_allowlist_covers_every_syscall_the_survey_measured() {
     if !kmsrs_server::sandbox::SYSCALLS_CAN_BE_RESTRICTED {
@@ -493,8 +511,13 @@ fn the_allowlist_covers_every_syscall_the_survey_measured() {
         "seccomp",
     ];
 
+    // `glibc-x86_64`, `musl-x86_64`: the libc and then the architecture, which
+    // is what makes a directory name enough to decide whether a survey is
+    // evidence about the machine this test is on.
+    let running = std::env::consts::ARCH;
     let mut checked = 0_usize;
-    let mut surveyed = 0_usize;
+    let mut here = 0_usize;
+    let mut on_x86_64 = 0_usize;
     let entries = std::fs::read_dir(&surveys)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", surveys.display()));
     for entry in entries {
@@ -503,7 +526,18 @@ fn the_allowlist_covers_every_syscall_the_survey_measured() {
         let Ok(text) = std::fs::read_to_string(&measured) else {
             continue;
         };
-        surveyed += 1;
+        let name = directory
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default()
+            .to_owned();
+        if name.ends_with("-x86_64") {
+            on_x86_64 = on_x86_64.saturating_add(1);
+        }
+        if !name.ends_with(&format!("-{running}")) {
+            continue;
+        }
+        here = here.saturating_add(1);
         for name in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             if before_the_filter.contains(&name) {
                 continue;
@@ -520,18 +554,31 @@ fn the_allowlist_covers_every_syscall_the_survey_measured() {
         }
     }
 
+    // Asserted wherever this runs, because it is a property of the repository
+    // rather than of the machine: #355 requires both libc targets, they differ,
+    // and a check over one of them is half the check. It is also what stops the
+    // architecture filter above from quietly reducing this test to nothing —
+    // rename the directories and this fires, on every architecture at once.
     assert!(
-        surveyed >= 2,
-        "found {surveyed} surveys under {}. #355 requires both libc targets — \
-         glibc and the musl static build — because they differ, and a check \
-         over one of them is half the check.",
+        on_x86_64 >= 2,
+        "found {on_x86_64} x86_64 surveys under {}, and #355 requires one per \
+         libc — glibc and the musl static build.",
         surveys.display()
     );
+
+    if here == 0 {
+        // No survey for this architecture, which is true of aarch64 and is
+        // `SEC-021` (#410). What covers the filter here instead is
+        // `a_sandboxed_driver_serves_activations_on_every_protocol_version`,
+        // which runs natively and dies if the allowlist is wrong.
+        return;
+    }
     assert!(
         checked >= 10,
-        "only {checked} measured syscalls were checked, which is fewer than a \
-         server that served hundreds of activations can have made. The survey \
-         files are probably not being parsed."
+        "{here} survey(s) for {running} were read and only {checked} measured \
+         syscalls were checked, which is fewer than a server that served \
+         hundreds of activations can have made. The files are probably not \
+         being parsed."
     );
 }
 

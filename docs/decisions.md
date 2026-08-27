@@ -807,7 +807,9 @@ is x86_64 and aarch64, the two this program ships to. x86_64 is *surveyed*, on b
 **tested and not surveyed**: nobody has run `strace` over this program on an aarch64 machine, and what
 runs there is the driver test, natively, on the `linux-aarch64` leg of every pull request — which
 answers "does the filter kill it" and not "what does it call". That distinction is the whole of
-`PKG-018` (#374) and it is stated rather than glossed; closing it is `SEC-021` (#410). A third Linux
+`PKG-018` (#374) and it is stated rather than glossed; closing it is `SEC-021` (#410). The answer to
+the question that leg *does* ask is yes: it reports the filter applying, serves a v4, a v5 and a v6
+activation through it, drains cleanly, and refuses `socket` with `EPERM`. A third Linux
 architecture would compile — `libc` has the numbers — and nothing would have watched it serve
 anything, so it reports `NotOnThisTarget` instead. An older kernel that refuses the filter outright
 reports `Failed` and the process goes on serving, for the same reason Landlock does.
