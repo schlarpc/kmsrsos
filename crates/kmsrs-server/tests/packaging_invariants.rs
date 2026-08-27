@@ -612,6 +612,74 @@ fn the_kubernetes_manifests_pin_one_replica_and_are_not_a_helm_chart() {
     );
 }
 
+/// `PKG-023` (#395): both Linux architectures have a static target, and
+/// something reads the artifact.
+///
+/// This is the half of the static-link claim a source-level test can make, and
+/// it exists because the half that was here made it for one architecture only.
+/// `the_container_image_is_non_root_static_and_probes_the_kms_port` names
+/// `x86_64-unknown-linux-musl` literally: delete
+/// `aarch64-unknown-linux-musl` from `rust-toolchain.toml` and every test in
+/// the workspace still passed, while `staticTargetFor` returned `null` for
+/// `aarch64-linux`, `staticEnvFor` returned `{ }`, and the arm leg shipped a
+/// glibc-linked binary under a `docs/releasing.md` row promising the opposite.
+///
+/// The other half — what the built file actually is — cannot be asked here at
+/// all. A test reads source out of the workspace; the question is about the
+/// output of a build. That is `ci/static-binaries.sh`, and what this asserts
+/// about it is that the two places obliged to run it still do.
+#[test]
+fn both_linux_architectures_are_static_and_something_reads_the_binary() {
+    let root = workspace_root();
+    let toolchain = read(&root, "rust-toolchain.toml");
+    let flake = read(&root, "flake.nix");
+    let release = read(&root, ".github/workflows/release.yml");
+
+    for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+        assert!(
+            toolchain.contains(target),
+            "{target} is not in rust-toolchain.toml, so that leg would build \
+             a dynamically linked binary and ship it as a static one \
+             (PKG-023, #395)"
+        );
+        assert!(
+            flake.contains(target),
+            "{target} is not named in flake.nix, so `staticTargetFor` cannot \
+             return it and that architecture gets no static build"
+        );
+    }
+
+    // `staticEnvFor` used to fail open: an unrecognised system produced an
+    // ordinary dynamic build, which is right for darwin and indistinguishable
+    // from it for a Linux system that ships artifacts.
+    assert!(
+        flake.contains("no static target for"),
+        "`staticEnvFor` no longer refuses a Linux system without a static \
+         target, so the failure is silent again (PKG-023, #395)"
+    );
+
+    // The script that reads the artifact, and both places obliged to run it:
+    // the flake check, which runs on every pull request, and the release job,
+    // which runs it over the files it is about to upload rather than over a
+    // store path — the `PKG-022` (#385) rule.
+    assert!(
+        root.join("ci/static-binaries.sh").is_file(),
+        "ci/static-binaries.sh is gone, so nothing reads a built binary \
+         (PKG-023, #395)"
+    );
+    assert!(
+        flake.contains("static-binaries ="),
+        "the `static-binaries` check is gone from flake.nix, so `nix flake \
+         check` no longer reads the artifact"
+    );
+    assert!(
+        release.contains("ci/static-binaries.sh"),
+        "release.yml no longer checks the binaries it uploads, so the only \
+         thing asserting the shipped file is static is a check over a \
+         different file (PKG-023, #395)"
+    );
+}
+
 /// `PKG-004` (#241) and `SEC-008` (#200): the image is two static binaries and
 /// says so in its own config.
 ///
