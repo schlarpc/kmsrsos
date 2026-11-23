@@ -118,7 +118,7 @@ windows-service = "=0.8.1"
 # put a C dependency in the one shipped crate that has none.
 seccompiler = "=0.5.0"
 
-rustix = { version = "=1.1.4", default-features = false, features = [
+rustix = { version = "=1.1.6", default-features = false, features = [
   # `mount` and `process`: mount(2) and waitpid(2) (`OS-021`, #337).
   # `fs`: mkdir(2), and open(2) for the /proc and /sys reads below. The
   #   whole-workspace ban on opening anything does not apply to this crate and
@@ -154,7 +154,7 @@ dhcproto = { version = "=0.15.0", default-features = false }
 # network rather than configuration (`CFG-001`, #166). Turning it off also drops
 # the macOS and Windows system-configuration crates, which this target has no
 # use for.
-hickory-resolver = { version = "=0.26.1", default-features = false, features = [
+hickory-resolver = { version = "=0.26.2", default-features = false, features = [
   "tokio",
 ] }
 
